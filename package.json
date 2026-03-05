@@ -1,0 +1,99 @@
+{
+  "name": "condukt",
+  "version": "0.1.0",
+  "description": "Composable AI agent workflow framework — execution, state, orchestration, runtimes, UI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/animeshkundu/condukt.git"
+  },
+  "keywords": [
+    "pipeline",
+    "workflow",
+    "agent",
+    "ai",
+    "flow",
+    "orchestration",
+    "ui",
+    "dashboard"
+  ],
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./state": {
+      "types": "./dist/state/index.d.ts",
+      "default": "./dist/state/index.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "default": "./dist/bridge/index.js"
+    },
+    "./runtimes/copilot": {
+      "types": "./dist/runtimes/copilot/index.d.ts",
+      "default": "./dist/runtimes/copilot/index.js"
+    },
+    "./runtimes/mock": {
+      "types": "./dist/runtimes/mock/index.d.ts",
+      "default": "./dist/runtimes/mock/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "default": "./dist/ui/index.js"
+    },
+    "./ui/core": {
+      "types": "./dist/ui/core/index.d.ts",
+      "default": "./dist/ui/core/index.js"
+    },
+    "./ui/graph": {
+      "types": "./dist/ui/graph/index.d.ts",
+      "default": "./dist/ui/graph/index.js"
+    },
+    "./theme": {
+      "types": "./dist/theme/index.d.ts",
+      "default": "./dist/theme/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "@xyflow/react": ">=12",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "@xyflow/react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.15.3",
+    "@types/react": "^19.2.14",
+    "@xyflow/react": "^12.10.1",
+    "clsx": "^2.1.1",
+    "jsdom": "^28.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "@testing-library/dom": "^10.4.1"
+  }
+}
