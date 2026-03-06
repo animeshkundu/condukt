@@ -14,7 +14,8 @@ import {
   Controls,
   MiniMap,
 } from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
+// Styles: consumers import 'condukt/ui/style.css' in their layout (see COMPOSITION_GUIDE.md).
+// We do NOT import CSS here — tsc can't process it, and runtime imports break webpack consumers.
 import type { ExecutionProjection, ProjectionNode, ProjectionEdge } from '../../src/types';
 import { NodeCard } from './NodeCard';
 import { FlowEdge } from './FlowEdge';
