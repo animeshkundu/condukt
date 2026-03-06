@@ -313,6 +313,7 @@ describe('scheduler', () => {
         ]),
         firedEdges: new Map([['B', new Set(['A'])]]),
         nodeStatuses: new Map([['A', 'completed']]),
+        loopIterations: new Map(),
       };
 
       const opts = mockRunOptions({ resumeFrom: resumeState });
@@ -511,6 +512,7 @@ describe('scheduler', () => {
         ]),
         firedEdges: new Map([['B', new Set(['A'])]]),
         nodeStatuses: new Map([['A', 'completed']]),
+        loopIterations: new Map(),
       };
 
       const frontier = computeFrontier(graph, state);

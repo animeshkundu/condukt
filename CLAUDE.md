@@ -19,9 +19,9 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 
 | File | Purpose |
 |------|---------|
-| `src/types.ts` | All type definitions: NodeFn, FlowGraph, ExecutionProjection, AgentRuntime |
-| `src/events.ts` | 15 execution events + 2 output events (discriminated unions) |
-| `src/scheduler.ts` | DAG walker: fan-in, parallel dispatch, per-node timeout, abort, resume |
+| `src/types.ts` | All type definitions: NodeFn, FlowGraph, EdgeTarget, LoopFallbackEntry, ExecutionProjection, AgentRuntime |
+| `src/events.ts` | 16 execution events + 2 output events (discriminated unions) |
+| `src/scheduler.ts` | Graph walker: fan-in, fan-out, bounded loop-back, parallel dispatch, per-node timeout, abort, resume |
 | `src/agent.ts` | LLM agent factory with GT-3 crash recovery, setup/teardown hooks |
 | `src/nodes.ts` | deterministic() + gate() factories, resolveGate() |
 | `src/verify.ts` | Iterative verification combinator |
@@ -38,7 +38,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 ## Commands
 
 ```bash
-npm test              # Run all tests (223 across 16 suites)
+npm test              # Run all tests (427 across 35 suites)
 npm run typecheck     # tsc --noEmit
 npm run build         # Build to dist/
 npm run clean         # Remove dist/
@@ -50,7 +50,7 @@ npm run clean         # Remove dist/
 2. **Zero `any` types** — use generic types, branded types, or explicit `unknown`
 3. **Readonly by default** — all interface fields are `readonly`
 4. **Discriminated unions for events** — every event has a `type` field
-5. **Tests must pass** — 233 tests across 17 suites, all must pass before commit
+5. **Tests must pass** — 427 tests across 35 suites, all must pass before commit
 6. **Plain text default** — output renderer defaults to plain text, ANSI is opt-in (ADR-001)
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
@@ -62,21 +62,25 @@ npm run clean         # Remove dist/
 |-------|------|-------|
 | Scheduler | `__tests__/scheduler.test.ts` | 12 |
 | Scheduler (comprehensive) | `__tests__/scheduler-comprehensive.test.ts` | 22 |
+| Fan-out | `__tests__/fan-out.test.ts` | 12 |
+| Loop-back | `__tests__/loop-back.test.ts` | 15 |
 | Agent | `__tests__/agent.test.ts` | 16 |
 | Nodes | `__tests__/nodes.test.ts` | 10 |
 | Verify | `__tests__/verify.test.ts` | 9 |
-| Reducer | `__tests__/reducer.test.ts` | 15 |
+| Reducer | `__tests__/reducer.test.ts` | 20 |
 | Storage | `__tests__/storage.test.ts` | 11 |
 | State Runtime | `__tests__/state-runtime.test.ts` | 8 |
 | Bridge | `__tests__/bridge.test.ts` | 9 |
-| Bridge (comprehensive) | `__tests__/bridge-comprehensive.test.ts` | 19 |
+| Bridge (comprehensive) | `__tests__/bridge-comprehensive.test.ts` | 29 |
 | Integration | `__tests__/integration.test.ts` | 7 |
 | Integration (comprehensive) | `__tests__/integration-comprehensive.test.ts` | 10 |
+| Integration (loops) | `__tests__/integration-loop.test.ts` | 7 |
 | Branch Coverage | `__tests__/branch-coverage.test.ts` | 35 |
 | Copilot Adapter | `__tests__/copilot-adapter.test.ts` | 5 |
 | NodePanel | `__tests__/node-panel.test.ts` | 24 |
 | MiniPipeline | `__tests__/mini-pipeline.test.ts` | 11 |
-| **Total** | **17 suites** | **233** |
+| Cycle-aware UI | `__tests__/ui/cycle-aware-ui.test.tsx` | 7 |
+| **Total** | **35 suites** | **427** |
 
 ## Architecture
 
@@ -87,8 +91,9 @@ Composition Layer (user code)
   |
   v
 Execution Layer (src/)
-  |  run(graph, options) — stateless DAG walker
-  |  emits: ExecutionEvent stream
+  |  run(graph, options) — graph walker (DAG + bounded cycles)
+  |  fan-out edges, loop-back with maxIterations + loopFallback (ADR-006)
+  |  emits: ExecutionEvent stream (16 types incl. node:reset)
   |
   v
 State Layer (state/)

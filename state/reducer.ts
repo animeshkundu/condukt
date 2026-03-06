@@ -33,6 +33,12 @@ export function createEmptyProjection(id: string, flowId?: string): ExecutionPro
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const MAX_COMPLETED_PATH = 200;
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -90,6 +96,7 @@ export function reduce(
         model: n.model,
         status: 'pending',
         attempt: 0,
+        iteration: 0,
         output: n.output,
       }));
       const edges: ProjectionEdge[] = event.graph.edges.map((e) => ({
@@ -147,11 +154,14 @@ export function reduce(
         finishedAt: event.ts,
         elapsedMs: event.elapsedMs,
       }));
+      const newPath = [...updated.graph.completedPath, event.nodeId];
       return {
         ...updated,
         graph: {
           ...updated.graph,
-          completedPath: [...updated.graph.completedPath, event.nodeId],
+          completedPath: newPath.length > MAX_COMPLETED_PATH
+            ? newPath.slice(-MAX_COMPLETED_PATH)
+            : newPath,
         },
       };
     }
@@ -196,11 +206,14 @@ export function reduce(
       }));
       // If not rejected, also add to completedPath
       if (resolvedStatus === 'completed') {
+        const newPath = [...updated.graph.completedPath, event.nodeId];
         return {
           ...updated,
           graph: {
             ...updated.graph,
-            completedPath: [...updated.graph.completedPath, event.nodeId],
+            completedPath: newPath.length > MAX_COMPLETED_PATH
+              ? newPath.slice(-MAX_COMPLETED_PATH)
+              : newPath,
           },
         };
       }
@@ -244,6 +257,17 @@ export function reduce(
         metadata: { ...state.metadata, [event.key]: merged },
       };
     }
+
+    case 'node:reset':
+      return updateNode(state, event.nodeId, (n) => ({
+        ...n,
+        status: 'pending',
+        iteration: event.iteration,
+        action: undefined,
+        finishedAt: undefined,
+        elapsedMs: undefined,
+        error: undefined,
+      }));
 
     default: {
       // Exhaustiveness check — if this errors, a new event type was added without a case

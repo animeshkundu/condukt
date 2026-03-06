@@ -61,14 +61,31 @@ export interface ExecutionContext {
 }
 
 // ---------------------------------------------------------------------------
+// Fan-out / loop-back
+// ---------------------------------------------------------------------------
+
+/** An edge target: single node or fan-out to multiple nodes. */
+export type EdgeTarget = string | readonly string[];
+
+/** Configuration for a loop-back fallback when maxIterations is exceeded. */
+export interface LoopFallbackEntry {
+  readonly source: string;
+  readonly action: string;
+  readonly fallbackTarget: EdgeTarget;
+  readonly maxIterations?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Composition contract
 // ---------------------------------------------------------------------------
 
 /** A complete flow graph: nodes + edges + start. */
 export interface FlowGraph {
   readonly nodes: Readonly<Record<string, NodeEntry>>;
-  readonly edges: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  readonly edges: Readonly<Record<string, Readonly<Record<string, EdgeTarget>>>>;
   readonly start: readonly string[];
+  readonly maxIterations?: number;
+  readonly loopFallback?: Readonly<Record<string, LoopFallbackEntry>>;
 }
 
 /** A node in the flow graph. */
@@ -108,6 +125,7 @@ export interface ResumeState {
   readonly completedNodes: Map<string, { action: string; finishedAt: number }>;
   readonly firedEdges: Map<string, Set<string>>; // target → sources that routed there
   readonly nodeStatuses: Map<string, string>;
+  readonly loopIterations: Map<string, number>; // source:action → iteration count
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +138,11 @@ export interface AgentRuntime {
   readonly name: string;
 }
 
+export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface SessionConfig {
   readonly model: string;
+  readonly thinkingBudget?: ThinkingBudget;
   readonly cwd: string;
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
@@ -156,6 +177,7 @@ export interface AgentConfig {
   readonly output?: string;
   readonly reads?: readonly string[];
   readonly model?: string;
+  readonly thinkingBudget?: ThinkingBudget;
   readonly isolation?: boolean;
   readonly timeout?: number;         // seconds, default 3600
   readonly heartbeatTimeout?: number; // seconds, default 120
@@ -200,6 +222,7 @@ export interface ProjectionNode {
   readonly finishedAt?: number;
   readonly elapsedMs?: number;
   readonly attempt: number;
+  readonly iteration?: number;
   readonly error?: string;
   readonly output?: string;
   readonly gateData?: Record<string, unknown>;

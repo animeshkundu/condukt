@@ -63,6 +63,11 @@ function NodeCardInner({ data, selected }: NodeProps) {
           <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
             {node.model && <span>{node.model}</span>}
             {node.elapsedMs && <span>{formatElapsed(node.elapsedMs)}</span>}
+            {(node.iteration ?? 0) > 0 && (
+              <span className="px-1 py-0.5 rounded bg-purple-500/20 text-purple-400 font-medium">
+                iter {node.iteration}
+              </span>
+            )}
             {node.attempt > 1 && <span>×{node.attempt}</span>}
           </div>
         </div>

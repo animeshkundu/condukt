@@ -1,6 +1,6 @@
 {
   "name": "condukt",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Composable AI agent workflow framework — execution, state, orchestration, runtimes, UI",
   "license": "MIT",
   "repository": {
@@ -55,13 +55,14 @@
     "./theme": {
       "types": "./dist/theme/index.d.ts",
       "default": "./dist/theme/index.js"
-    }
+    },
+    "./ui/style.css": "./dist/ui/style.css"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('fs').cpSync('node_modules/@xyflow/react/dist/style.css','dist/ui/style.css')\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

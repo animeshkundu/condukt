@@ -100,6 +100,10 @@ function createDefaultCommandFactory(options: SubprocessBackendOptions): Command
       '--no-alt-screen',      // Don't use alternate screen buffer (we capture stdout)
     ];
 
+    if (config.thinkingBudget) {
+      args.push('--thinking-budget', config.thinkingBudget);
+    }
+
     if (config.addDirs.length === 0) {
       // Isolation mode: no extra directories
     } else {

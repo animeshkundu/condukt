@@ -154,8 +154,9 @@ export function createBridge(
       throw new Error(`Cannot resume execution in '${projection.status}' status`);
     }
 
-    // Build ResumeState from projection
-    const resumeState = buildResumeState(projection);
+    // Build ResumeState from projection + events (for loopIterations reconstruction)
+    const events = stateRuntime.readEvents(executionId);
+    const resumeState = buildResumeState(projection, events);
     const frontier = computeFrontier(graph, resumeState);
 
     if (frontier.length === 0) return null;
@@ -235,7 +236,8 @@ export function createBridge(
     });
 
     // Build ResumeState: mark this node + downstream as pending
-    const resumeState = buildResumeState(projection);
+    const retryEvents = stateRuntime.readEvents(executionId);
+    const resumeState = buildResumeState(projection, retryEvents);
     // Remove the retried node and its downstream from completedNodes
     resetNodeAndDownstream(resumeState, nodeId, graph);
 
@@ -368,7 +370,10 @@ export function createBridge(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildResumeState(projection: ExecutionProjection): ResumeState {
+function buildResumeState(
+  projection: ExecutionProjection,
+  events?: readonly ExecutionEvent[],
+): ResumeState {
   const completedNodes = new Map<string, { action: string; finishedAt: number }>();
   const firedEdges = new Map<string, Set<string>>();
   const nodeStatuses = new Map<string, string>();
@@ -393,7 +398,35 @@ function buildResumeState(projection: ExecutionProjection): ResumeState {
     }
   }
 
-  return { completedNodes, firedEdges, nodeStatuses };
+  // Reconstruct loopIterations from node:reset events.
+  // The scheduler keys are source:action, but NodeResetEvent doesn't carry the action.
+  // Cross-reference with edge:traversed events to reconstruct the action.
+  const loopIterations = new Map<string, number>();
+  if (events) {
+    // Build a map of (source, target) → action from edge:traversed events
+    const edgeActions = new Map<string, string>();
+    for (const event of events) {
+      if (event.type === 'edge:traversed') {
+        edgeActions.set(`${event.source}:${event.target}`, event.action);
+      }
+    }
+
+    for (const event of events) {
+      if (event.type === 'node:reset') {
+        // Find the action for this source→target edge
+        const action = edgeActions.get(`${event.sourceNodeId}:${event.nodeId}`);
+        if (action) {
+          const key = `${event.sourceNodeId}:${action}`;
+          const current = loopIterations.get(key) ?? 0;
+          if (event.iteration > current) {
+            loopIterations.set(key, event.iteration);
+          }
+        }
+      }
+    }
+  }
+
+  return { completedNodes, firedEdges, nodeStatuses, loopIterations };
 }
 
 function resetNodeAndDownstream(
@@ -417,13 +450,16 @@ function resetNodeAndDownstream(
     const edges = graph.edges[current];
     if (!edges) continue;
 
-    for (const target of Object.values(edges)) {
-      if (target !== 'end' && !visited.has(target)) {
-        (state.completedNodes as Map<string, unknown>).delete(target);
-        (state.nodeStatuses as Map<string, string>).set(target, 'pending');
-        // Also clear fired edges to this target
-        (state.firedEdges as Map<string, Set<string>>).delete(target);
-        queue.push(target);
+    for (const edgeTarget of Object.values(edges)) {
+      const targets = Array.isArray(edgeTarget) ? edgeTarget : [edgeTarget];
+      for (const target of targets) {
+        if (target !== 'end' && !visited.has(target)) {
+          (state.completedNodes as Map<string, unknown>).delete(target);
+          (state.nodeStatuses as Map<string, string>).set(target, 'pending');
+          // Also clear fired edges to this target
+          (state.firedEdges as Map<string, Set<string>>).delete(target);
+          queue.push(target);
+        }
       }
     }
   }

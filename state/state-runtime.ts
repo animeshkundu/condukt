@@ -90,6 +90,10 @@ export class StateRuntime {
     return this.storage.readArtifact(execId, nodeId, name);
   }
 
+  readEvents(execId: string): ExecutionEvent[] {
+    return this.storage.readEvents(execId);
+  }
+
   // -------------------------------------------------------------------------
   // Recovery
   // -------------------------------------------------------------------------

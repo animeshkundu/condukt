@@ -14,9 +14,9 @@ function makeProjection(overrides: Partial<ExecutionProjection> = {}): Execution
     params: {},
     graph: {
       nodes: [
-        { id: 'n1', displayName: 'Step 1', nodeType: 'agent', status: 'completed', attempt: 1 },
-        { id: 'n2', displayName: 'Step 2', nodeType: 'agent', status: 'running', attempt: 1 },
-        { id: 'n3', displayName: 'Step 3', nodeType: 'agent', status: 'pending', attempt: 1 },
+        { id: 'n1', displayName: 'Step 1', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
+        { id: 'n2', displayName: 'Step 2', nodeType: 'agent', status: 'running', attempt: 1, iteration: 0 },
+        { id: 'n3', displayName: 'Step 3', nodeType: 'agent', status: 'pending', attempt: 1, iteration: 0 },
       ],
       edges: [],
       activeNodes: ['n2'],
@@ -48,8 +48,8 @@ describe('FlowStatusBar', () => {
       status: 'completed',
       graph: {
         nodes: [
-          { id: 'n1', displayName: 'S1', nodeType: 'agent', status: 'completed', attempt: 1 },
-          { id: 'n2', displayName: 'S2', nodeType: 'agent', status: 'completed', attempt: 1 },
+          { id: 'n1', displayName: 'S1', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
+          { id: 'n2', displayName: 'S2', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
         ],
         edges: [],
         activeNodes: [],
@@ -92,8 +92,8 @@ describe('FlowStatusBar', () => {
       status: 'failed',
       graph: {
         nodes: [
-          { id: 'n1', displayName: 'S1', nodeType: 'agent', status: 'completed', attempt: 1 },
-          { id: 'n2', displayName: 'S2', nodeType: 'agent', status: 'failed', attempt: 1 },
+          { id: 'n1', displayName: 'S1', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
+          { id: 'n2', displayName: 'S2', nodeType: 'agent', status: 'failed', attempt: 1, iteration: 0 },
         ],
         edges: [],
         activeNodes: [],
@@ -108,7 +108,7 @@ describe('FlowStatusBar', () => {
     const proj = makeProjection({
       graph: {
         nodes: [
-          { id: 'n1', displayName: 'S1', nodeType: 'gate', status: 'gated', attempt: 1 },
+          { id: 'n1', displayName: 'S1', nodeType: 'gate', status: 'gated', attempt: 1, iteration: 0 },
         ],
         edges: [],
         activeNodes: ['n1'],

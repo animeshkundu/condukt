@@ -5,7 +5,7 @@ import { useAutoSelectNode } from '../../ui/hooks/useAutoSelectNode';
 import type { ProjectionNode } from '../../src/types';
 
 function makeNode(id: string, status: string): ProjectionNode {
-  return { id, displayName: id, nodeType: 'agent', status, attempt: 1 };
+  return { id, displayName: id, nodeType: 'agent', status, attempt: 1, iteration: 0 };
 }
 
 describe('useAutoSelectNode', () => {

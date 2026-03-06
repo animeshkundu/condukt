@@ -347,6 +347,182 @@ describe('reducer', () => {
     });
   });
 
+  describe('node:reset', () => {
+    it('resets status to pending and sets iteration', () => {
+      // Start and complete node A
+      let state = reduce(withRunStarted(), {
+        type: 'node:started',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        ts: 2000,
+      });
+      state = reduce(state, {
+        type: 'node:completed',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        action: 'diverged',
+        elapsedMs: 1000,
+        ts: 3000,
+      });
+      // Reset node A for loop iteration 1
+      state = reduce(state, {
+        type: 'node:reset',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        reason: 'loop-back',
+        iteration: 1,
+        sourceNodeId: 'C',
+        ts: 3500,
+      });
+      const nodeA = state.graph.nodes.find((n) => n.id === 'A')!;
+      expect(nodeA.status).toBe('pending');
+      expect(nodeA.iteration).toBe(1);
+      // attempt unchanged — iteration is separate from retry
+      expect(nodeA.attempt).toBe(1);
+      expect(nodeA.action).toBeUndefined();
+      expect(nodeA.finishedAt).toBeUndefined();
+      expect(nodeA.elapsedMs).toBeUndefined();
+      expect(nodeA.error).toBeUndefined();
+    });
+
+    it('node:started after node:reset increments attempt (iteration stays)', () => {
+      let state = reduce(withRunStarted(), {
+        type: 'node:started',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        ts: 2000,
+      });
+      state = reduce(state, {
+        type: 'node:completed',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        action: 'diverged',
+        elapsedMs: 500,
+        ts: 2500,
+      });
+      // Reset
+      state = reduce(state, {
+        type: 'node:reset',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        reason: 'loop-back',
+        iteration: 1,
+        sourceNodeId: 'C',
+        ts: 3000,
+      });
+      // Start again after reset
+      state = reduce(state, {
+        type: 'node:started',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        ts: 3100,
+      });
+      const nodeA = state.graph.nodes.find((n) => n.id === 'A')!;
+      expect(nodeA.status).toBe('running');
+      expect(nodeA.attempt).toBe(2); // 0 -> started(1) -> reset(1) -> started(2)
+      expect(nodeA.iteration).toBe(1); // unchanged by node:started
+    });
+
+    it('completedPath does not shrink on reset (append-only)', () => {
+      let state = reduce(withRunStarted(), {
+        type: 'node:started',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        ts: 2000,
+      });
+      state = reduce(state, {
+        type: 'node:completed',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        action: 'diverged',
+        elapsedMs: 500,
+        ts: 2500,
+      });
+      expect(state.graph.completedPath).toEqual(['A']);
+
+      // Reset — completedPath must NOT remove A
+      state = reduce(state, {
+        type: 'node:reset',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        reason: 'loop-back',
+        iteration: 1,
+        sourceNodeId: 'C',
+        ts: 3000,
+      });
+      expect(state.graph.completedPath).toEqual(['A']);
+    });
+
+    it('multiple resets increment iteration correctly each time', () => {
+      let state = withRunStarted();
+      for (let i = 0; i < 3; i++) {
+        state = reduce(state, {
+          type: 'node:started',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          ts: 2000 + i * 1000,
+        });
+        state = reduce(state, {
+          type: 'node:completed',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          action: 'diverged',
+          elapsedMs: 100,
+          ts: 2100 + i * 1000,
+        });
+        state = reduce(state, {
+          type: 'node:reset',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          reason: 'loop-back',
+          iteration: i + 1,
+          sourceNodeId: 'C',
+          ts: 2200 + i * 1000,
+        });
+      }
+      const nodeA = state.graph.nodes.find((n) => n.id === 'A')!;
+      expect(nodeA.iteration).toBe(3);
+      expect(nodeA.status).toBe('pending');
+      expect(nodeA.attempt).toBe(3); // started 3 times
+    });
+
+    it('completedPath capped at 200 entries', () => {
+      let state = withRunStarted();
+      // Pump 210 node:completed events for node A (simulating many loop iterations)
+      for (let i = 0; i < 210; i++) {
+        state = reduce(state, {
+          type: 'node:started',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          ts: 2000 + i * 100,
+        });
+        state = reduce(state, {
+          type: 'node:completed',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          action: 'default',
+          elapsedMs: 10,
+          ts: 2050 + i * 100,
+        });
+        if (i < 209) {
+          state = reduce(state, {
+            type: 'node:reset',
+            executionId: 'exec-1',
+            nodeId: 'A',
+            reason: 'loop-back',
+            iteration: i + 1,
+            sourceNodeId: 'C',
+            ts: 2060 + i * 100,
+          });
+        }
+      }
+      expect(state.graph.completedPath).toHaveLength(200);
+      // The last entry should be the most recent completion
+      expect(state.graph.completedPath[199]).toBe('A');
+      // The first 10 entries were dropped (210 - 200 = 10 dropped from front)
+    });
+  });
+
   describe('replayEvents — full pipeline', () => {
     it('sequence of events produces correct final projection', () => {
       const events: ExecutionEvent[] = [

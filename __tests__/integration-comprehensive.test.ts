@@ -445,6 +445,7 @@ describe('integration — resume after failure', () => {
       completedNodes: new Map([['A', { action: 'default', finishedAt: 1000 }]]),
       firedEdges: new Map([['B', new Set(['A'])]]),
       nodeStatuses: new Map([['A', 'completed']]),
+      loopIterations: new Map(),
     };
 
     const opts: RunOptions = {

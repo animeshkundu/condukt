@@ -13,6 +13,7 @@ function makeNode(overrides: Partial<ProjectionNode> = {}): ProjectionNode {
     nodeType: 'gate',
     status: 'gated',
     attempt: 1,
+    iteration: 0,
     ...overrides,
   };
 }

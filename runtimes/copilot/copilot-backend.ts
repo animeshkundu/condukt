@@ -10,8 +10,10 @@
  */
 
 export interface SessionConfig {
-  /** Model to use: "claude-opus-4.6", "gpt-5.3-codex", etc. */
+  /** Model to use: "claude-opus-4.6", "gpt-5.4", etc. */
   readonly model: string;
+  /** Thinking budget level for extended thinking models */
+  readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh';
   /** Working directory for the agent (repo root) */
   readonly cwd: string;
   /** Additional directories the agent can access. [] = isolation (step 2a) */

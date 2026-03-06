@@ -1,8 +1,9 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ExecutionProjection, ProjectionNode, ProjectionEdge } from '../../src/types';
 import { STATUS_COLORS } from './node-panel/types';
+import { detectBackEdges } from './FlowGraph';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -31,8 +32,14 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
   miniNodes: MiniNode[];
   maxLayer: number;
   maxRow: number;
+  backEdgeKeys: Set<string>;
 } {
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const nodeIds = nodes.map(n => n.id);
+
+  // Detect back-edges before Kahn's
+  const backEdgeKeys = detectBackEdges(nodeIds, edges);
+
   const inDegree = new Map<string, number>();
   const adj = new Map<string, string[]>();
 
@@ -41,7 +48,7 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
     adj.set(n.id, []);
   }
   for (const e of edges) {
-    if (e.target !== 'end' && nodeMap.has(e.target)) {
+    if (e.target !== 'end' && nodeMap.has(e.target) && !backEdgeKeys.has(`${e.source}:${e.target}`)) {
       adj.get(e.source)?.push(e.target);
       inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
     }
@@ -81,71 +88,156 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
   }
 
   const maxLayer = Math.max(0, ...[...layers.values()]);
-  return { miniNodes, maxLayer, maxRow };
+  return { miniNodes, maxLayer, maxRow, backEdgeKeys };
 }
 
 // ---------------------------------------------------------------------------
 // Graph mode — compact SVG mini-DAG
 // ---------------------------------------------------------------------------
 
-function GraphMode({ projection, height = 32 }: { projection: ExecutionProjection; height: number }) {
-  const { miniNodes, maxLayer, maxRow } = useMemo(
+function GraphMode({ projection, height = 40 }: { projection: ExecutionProjection; height: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const filterId = useId();
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const measure = () => setContainerWidth(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const { miniNodes, maxLayer, maxRow, backEdgeKeys } = useMemo(
     () => computeMiniLayout(projection.graph.nodes, projection.graph.edges),
     [projection.graph.nodes, projection.graph.edges],
   );
 
-  const dotSize = 6;
-  const xGap = 16;
-  const yGap = 10;
-  const padding = 4;
-  const width = (maxLayer + 1) * (dotSize + xGap) + padding * 2;
-  const svgHeight = Math.max(height, (maxRow + 1) * (dotSize + yGap) + padding * 2);
+  // --- Pill layout constants ---
+  const pillH = 18;
+  const pillR = pillH / 2;
+  const pillGap = 5;          // gap between stacked pills in same column
+  const colPad = 16;           // horizontal padding from edges
+  const hasBackEdges = backEdgeKeys.size > 0;
 
-  const nodePos = new Map<string, { x: number; y: number }>();
+  // Column positions
+  const effectiveWidth = containerWidth || 200;
+  const colWidth = maxLayer > 0
+    ? (effectiveWidth - colPad * 2) / (maxLayer + 1)
+    : effectiveWidth - colPad * 2;
+  const pillW = Math.min(colWidth * 0.55, 60); // pill width: 55% of column or max 60px
+  const connGap = colWidth - pillW;             // horizontal gap between pill columns
+
+  // SVG height: tallest column determines it
+  const layerCounts = new Map<number, number>();
+  for (const n of miniNodes) layerCounts.set(n.layer, (layerCounts.get(n.layer) ?? 0) + 1);
+  const maxInLayer = Math.max(1, ...layerCounts.values());
+  const tallestCol = maxInLayer * pillH + (maxInLayer - 1) * pillGap;
+  const svgHeight = Math.max(height, tallestCol + colPad * 2 + (hasBackEdges ? 16 : 0));
+  const centerY = (svgHeight - (hasBackEdges ? 16 : 0)) / 2;
+
+  // Position each pill (center x, center y)
+  const pillPos = new Map<string, { cx: number; cy: number }>();
   for (const n of miniNodes) {
-    const x = padding + n.layer * (dotSize + xGap) + dotSize / 2;
-    const totalRows = miniNodes.filter(m => m.layer === n.layer).length;
-    const layerHeight = totalRows * (dotSize + yGap) - yGap;
-    const startY = (svgHeight - layerHeight) / 2;
-    const y = startY + n.row * (dotSize + yGap) + dotSize / 2;
-    nodePos.set(n.id, { x, y });
+    const cx = colPad + n.layer * colWidth + colWidth / 2;
+    const count = layerCounts.get(n.layer) ?? 1;
+    const blockH = count * pillH + (count - 1) * pillGap;
+    const topY = centerY - blockH / 2;
+    const cy = topY + n.row * (pillH + pillGap) + pillH / 2;
+    pillPos.set(n.id, { cx, cy });
   }
 
+  // Column center X by layer
+  const colCenterX = (layer: number) => colPad + layer * colWidth + colWidth / 2;
+
   return (
-    <svg width={width} height={svgHeight} style={{ display: 'block', overflow: 'visible' }}>
-      {/* Edges */}
-      {projection.graph.edges.filter(e => e.target !== 'end').map((e, i) => {
-        const from = nodePos.get(e.source);
-        const to = nodePos.get(e.target);
-        if (!from || !to) return null;
-        return (
-          <line key={i}
-            x1={from.x + dotSize / 2} y1={from.y}
-            x2={to.x - dotSize / 2} y2={to.y}
-            stroke={e.state === 'taken' ? '#4ade80' : '#333'}
-            strokeWidth={e.state === 'taken' ? 1.5 : 0.5}
-            strokeDasharray={e.state === 'not_taken' ? '2 2' : undefined}
-          />
-        );
-      })}
-      {/* Nodes */}
-      {miniNodes.map(n => {
-        const pos = nodePos.get(n.id)!;
-        const color = STATUS_COLORS[n.status]?.dot ?? '#555';
-        const isActive = n.status === 'running' || n.status === 'gated';
-        return (
-          <g key={n.id}>
-            <circle cx={pos.x} cy={pos.y} r={dotSize / 2} fill={color}
-              style={isActive ? { filter: `drop-shadow(0 0 3px ${color})` } : undefined}>
-              {isActive && (
-                <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite" />
-              )}
-            </circle>
-            <title>{n.id}: {n.status}</title>
-          </g>
-        );
-      })}
-    </svg>
+    <div ref={containerRef} style={{ width: '100%' }}>
+      {containerWidth > 0 && (
+        <svg width={containerWidth} height={svgHeight} style={{ display: 'block' }}>
+          <defs>
+            <filter id={`gc-${filterId}`} x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b" />
+              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+            <filter id={`ga-${filterId}`} x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b" />
+              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+          </defs>
+
+          {/* Horizontal connector lines between columns */}
+          {Array.from({ length: maxLayer }, (_, i) => {
+            const x1 = colCenterX(i) + pillW / 2;
+            const x2 = colCenterX(i + 1) - pillW / 2;
+            // Check if any taken edge connects these layers
+            const hasTaken = projection.graph.edges.some(e => {
+              const sLayer = miniNodes.find(n => n.id === e.source)?.layer;
+              const tLayer = miniNodes.find(n => n.id === e.target)?.layer;
+              return sLayer === i && tLayer === i + 1 && e.state === 'taken';
+            });
+            return (
+              <line key={`conn-${i}`}
+                x1={x1} y1={centerY} x2={x2} y2={centerY}
+                stroke={hasTaken ? '#4ade80' : '#3d3a36'}
+                strokeWidth={hasTaken ? 2 : 1.5}
+                strokeOpacity={hasTaken ? 0.7 : 0.4}
+                strokeLinecap="round"
+              />
+            );
+          })}
+
+          {/* Back-edge arcs (convergence loops) — subtle curve below */}
+          {projection.graph.edges
+            .filter(e => e.target !== 'end' && backEdgeKeys.has(`${e.source}:${e.target}`))
+            .map((e, i) => {
+              const sPos = pillPos.get(e.source);
+              const tPos = pillPos.get(e.target);
+              if (!sPos || !tPos) return null;
+              const y = svgHeight - 8;
+              const d = `M ${sPos.cx},${sPos.cy + pillH / 2} C ${sPos.cx},${y} ${tPos.cx},${y} ${tPos.cx},${tPos.cy + pillH / 2}`;
+              return (
+                <path key={`bk-${i}`} d={d} fill="none"
+                  stroke="#585350" strokeWidth={1.5}
+                  strokeDasharray="4 5" strokeOpacity={0.3}
+                  strokeLinecap="round"
+                />
+              );
+            })}
+
+          {/* Node pills */}
+          {miniNodes.map(n => {
+            const pos = pillPos.get(n.id)!;
+            const color = STATUS_COLORS[n.status]?.dot ?? '#555';
+            const isActive = n.status === 'running' || n.status === 'gated';
+            const isCompleted = n.status === 'completed';
+            const isPending = n.status === 'pending' || n.status === 'killed' || n.status === 'skipped';
+
+            return (
+              <g key={n.id}
+                filter={isActive ? `url(#ga-${filterId})` : isCompleted ? `url(#gc-${filterId})` : undefined}>
+                <rect
+                  x={pos.cx - pillW / 2} y={pos.cy - pillH / 2}
+                  width={pillW} height={pillH}
+                  rx={pillR} ry={pillR}
+                  fill={isPending ? 'none' : color}
+                  fillOpacity={isPending ? 0 : isCompleted ? 0.9 : 0.85}
+                  stroke={isPending ? '#585350' : color}
+                  strokeWidth={isPending ? 1.5 : 0.5}
+                  strokeOpacity={isPending ? 0.6 : 0.3}
+                >
+                  {isActive && (
+                    <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite" />
+                  )}
+                </rect>
+                <title>{n.id}: {n.status}</title>
+              </g>
+            );
+          })}
+        </svg>
+      )}
+    </div>
   );
 }
 
@@ -232,7 +324,7 @@ export function MiniPipeline({ projection, mode = 'auto', height }: MiniPipeline
 
   switch (resolvedMode) {
     case 'graph':
-      return <GraphMode projection={projection} height={height ?? 32} />;
+      return <GraphMode projection={projection} height={height ?? 40} />;
     case 'bar':
       return <BarMode projection={projection} height={height ?? 8} />;
     case 'summary':

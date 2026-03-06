@@ -1,5 +1,5 @@
 // Execution (scheduler + node factories)
-export { run, computeFrontier, validateGraph } from './scheduler';
+export { run, computeFrontier, validateGraph, normalizeTargets } from './scheduler';
 export { agent, wasCompletedBeforeCrash } from './agent';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
 export { verify, property } from './verify';
@@ -7,9 +7,9 @@ export { verify, property } from './verify';
 // Types
 export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
-  FlowGraph, NodeEntry,
+  FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry,
   RunOptions, RunResult, ResumeState,
-  AgentRuntime, AgentSession, SessionConfig, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, AgentSession, SessionConfig, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,
@@ -25,6 +25,7 @@ export type {
   NodeKilledEvent, NodeSkippedEvent, NodeGatedEvent,
   GateResolvedEvent, NodeRetryingEvent, EdgeTraversedEvent,
   ArtifactWrittenEvent, CostRecordedEvent, MetadataEvent,
+  NodeResetEvent,
   NodeOutputEvent, NodeToolEvent,
   GraphNodeSkeleton, GraphEdgeSkeleton,
 } from './events';

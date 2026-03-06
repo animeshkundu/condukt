@@ -135,6 +135,7 @@ export function agent(config: AgentConfig): NodeFn {
       const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
       session = await ctx.runtime.createSession({
         model: config.model ?? 'claude-opus-4.6',
+        thinkingBudget: config.thinkingBudget,
         cwd: sessionCwd,
         addDirs: config.isolation ? [] : [input.dir],
         timeout: config.timeout ?? 3600,
