@@ -194,6 +194,106 @@ lint: { default: 'build', fail: 'end' },
 
 If no matching edge is found for the returned action, the scheduler falls back to the `'default'` edge. If neither matches, the node is terminal (no successors).
 
+## Step 2b: Fan-Out Routing
+
+An edge target can be an array to dispatch multiple nodes from a single action:
+
+```typescript
+const flow: FlowGraph = {
+  nodes: {
+    check:   { fn: check,   displayName: 'Check',   nodeType: 'deterministic' },
+    fixA:    { fn: fixA,    displayName: 'Fix A',   nodeType: 'agent', output: 'fix_a.md' },
+    fixB:    { fn: fixB,    displayName: 'Fix B',   nodeType: 'agent', output: 'fix_b.md' },
+    merge:   { fn: merge,   displayName: 'Merge',   nodeType: 'deterministic', reads: ['fix_a.md', 'fix_b.md'] },
+  },
+  edges: {
+    check: { default: ['fixA', 'fixB'] },   // fan-out: both dispatch in parallel
+    fixA:  { default: 'merge' },
+    fixB:  { default: 'merge' },              // fan-in: merge waits for both
+  },
+  start: ['check'],
+};
+```
+
+Fan-out is sugar for "dispatch all targets from the same action." Fan-in semantics are unchanged: `merge` waits for ALL fired sources (both `fixA` and `fixB`) to complete.
+
+If all fan-out targets fail, the downstream node is marked `skipped` (it can never fire).
+
+## Step 2c: Convergence Loops
+
+For patterns where nodes should re-run until a convergence condition is met, use loop-back edges with `loopFallback`:
+
+```typescript
+const flow: FlowGraph = {
+  nodes: {
+    agentA:     { fn: agentA,     displayName: 'Agent A',     nodeType: 'agent', output: 'a.md' },
+    agentB:     { fn: agentB,     displayName: 'Agent B',     nodeType: 'agent', output: 'b.md' },
+    reviewer:   { fn: reviewer,   displayName: 'Reviewer',    nodeType: 'agent', output: 'review.md',
+                  reads: ['a.md', 'b.md'] },
+    resolved:   { fn: resolved,   displayName: 'Resolved',    nodeType: 'deterministic' },
+    fallback:   { fn: fallback,   displayName: 'Fallback',    nodeType: 'agent' },
+  },
+  edges: {
+    agentA:   { default: 'reviewer' },
+    agentB:   { default: 'reviewer' },     // fan-in: reviewer waits for both
+    reviewer: {
+      converged: 'resolved',
+      diverged: ['agentA', 'agentB'],       // loop-back: both re-run with differences
+    },
+  },
+  start: ['agentA', 'agentB'],
+
+  // Required: every cycle-creating edge must have a loopFallback entry
+  loopFallback: {
+    'reviewer:diverged': {
+      source: 'reviewer',
+      action: 'diverged',
+      fallbackTarget: 'fallback',      // where to go when max iterations exceeded
+      maxIterations: 3,                 // per-loop limit (defaults to graph.maxIterations ?? 3)
+    },
+  },
+};
+```
+
+### How it works
+
+1. `agentA` and `agentB` run in parallel (both in `start`)
+2. `reviewer` waits for both (fan-in), compares their outputs
+3. If `reviewer` returns `{ action: 'converged' }` → proceeds to `resolved`
+4. If `reviewer` returns `{ action: 'diverged' }` → **loop-back**:
+   - `agentA` and `agentB` are reset to `pending`
+   - Each receives a `RetryContext` with their prior artifact and iteration number
+   - `reviewer` is also reset (it needs to re-run after both agents complete)
+   - Both agents re-dispatch in parallel
+5. After 3 iterations of divergence → routes to `fallback` instead
+
+### Accessing loop context in nodes
+
+Looped nodes receive a `RetryContext` in their `NodeInput`:
+
+```typescript
+const agentA = agent({
+  // ...
+  promptBuilder: (input) => {
+    if (input.retryContext) {
+      return `Previous attempt (iteration ${input.retryContext.feedback}):\n` +
+             `${input.retryContext.priorOutput}\n\n` +
+             `The reviewer found differences. Investigate further.`;
+    }
+    return `Investigate from scratch...`;
+  },
+});
+```
+
+### Validation rules
+
+`validateGraph()` enforces:
+- Every cycle-creating edge must have a matching `loopFallback` entry (keyed by `${source}:${action}`)
+- Every `fallbackTarget` must exist in `graph.nodes` (or be `'end'`)
+- Self-loops (`A: { default: 'A' }`) also require a `loopFallback` entry
+
+Graphs without cycles pass validation with zero overhead.
+
 ## Step 3: Pick a Runtime
 
 The runtime determines how `agent()` nodes execute. Deterministic and gate nodes do not use the runtime.

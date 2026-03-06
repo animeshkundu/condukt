@@ -366,6 +366,7 @@ describe('scheduler — resume with conditional routing', () => {
       completedNodes: new Map([['A', { action: 'pass', finishedAt: 1000 }]]),
       firedEdges: new Map([['B', new Set(['A'])]]),
       nodeStatuses: new Map([['A', 'completed']]),
+      loopIterations: new Map(),
     };
 
     const opts = mkOpts({ resumeFrom: resumeState });
@@ -613,6 +614,7 @@ describe('computeFrontier — edge cases', () => {
       ]),
       firedEdges: new Map([['B', new Set(['A'])]]),
       nodeStatuses: new Map([['A', 'completed'], ['B', 'completed']]),
+      loopIterations: new Map(),
     };
 
     expect(computeFrontier(graph, state)).toEqual([]);
@@ -632,6 +634,7 @@ describe('computeFrontier — edge cases', () => {
       completedNodes: new Map(),
       firedEdges: new Map(),
       nodeStatuses: new Map(),
+      loopIterations: new Map(),
     };
 
     expect(computeFrontier(graph, state)).toEqual(['A']);
@@ -658,6 +661,7 @@ describe('computeFrontier — edge cases', () => {
       completedNodes: new Map([['A', { action: 'default', finishedAt: 1000 }]]),
       firedEdges: new Map([['C', new Set(['A'])]]),
       nodeStatuses: new Map([['A', 'completed']]),
+      loopIterations: new Map(),
     };
 
     const frontier = computeFrontier(graph, state);

@@ -156,6 +156,16 @@ export interface MetadataEvent {
   readonly ts: number;
 }
 
+export interface NodeResetEvent {
+  readonly type: 'node:reset';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly reason: 'loop-back';
+  readonly iteration: number;
+  readonly sourceNodeId: string;
+  readonly ts: number;
+}
+
 /** Discriminated union of all execution events (persisted to JSONL). */
 export type ExecutionEvent =
   | RunStartedEvent
@@ -172,7 +182,8 @@ export type ExecutionEvent =
   | EdgeTraversedEvent
   | ArtifactWrittenEvent
   | CostRecordedEvent
-  | MetadataEvent;
+  | MetadataEvent
+  | NodeResetEvent;
 
 // ---------------------------------------------------------------------------
 // Output events (2 types — streamed, NOT persisted in event log)

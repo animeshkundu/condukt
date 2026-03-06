@@ -21,6 +21,7 @@ function mockProjection(nodeCount: number, statuses?: Record<string, string>): E
     nodeType: 'deterministic',
     status: statuses?.[`n${i}`] ?? (i < nodeCount / 2 ? 'completed' : 'pending'),
     attempt: 1,
+    iteration: 0,
   }));
 
   // Linear chain
@@ -110,9 +111,9 @@ describe('MiniPipeline parallel detection', () => {
   it('parallel start nodes get different rows in same layer', () => {
     // Simulate: [A, B] → C (parallel start, fan-in)
     const nodes: ProjectionNode[] = [
-      { id: 'A', displayName: 'A', nodeType: 'agent', status: 'completed', attempt: 1 },
-      { id: 'B', displayName: 'B', nodeType: 'agent', status: 'completed', attempt: 1 },
-      { id: 'C', displayName: 'C', nodeType: 'agent', status: 'running', attempt: 1 },
+      { id: 'A', displayName: 'A', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
+      { id: 'B', displayName: 'B', nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 },
+      { id: 'C', displayName: 'C', nodeType: 'agent', status: 'running', attempt: 1, iteration: 0 },
     ];
     const edges: ProjectionEdge[] = [
       { source: 'A', action: 'default', target: 'C', state: 'taken' },

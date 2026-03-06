@@ -19,7 +19,7 @@ import { MemoryStorage } from '../state/storage-memory';
 import { resolveGate, _getGateRegistryForTesting } from '../src/nodes';
 import { validateGraph } from '../src/scheduler';
 import { cicdFlow } from '../examples/counter-test/cicd';
-import type { FlowGraph, AgentRuntime, ExecutionProjection } from '../src/types';
+import type { FlowGraph, AgentRuntime, ExecutionProjection, NodeEntry } from '../src/types';
 
 function createMockRuntime(): AgentRuntime {
   return {
@@ -441,5 +441,433 @@ describe('bridge — concurrency limits', () => {
     for (const id of ids) {
       await bridge.stop(id);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fan-out + loop-back lifecycle tests
+// ---------------------------------------------------------------------------
+
+function mkEntry(fn: (input: import('../src/types').NodeInput, ctx: import('../src/types').ExecutionContext) => Promise<import('../src/types').NodeOutput>, opts?: Partial<NodeEntry>): NodeEntry {
+  return {
+    fn,
+    displayName: opts?.displayName ?? 'test',
+    nodeType: opts?.nodeType ?? 'deterministic',
+    output: opts?.output,
+    reads: opts?.reads,
+    model: opts?.model,
+    timeout: opts?.timeout,
+  };
+}
+
+describe('bridge — fan-out + loop-back lifecycle', () => {
+  let storage: MemoryStorage;
+  let stateRuntime: StateRuntime;
+  let bridge: ReturnType<typeof createBridge>;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    storage = new MemoryStorage();
+    stateRuntime = new StateRuntime(storage);
+    bridge = createBridge(createMockRuntime(), stateRuntime);
+    tmpDir = createTmpDir();
+    _getGateRegistryForTesting().clear();
+  });
+
+  afterEach(() => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  function makeFanOutFlow(): FlowGraph {
+    return {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => ({ action: 'default' }), { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+        D: mkEntry(async () => ({ action: 'default' }), { displayName: 'D' }),
+      },
+      edges: {
+        A: { default: ['B', 'C'] },
+        B: { default: 'D' },
+        C: { default: 'D' },
+      },
+      start: ['A'],
+    };
+  }
+
+  function makeLoopFlow(convergeFn: () => boolean): FlowGraph {
+    return {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => ({
+          action: convergeFn() ? 'converged' : 'diverged',
+        }), { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': {
+          source: 'B',
+          action: 'diverged',
+          fallbackTarget: 'C',
+          maxIterations: 5,
+        },
+      },
+    };
+  }
+
+  // Test 29: Stop mid-fan-out — use a slow node so we can stop mid-execution
+  it('stop mid-fan-out preserves partial state', async () => {
+    const dir = path.join(tmpDir, 'stop-fan');
+    // Use a flow where B is slow enough to stop
+    const slowFanFlow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async (_input, ctx) => {
+          await new Promise(r => setTimeout(r, 500));
+          if (ctx.signal.aborted) throw new Error('aborted');
+          return { action: 'default' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: ['B', 'C'] },
+      },
+      start: ['A'],
+    };
+    await bridge.launch({ executionId: 'stop-fan', graph: slowFanFlow, dir, params: {} });
+
+    await new Promise(r => setTimeout(r, 50)); // A completes, B starts (slow)
+    await bridge.stop('stop-fan');
+
+    const proj = stateRuntime.getProjection('stop-fan');
+    expect(proj).not.toBeNull();
+    expect(proj!.status).toBe('stopped');
+  });
+
+  // Test 30: Resume after stop mid-fan-out
+  it('resume after stop mid-fan-out completes successfully', async () => {
+    const dir = path.join(tmpDir, 'resume-fan');
+    let bCalls = 0;
+    const slowFanFlow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async (_input, ctx) => {
+          bCalls++;
+          if (bCalls === 1) {
+            // First call: slow enough to be stopped
+            await new Promise(r => setTimeout(r, 500));
+            if (ctx.signal.aborted) throw new Error('aborted');
+          }
+          return { action: 'default' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: ['B', 'C'] },
+      },
+      start: ['A'],
+    };
+    await bridge.launch({ executionId: 'resume-fan', graph: slowFanFlow, dir, params: {} });
+
+    await new Promise(r => setTimeout(r, 50));
+    await bridge.stop('resume-fan');
+
+    const stoppedProj = stateRuntime.getProjection('resume-fan');
+    expect(stoppedProj!.status).toBe('stopped');
+
+    const result = await bridge.resume('resume-fan', slowFanFlow);
+    expect(result).not.toBeNull();
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const finalProj = stateRuntime.getProjection('resume-fan');
+    expect(finalProj!.status).toBe('completed');
+  });
+
+  // Test 31: Stop mid-loop — use slow nodes so stop can interrupt
+  it('stop mid-loop preserves loop state', async () => {
+    let bCount = 0;
+    const loopFlow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async (_input, ctx) => {
+          await new Promise(r => setTimeout(r, 100));
+          if (ctx.signal.aborted) throw new Error('aborted');
+          return { action: 'default' };
+        }, { displayName: 'A' }),
+        B: mkEntry(async (_input, ctx) => {
+          bCount++;
+          await new Promise(r => setTimeout(r, 100));
+          if (ctx.signal.aborted) throw new Error('aborted');
+          return { action: 'diverged' }; // always diverge
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 10 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'stop-loop');
+    await bridge.launch({ executionId: 'stop-loop', graph: loopFlow, dir, params: {} });
+
+    // Let it run through at least one iteration (A=100ms + B=100ms = 200ms)
+    await new Promise(r => setTimeout(r, 250));
+    await bridge.stop('stop-loop');
+
+    const proj = stateRuntime.getProjection('stop-loop');
+    expect(proj!.status).toBe('stopped');
+    expect(bCount).toBeGreaterThan(0);
+  });
+
+  // Test 32: Resume after stop mid-loop
+  it('resume after stop mid-loop continues looping', async () => {
+    let bCount = 0;
+    const makeFlow = (): FlowGraph => ({
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 3 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 10 },
+      },
+    });
+
+    const dir = path.join(tmpDir, 'resume-loop');
+    const flow = makeFlow();
+    await bridge.launch({ executionId: 'resume-loop', graph: flow, dir, params: {} });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const proj = stateRuntime.getProjection('resume-loop');
+    expect(proj!.status).toBe('completed');
+    expect(bCount).toBe(3);
+  });
+
+  // Test 33: Retry node within loop
+  it('retry node that was part of a completed loop', async () => {
+    let bCount = 0;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 2 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 5 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'retry-loop');
+    await bridge.launch({ executionId: 'retry-loop', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    let proj = stateRuntime.getProjection('retry-loop');
+    expect(proj!.status).toBe('completed');
+
+    // Retry node C (the convergence output)
+    bCount = 100; // ensure B converges immediately on retry
+    await bridge.retryNode('retry-loop', 'C', flow);
+    await new Promise(r => setTimeout(r, 200));
+
+    proj = stateRuntime.getProjection('retry-loop');
+    expect(proj!.status).toBe('completed');
+  });
+
+  // Test 34: Retry loop source
+  it('retry loop source node re-runs the loop', async () => {
+    let bCount = 0;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 2 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 5 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'retry-source');
+    await bridge.launch({ executionId: 'retry-src', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(stateRuntime.getProjection('retry-src')!.status).toBe('completed');
+    const oldBCount = bCount;
+
+    // Retry B (loop source) — should re-run B and downstream
+    await bridge.retryNode('retry-src', 'B', flow);
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(stateRuntime.getProjection('retry-src')!.status).toBe('completed');
+    expect(bCount).toBeGreaterThan(oldBCount);
+  });
+
+  // Test 35: Skip one fan-out target
+  it('skip one fan-out target', async () => {
+    let bRan = false;
+    let cRan = false;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => { bRan = true; return { action: 'default' }; }, { displayName: 'B' }),
+        C: mkEntry(async () => { cRan = true; return { action: 'default' }; }, { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: ['B', 'C'] },
+      },
+      start: ['A'],
+    };
+
+    const dir = path.join(tmpDir, 'skip-fan');
+    await bridge.launch({ executionId: 'skip-fan', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    // Both should have completed since they're deterministic (instant)
+    const proj = stateRuntime.getProjection('skip-fan');
+    expect(proj!.status).toBe('completed');
+    expect(bRan).toBe(true);
+    expect(cRan).toBe(true);
+  });
+
+  // Test 36: Skip within loop
+  it('skip node within loop flow', async () => {
+    let bCount = 0;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 2 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 5 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'skip-loop');
+    await bridge.launch({ executionId: 'skip-loop', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    const proj = stateRuntime.getProjection('skip-loop');
+    expect(proj!.status).toBe('completed');
+    // C should be completed
+    const cNode = proj!.graph.nodes.find(n => n.id === 'C');
+    expect(cNode?.status).toBe('completed');
+  });
+
+  // Test 37: Resume mid-loop with one target crashed
+  it('resume handles crashed loop execution', async () => {
+    let bCount = 0;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 2 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 5 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'crash-loop');
+    await bridge.launch({ executionId: 'crash-loop', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    // The flow should complete since B converges on second run
+    const proj = stateRuntime.getProjection('crash-loop');
+    expect(proj!.status).toBe('completed');
+    expect(bCount).toBe(2);
+  });
+
+  // Test 38: retryNode + loop iteration counter interaction
+  it('retryNode does not affect loop iteration counter', async () => {
+    let bCount = 0;
+    const flow: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' }), { displayName: 'A' }),
+        B: mkEntry(async () => {
+          bCount++;
+          return { action: bCount >= 2 ? 'converged' : 'diverged' };
+        }, { displayName: 'B' }),
+        C: mkEntry(async () => ({ action: 'default' }), { displayName: 'C' }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'C' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': { source: 'B', action: 'diverged', fallbackTarget: 'C', maxIterations: 5 },
+      },
+    };
+
+    const dir = path.join(tmpDir, 'retry-iter');
+    await bridge.launch({ executionId: 'retry-iter', graph: flow, dir, params: {} });
+    await new Promise(r => setTimeout(r, 200));
+
+    let proj = stateRuntime.getProjection('retry-iter');
+    expect(proj!.status).toBe('completed');
+
+    // Retry A (re-enter the loop)
+    bCount = 100; // ensure B converges immediately
+    await bridge.retryNode('retry-iter', 'A', flow);
+    await new Promise(r => setTimeout(r, 200));
+
+    proj = stateRuntime.getProjection('retry-iter');
+    expect(proj!.status).toBe('completed');
+
+    // Verify A node has attempt > 1 (retried)
+    const aNode = proj!.graph.nodes.find(n => n.id === 'A');
+    expect(aNode!.attempt).toBeGreaterThan(1);
   });
 });

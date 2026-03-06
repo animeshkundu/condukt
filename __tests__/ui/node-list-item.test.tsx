@@ -13,6 +13,7 @@ function makeNode(overrides: Partial<ProjectionNode> = {}): ProjectionNode {
     nodeType: 'agent',
     status: 'pending',
     attempt: 1,
+    iteration: 0,
     ...overrides,
   };
 }

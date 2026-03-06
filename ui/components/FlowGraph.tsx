@@ -28,10 +28,54 @@ interface LayoutResult {
   edges: Edge[];
 }
 
+/** Detect back-edges via DFS. Returns set of "source:target" keys. */
+export function detectBackEdges(
+  nodeIds: readonly string[],
+  edges: readonly { source: string; target: string }[],
+): Set<string> {
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map<string, number>();
+  const backEdgeKeys = new Set<string>();
+  const nodeSet = new Set(nodeIds);
+
+  for (const id of nodeIds) color.set(id, WHITE);
+
+  const adj = new Map<string, Array<{ source: string; target: string }>>();
+  for (const id of nodeIds) adj.set(id, []);
+  for (const e of edges) {
+    if (e.target !== 'end' && nodeSet.has(e.target)) {
+      adj.get(e.source)?.push(e);
+    }
+  }
+
+  function dfs(node: string): void {
+    color.set(node, GRAY);
+    for (const edge of adj.get(node) ?? []) {
+      const c = color.get(edge.target);
+      if (c === GRAY) {
+        backEdgeKeys.add(`${edge.source}:${edge.target}`);
+      } else if (c === WHITE) {
+        dfs(edge.target);
+      }
+    }
+    color.set(node, BLACK);
+  }
+
+  for (const id of nodeIds) {
+    if (color.get(id) === WHITE) dfs(id);
+  }
+
+  return backEdgeKeys;
+}
+
 function computeLayout(projection: ExecutionProjection): LayoutResult {
   const { nodes: projNodes, edges: projEdges } = projection.graph;
 
-  // Build adjacency for topological ordering
+  // Detect back-edges via DFS before running Kahn's
+  const nodeIds = projNodes.map(n => n.id);
+  const backEdgeKeys = detectBackEdges(nodeIds, projEdges);
+
+  // Build adjacency for topological ordering, excluding back-edges
   const inDegree = new Map<string, number>();
   const adjList = new Map<string, string[]>();
   for (const n of projNodes) {
@@ -39,7 +83,7 @@ function computeLayout(projection: ExecutionProjection): LayoutResult {
     adjList.set(n.id, []);
   }
   for (const e of projEdges) {
-    if (e.target !== 'end') {
+    if (e.target !== 'end' && !backEdgeKeys.has(`${e.source}:${e.target}`)) {
       adjList.get(e.source)?.push(e.target);
       inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
     }
@@ -98,7 +142,7 @@ function computeLayout(projection: ExecutionProjection): LayoutResult {
     });
   }
 
-  // Map edges
+  // Map edges (mark back-edges for distinct rendering)
   const edges: Edge[] = projEdges
     .filter((e) => e.target !== 'end')
     .map((e, i) => ({
@@ -106,7 +150,7 @@ function computeLayout(projection: ExecutionProjection): LayoutResult {
       source: e.source,
       target: e.target,
       type: 'flowEdge',
-      data: { state: e.state, action: e.action },
+      data: { state: e.state, action: e.action, isBackEdge: backEdgeKeys.has(`${e.source}:${e.target}`) },
       animated: e.state === 'taken',
     }));
 

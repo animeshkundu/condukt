@@ -109,6 +109,7 @@ describe('scheduler branches', () => {
       completedNodes: new Map([['B', { action: 'default', finishedAt: 1000 }]]),
       firedEdges: new Map([['A', new Set(['B'])]]),
       nodeStatuses: new Map([['B', 'completed']]),
+      loopIterations: new Map(),
     };
     const frontier = computeFrontier(graph, state);
     // A should appear exactly once even though it's both start and fired-to

@@ -17,6 +17,14 @@ export function FlowStatusBar({ projection }: FlowStatusBarProps) {
     return result;
   }, [projection.graph.nodes]);
 
+  const maxIteration = useMemo(() => {
+    let max = 0;
+    for (const node of projection.graph.nodes) {
+      if (node.iteration > max) max = node.iteration;
+    }
+    return max;
+  }, [projection.graph.nodes]);
+
   const totalCost = projection.totalCost;
   const duration = projection.startedAt && projection.finishedAt
     ? ((projection.finishedAt - projection.startedAt) / 1000).toFixed(0)
@@ -44,7 +52,9 @@ export function FlowStatusBar({ projection }: FlowStatusBarProps) {
         projection.status === 'failed' && 'text-red-400',
         projection.status === 'stopped' && 'text-yellow-400',
       )}>
-        {projection.status}
+        {projection.status === 'running' && maxIteration > 0
+          ? `Running (iteration ${maxIteration})`
+          : projection.status}
       </span>
 
       {duration && (

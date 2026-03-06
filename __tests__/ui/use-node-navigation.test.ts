@@ -5,7 +5,7 @@ import { useNodeNavigation } from '../../ui/hooks/useNodeNavigation';
 import type { ProjectionNode } from '../../src/types';
 
 function makeNode(id: string): ProjectionNode {
-  return { id, displayName: id, nodeType: 'agent', status: 'completed', attempt: 1 };
+  return { id, displayName: id, nodeType: 'agent', status: 'completed', attempt: 1, iteration: 0 };
 }
 
 function fireKey(key: string) {

@@ -90,7 +90,7 @@ describe('StateRuntime', () => {
       params: {},
       graph: {
         nodes: [
-          { id: 'A', displayName: 'Step A', nodeType: 'agent', status: 'running', attempt: 1 },
+          { id: 'A', displayName: 'Step A', nodeType: 'agent', status: 'running', attempt: 1, iteration: 0 },
         ],
         edges: [],
         activeNodes: ['A'],

@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import type { ExecutionProjection, ProjectionNode, ProjectionEdge } from '../../src/types';
 import { STATUS_COLORS } from './node-panel/types';
+import { detectBackEdges } from './FlowGraph';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -31,8 +32,14 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
   miniNodes: MiniNode[];
   maxLayer: number;
   maxRow: number;
+  backEdgeKeys: Set<string>;
 } {
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const nodeIds = nodes.map(n => n.id);
+
+  // Detect back-edges before Kahn's
+  const backEdgeKeys = detectBackEdges(nodeIds, edges);
+
   const inDegree = new Map<string, number>();
   const adj = new Map<string, string[]>();
 
@@ -41,7 +48,7 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
     adj.set(n.id, []);
   }
   for (const e of edges) {
-    if (e.target !== 'end' && nodeMap.has(e.target)) {
+    if (e.target !== 'end' && nodeMap.has(e.target) && !backEdgeKeys.has(`${e.source}:${e.target}`)) {
       adj.get(e.source)?.push(e.target);
       inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
     }
@@ -81,7 +88,7 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
   }
 
   const maxLayer = Math.max(0, ...[...layers.values()]);
-  return { miniNodes, maxLayer, maxRow };
+  return { miniNodes, maxLayer, maxRow, backEdgeKeys };
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +96,7 @@ function computeMiniLayout(nodes: readonly ProjectionNode[], edges: readonly Pro
 // ---------------------------------------------------------------------------
 
 function GraphMode({ projection, height = 32 }: { projection: ExecutionProjection; height: number }) {
-  const { miniNodes, maxLayer, maxRow } = useMemo(
+  const { miniNodes, maxLayer, maxRow, backEdgeKeys } = useMemo(
     () => computeMiniLayout(projection.graph.nodes, projection.graph.edges),
     [projection.graph.nodes, projection.graph.edges],
   );
@@ -118,6 +125,19 @@ function GraphMode({ projection, height = 32 }: { projection: ExecutionProjectio
         const from = nodePos.get(e.source);
         const to = nodePos.get(e.target);
         if (!from || !to) return null;
+        const isBack = backEdgeKeys.has(`${e.source}:${e.target}`);
+        if (isBack) {
+          // Dashed arc above the graph
+          const midX = (from.x + to.x) / 2;
+          const arcY = Math.min(from.y, to.y) - 14;
+          const d = `M ${from.x + dotSize / 2},${from.y} C ${from.x + dotSize / 2},${arcY} ${to.x - dotSize / 2},${arcY} ${to.x - dotSize / 2},${to.y}`;
+          return (
+            <path key={`back-${i}`} d={d}
+              fill="none" stroke="#585350" strokeWidth={0.75}
+              strokeDasharray="3 2"
+            />
+          );
+        }
         return (
           <line key={i}
             x1={from.x + dotSize / 2} y1={from.y}

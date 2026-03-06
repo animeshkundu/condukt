@@ -327,3 +327,22 @@ A `FlowCard` component (list-item card combining MiniPipeline + metadata) was de
 - Per-execution: `StateRuntime` uses a promise-chain mutex (SYS-1) to serialize events.
 - Gate nodes block their Promise until `resolveGate()` is called externally.
 - Abort propagation: `AbortSignal` is checked before each batch and passed to agent sessions.
+
+## Fan-Out and Loop-Back (ADR-006)
+
+The execution engine supports two extensions beyond basic DAG traversal:
+
+### Fan-out edges
+
+An edge target can be an array: `{ action: ['B', 'C'] }`. Both targets are dispatched in parallel. Fan-in semantics are unchanged — a downstream node waits for ALL fired sources.
+
+### Bounded loop-back
+
+When an edge fires and its target is already completed, the scheduler recognizes a loop-back:
+1. Resets the target nodes and source node (targeted, non-cascading)
+2. Emits `node:reset` events (crash-recovery safe)
+3. Builds `RetryContext` with prior artifact content
+4. Re-dispatches the targets
+5. After `maxIterations` (per-loop via `loopFallback`), routes to a fallback target
+
+See `docs/DESIGN-FAN-OUT-LOOP-BACK.md` for the full design document and `docs/adr/ADR-006-fan-out-loop-back.md` for the decision record.

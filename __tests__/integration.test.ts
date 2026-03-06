@@ -250,6 +250,7 @@ describe('integration: CI/CD pipeline end-to-end', () => {
         ['approval', 'pending'],
         ['deploy', 'pending'],
       ]),
+      loopIterations: new Map(),
     };
 
     const frontier = computeFrontier(cicdFlow, resumeState);
