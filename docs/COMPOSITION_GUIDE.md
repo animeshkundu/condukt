@@ -17,8 +17,8 @@ Building a flow has five steps:
 Nodes are the computation units. The framework provides four factories:
 
 ```typescript
-import { deterministic, gate } from '@anthropic/flow-framework';
-import type { NodeInput, NodeOutput } from '@anthropic/flow-framework';
+import { deterministic, gate } from 'condukt';
+import type { NodeInput, NodeOutput } from 'condukt';
 ```
 
 ### Deterministic nodes
@@ -92,7 +92,7 @@ Gate nodes block until `resolveGate()` (or `bridge.approveGate()`) is called ext
 For LLM-powered steps. Not used in this example, but here is the pattern:
 
 ```typescript
-import { agent } from '@anthropic/flow-framework';
+import { agent } from 'condukt';
 
 const investigate = agent({
   objective: 'Investigate the root cause',
@@ -111,7 +111,7 @@ const investigate = agent({
 For wrapping a producer with iterative quality checks:
 
 ```typescript
-import { verify, property } from '@anthropic/flow-framework';
+import { verify, property } from 'condukt';
 
 const verifiedInvestigation = verify(investigate, {
   checks: [
@@ -127,7 +127,7 @@ const verifiedInvestigation = verify(investigate, {
 A `FlowGraph` has three parts: `nodes`, `edges`, and `start`.
 
 ```typescript
-import type { FlowGraph } from '@anthropic/flow-framework';
+import type { FlowGraph } from 'condukt';
 
 export const cicdFlow: FlowGraph = {
   // Node registry: id -> { fn, displayName, nodeType, output?, reads? }
@@ -201,7 +201,7 @@ The runtime determines how `agent()` nodes execute. Deterministic and gate nodes
 ### For tests: MockRuntime
 
 ```typescript
-import { MockRuntime } from '@anthropic/flow-framework/runtimes/mock';
+import { MockRuntime } from 'condukt/runtimes/mock';
 
 const runtime = new MockRuntime({
   investigate: {
@@ -214,7 +214,7 @@ const runtime = new MockRuntime({
 ### For production: SubprocessBackend + adapter
 
 ```typescript
-import { SubprocessBackend, adaptCopilotBackend } from '@anthropic/flow-framework/runtimes/copilot';
+import { SubprocessBackend, adaptCopilotBackend } from 'condukt/runtimes/copilot';
 
 const backend = new SubprocessBackend({
   extraPathDirs: ['.tools/bin'],
@@ -228,7 +228,7 @@ const runtime = adaptCopilotBackend(backend);
 If your flow has no agent nodes, you can use any runtime (including MockRuntime with empty configs). The runtime is only called when `agent()` nodes execute.
 
 ```typescript
-import { MockRuntime } from '@anthropic/flow-framework/runtimes/mock';
+import { MockRuntime } from 'condukt/runtimes/mock';
 const runtime = new MockRuntime({});  // No agent configs needed
 ```
 
@@ -239,8 +239,8 @@ const runtime = new MockRuntime({});  // No agent configs needed
 The bridge handles the full lifecycle: state management, concurrency control, abort/resume/retry.
 
 ```typescript
-import { createBridge } from '@anthropic/flow-framework/bridge';
-import { StateRuntime, MemoryStorage } from '@anthropic/flow-framework/state';
+import { createBridge } from 'condukt/bridge';
+import { StateRuntime, MemoryStorage } from 'condukt/state';
 
 // 1. Create storage and state runtime
 const storage = new MemoryStorage();  // or new FileStorage('/path/to/data')
@@ -294,7 +294,7 @@ console.log(`Resuming from: ${result?.resumingFrom}`);
 For cases where you want full control and do not need the bridge's lifecycle management:
 
 ```typescript
-import { run } from '@anthropic/flow-framework';
+import { run } from 'condukt';
 
 const controller = new AbortController();
 const events: ExecutionEvent[] = [];
@@ -319,8 +319,8 @@ The UI components render an `ExecutionProjection` as an interactive flow graph.
 ### Basic setup
 
 ```tsx
-import { FlowGraph, FlowStatusBar, NodeDetailPanel } from '@anthropic/flow-framework/ui';
-import { useFlowExecution } from '@anthropic/flow-framework/ui';
+import { FlowGraph, FlowStatusBar, NodeDetailPanel } from 'condukt/ui';
+import { useFlowExecution } from 'condukt/ui';
 import { useState } from 'react';
 
 function FlowDashboard({ executionId }: { executionId: string }) {
@@ -380,11 +380,11 @@ The hook fetches the initial projection, subscribes to SSE for real-time updates
 Putting it all together -- a minimal working example with the CI/CD pipeline:
 
 ```typescript
-import { deterministic, gate } from '@anthropic/flow-framework';
-import type { FlowGraph, NodeInput, NodeOutput } from '@anthropic/flow-framework';
-import { createBridge } from '@anthropic/flow-framework/bridge';
-import { StateRuntime, MemoryStorage } from '@anthropic/flow-framework/state';
-import { MockRuntime } from '@anthropic/flow-framework/runtimes/mock';
+import { deterministic, gate } from 'condukt';
+import type { FlowGraph, NodeInput, NodeOutput } from 'condukt';
+import { createBridge } from 'condukt/bridge';
+import { StateRuntime, MemoryStorage } from 'condukt/state';
+import { MockRuntime } from 'condukt/runtimes/mock';
 
 // 1. Define nodes
 const lint = deterministic('Lint', async (input: NodeInput): Promise<NodeOutput> => {

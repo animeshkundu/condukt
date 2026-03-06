@@ -76,12 +76,12 @@ The package exposes six import paths via the `exports` field in `package.json`. 
 
 | Sub-path | Directory | Purpose | Key Exports |
 |----------|-----------|---------|-------------|
-| `@anthropic/flow-framework` | `src/` | Core execution engine | `run`, `agent`, `deterministic`, `gate`, `verify`, `property`, `resolveGate`, `validateGraph`, `computeFrontier`, types, events |
-| `@anthropic/flow-framework/state` | `state/` | Event-sourced persistence | `StateRuntime`, `FileStorage`, `MemoryStorage`, `reduce`, `createEmptyProjection`, `replayEvents` |
-| `@anthropic/flow-framework/bridge` | `bridge/` | Orchestration API | `createBridge`, `BridgeApi`, `LaunchParams` |
-| `@anthropic/flow-framework/runtimes/copilot` | `runtimes/copilot/` | Copilot CLI runtime | `SubprocessBackend`, `adaptCopilotBackend`, `CopilotBackend`, `isProcessAlive`, `killProcessTree` |
-| `@anthropic/flow-framework/runtimes/mock` | `runtimes/mock/` | Test runtime | `MockRuntime`, `MockNodeConfig` |
-| `@anthropic/flow-framework/ui` | `ui/` | React visualization | `FlowGraph`, `NodeCard`, `FlowEdge`, `NodeDetailPanel`, `FlowStatusBar`, `MiniPipeline`, `NodePanel` (compound: `.Header`, `.Info`, `.Error`, `.Gate`, `.Controls`, `.Output`), `STATUS_COLORS`, `OutputRenderer`, `ansiToHtml`, `stripAnsi`, `hasAnsi`, `useFlowExecution`, `useNodeOutput`, `cn` |
+| `condukt` | `src/` | Core execution engine | `run`, `agent`, `deterministic`, `gate`, `verify`, `property`, `resolveGate`, `validateGraph`, `computeFrontier`, types, events |
+| `condukt/state` | `state/` | Event-sourced persistence | `StateRuntime`, `FileStorage`, `MemoryStorage`, `reduce`, `createEmptyProjection`, `replayEvents` |
+| `condukt/bridge` | `bridge/` | Orchestration API | `createBridge`, `BridgeApi`, `LaunchParams` |
+| `condukt/runtimes/copilot` | `runtimes/copilot/` | Copilot CLI runtime | `SubprocessBackend`, `adaptCopilotBackend`, `CopilotBackend`, `isProcessAlive`, `killProcessTree` |
+| `condukt/runtimes/mock` | `runtimes/mock/` | Test runtime | `MockRuntime`, `MockNodeConfig` |
+| `condukt/ui` | `ui/` | React visualization | `FlowGraph`, `NodeCard`, `FlowEdge`, `NodeDetailPanel`, `FlowStatusBar`, `MiniPipeline`, `NodePanel` (compound: `.Header`, `.Info`, `.Error`, `.Gate`, `.Controls`, `.Output`), `STATUS_COLORS`, `OutputRenderer`, `ansiToHtml`, `stripAnsi`, `hasAnsi`, `useFlowExecution`, `useNodeOutput`, `cn` |
 
 ## Dependency Graph
 

@@ -8,9 +8,9 @@ Everything that doesn't fit in CLAUDE.md, API.md, or ARCHITECTURE.md. Read those
 
 ### Barrel import pulls FlowGraph CSS
 
-The `ui/index.ts` barrel re-exports `FlowGraph`, which imports `@xyflow/react` and its CSS. Any consumer importing from `@anthropic/flow-framework/ui` gets the CSS side-effect even if they only want `NodePanel` or `ansiToHtml`.
+The `ui/index.ts` barrel re-exports `FlowGraph`, which imports `@xyflow/react` and its CSS. Any consumer importing from `condukt/ui` gets the CSS side-effect even if they only want `NodePanel` or `ansiToHtml`.
 
-**Workaround**: Compositions that only need ANSI utilities or compound components should import them from the specific file path (`@anthropic/flow-framework/ui/ansi` or `@anthropic/flow-framework/ui/components/node-panel`) rather than the barrel. In practice this means the investigation composition imports ANSI utilities locally rather than through the barrel.
+**Workaround**: Compositions that only need ANSI utilities or compound components should import them from the specific file path (`condukt/ui/ansi` or `condukt/ui/components/node-panel`) rather than the barrel. In practice this means the investigation composition imports ANSI utilities locally rather than through the barrel.
 
 **Fix**: Split `/ui` into `/ui/graph` and `/ui/panel` sub-path exports. Deferred to avoid churn.
 
@@ -22,7 +22,7 @@ Revisit when Turbopack ESM resolution stabilizes.
 
 ### `file:` link copies on Windows (not symlink)
 
-When the consuming application (e.g., `geneva-dashboard`) uses `"@anthropic/flow-framework": "file:../flow-framework"` in `package.json`, npm on Windows **copies** the package into `node_modules` rather than creating a symlink. This means:
+When the consuming application (e.g., `geneva-dashboard`) uses `"condukt": "file:../flow-framework"` in `package.json`, npm on Windows **copies** the package into `node_modules` rather than creating a symlink. This means:
 
 - Changes to the framework source are NOT reflected until you re-run `npm install` in the consuming app
 - The `dist/` directory must be rebuilt (`npm run build`) before reinstalling
@@ -44,11 +44,11 @@ const config = {
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
-      '@anthropic/flow-framework/state': path.resolve('../flow-framework/dist/state/index.js'),
-      '@anthropic/flow-framework/bridge': path.resolve('../flow-framework/dist/bridge/index.js'),
-      '@anthropic/flow-framework/runtimes/copilot': path.resolve('../flow-framework/dist/runtimes/copilot/index.js'),
-      '@anthropic/flow-framework/runtimes/mock': path.resolve('../flow-framework/dist/runtimes/mock/index.js'),
-      '@anthropic/flow-framework/ui': path.resolve('../flow-framework/dist/ui/index.js'),
+      'condukt/state': path.resolve('../flow-framework/dist/state/index.js'),
+      'condukt/bridge': path.resolve('../flow-framework/dist/bridge/index.js'),
+      'condukt/runtimes/copilot': path.resolve('../flow-framework/dist/runtimes/copilot/index.js'),
+      'condukt/runtimes/mock': path.resolve('../flow-framework/dist/runtimes/mock/index.js'),
+      'condukt/ui': path.resolve('../flow-framework/dist/ui/index.js'),
     };
     return config;
   },
@@ -66,7 +66,7 @@ The gate registry (`src/nodes.ts`) uses a `globalThis`-backed `Map` keyed by a `
 The consuming app's `flow-state.ts` singleton (StateRuntime, Bridge, EventBus) should follow the same pattern:
 
 ```typescript
-const FLOW_KEY = Symbol.for('@anthropic/flow-framework/state');
+const FLOW_KEY = Symbol.for('condukt/state');
 const g = globalThis as Record<symbol, unknown>;
 if (!g[FLOW_KEY]) {
   g[FLOW_KEY] = createBridge(runtime, new StateRuntime(new FileStorage(dir)));

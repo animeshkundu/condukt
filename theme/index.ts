@@ -6,9 +6,10 @@ export const flowFrameworkPreset = {
   theme: {
     extend: {
       colors: {
-        bg: { base: '#1a1815', raised: '#201d18', surface: '#2b2a27', overlay: '#343230' },
+        bg: { base: '#1a1815', raised: '#201d18', surface: '#2b2a27', overlay: '#343230', deep: '#161411' },
         border: { subtle: '#302e2b', DEFAULT: '#3d3a36', strong: '#4a4742', active: '#5a5650' },
-        text: { primary: '#e8e6e3', secondary: '#b1ada1', tertiary: '#8a8578', muted: '#8a8578' },
+        text: { primary: '#e8e6e3', secondary: '#b1ada1', tertiary: '#8a8578', muted: '#6b6660', ghost: '#585350' },
+        accent: { DEFAULT: '#D97757', hover: '#C15F3C', bg: '#D9775718' },
         status: {
           blue: '#60a5fa', 'blue-bg': '#1a2a40',
           green: '#4ade80', 'green-bg': '#1a3528',
@@ -34,7 +35,7 @@ export const flowFrameworkPreset = {
       animation: {
         'pulse-status': 'pulse-status 1.5s ease-in-out infinite',
         'blink-cursor': 'blink-cursor 1s step-end infinite',
-        shimmer: 'shimmer 2s linear infinite',
+        shimmer: 'shimmer 1.5s linear infinite',
         'fade-in': 'fade-in 200ms ease',
         'slide-up': 'slide-up 200ms ease',
         'card-enter': 'cardEnter 300ms cubic-bezier(0.16,1,0.3,1) both',

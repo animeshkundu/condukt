@@ -4,7 +4,7 @@ Complete reference for every exported function, class, and type across all six s
 
 ---
 
-## Core (`@anthropic/flow-framework`)
+## Core (`condukt`)
 
 The core module provides the execution engine: the scheduler, node factories, graph validation, and all type definitions.
 
@@ -389,7 +389,7 @@ Every event carries `executionId: string` and `ts: number`. Node events also car
 
 ---
 
-## State (`@anthropic/flow-framework/state`)
+## State (`condukt/state`)
 
 Event-sourced persistence layer. Receives events from the execution engine, reduces them into projections, and persists both.
 
@@ -451,7 +451,7 @@ Replays an event sequence from scratch to rebuild a projection. Equivalent to `e
 
 ---
 
-## Bridge (`@anthropic/flow-framework/bridge`)
+## Bridge (`condukt/bridge`)
 
 Orchestration layer that connects the execution engine, state layer, and external consumers (API routes, CLI).
 
@@ -486,7 +486,7 @@ interface LaunchParams {
 
 ---
 
-## Runtimes: Copilot (`@anthropic/flow-framework/runtimes/copilot`)
+## Runtimes: Copilot (`condukt/runtimes/copilot`)
 
 Runtime adapter for the GitHub Copilot CLI.
 
@@ -558,7 +558,7 @@ Kill a process and its entire tree. On Windows: `taskkill /T /F /PID`. On other 
 
 ---
 
-## Runtimes: Mock (`@anthropic/flow-framework/runtimes/mock`)
+## Runtimes: Mock (`condukt/runtimes/mock`)
 
 Deterministic test runtime that replays configured events per node.
 
@@ -590,7 +590,7 @@ interface MockNodeConfig {
 
 ---
 
-## UI (`@anthropic/flow-framework/ui`)
+## UI (`condukt/ui`)
 
 React components and hooks for flow visualization. Optional peer dependencies: `react >= 18`, `@xyflow/react >= 12`.
 

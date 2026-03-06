@@ -1,4 +1,4 @@
-# Flow Framework — LLM Instructions
+# condukt — LLM Instructions
 
 ## What This Is
 
@@ -8,12 +8,12 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 
 | Entry Point | Directory | Purpose |
 |-------------|-----------|---------|
-| `@anthropic/flow-framework` | `src/` | Core execution: scheduler, agent, deterministic, gate, verify |
-| `@anthropic/flow-framework/state` | `state/` | Event-sourced persistence: reducer, state-runtime, storage |
-| `@anthropic/flow-framework/bridge` | `bridge/` | Orchestration API: launch, stop, resume, retry, skip, approve |
-| `@anthropic/flow-framework/runtimes/copilot` | `runtimes/copilot/` | GitHub Copilot CLI runtime adapter |
-| `@anthropic/flow-framework/runtimes/mock` | `runtimes/mock/` | Deterministic test runtime |
-| `@anthropic/flow-framework/ui` | `ui/` | React Flow visualization (optional peer: react, @xyflow/react) |
+| `condukt` | `src/` | Core execution: scheduler, agent, deterministic, gate, verify |
+| `condukt/state` | `state/` | Event-sourced persistence: reducer, state-runtime, storage |
+| `condukt/bridge` | `bridge/` | Orchestration API: launch, stop, resume, retry, skip, approve |
+| `condukt/runtimes/copilot` | `runtimes/copilot/` | GitHub Copilot CLI runtime adapter |
+| `condukt/runtimes/mock` | `runtimes/mock/` | Deterministic test runtime |
+| `condukt/ui` | `ui/` | React Flow visualization (optional peer: react, @xyflow/react) |
 
 ## Key Files
 
@@ -50,10 +50,11 @@ npm run clean         # Remove dist/
 2. **Zero `any` types** — use generic types, branded types, or explicit `unknown`
 3. **Readonly by default** — all interface fields are `readonly`
 4. **Discriminated unions for events** — every event has a `type` field
-5. **Tests must pass** — 223 tests across 16 suites, all must pass before commit
+5. **Tests must pass** — 233 tests across 17 suites, all must pass before commit
 6. **Plain text default** — output renderer defaults to plain text, ANSI is opt-in (ADR-001)
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
+9. **Follow `DESIGN_LANGUAGE.md`** — all visual tokens, spacing, typography, and component patterns are codified there
 
 ## Test Suites
 
@@ -75,7 +76,7 @@ npm run clean         # Remove dist/
 | Copilot Adapter | `__tests__/copilot-adapter.test.ts` | 5 |
 | NodePanel | `__tests__/node-panel.test.ts` | 24 |
 | MiniPipeline | `__tests__/mini-pipeline.test.ts` | 11 |
-| **Total** | **16 suites** | **223** |
+| **Total** | **17 suites** | **233** |
 
 ## Architecture
 

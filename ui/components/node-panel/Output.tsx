@@ -110,7 +110,7 @@ export function Output({
         ref={scrollRef}
         style={{
           flex: 1, overflowY: 'auto', padding: '12px 24px',
-          fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace',
+          fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace',
           fontSize: 12, lineHeight: 1.5, background: '#161411',
         }}
       >
