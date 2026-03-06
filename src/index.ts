@@ -9,7 +9,7 @@ export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry,
   RunOptions, RunResult, ResumeState,
-  AgentRuntime, AgentSession, SessionConfig, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, AgentSession, SessionConfig, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,

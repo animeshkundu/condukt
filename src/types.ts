@@ -138,8 +138,11 @@ export interface AgentRuntime {
   readonly name: string;
 }
 
+export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface SessionConfig {
   readonly model: string;
+  readonly thinkingBudget?: ThinkingBudget;
   readonly cwd: string;
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
@@ -174,6 +177,7 @@ export interface AgentConfig {
   readonly output?: string;
   readonly reads?: readonly string[];
   readonly model?: string;
+  readonly thinkingBudget?: ThinkingBudget;
   readonly isolation?: boolean;
   readonly timeout?: number;         // seconds, default 3600
   readonly heartbeatTimeout?: number; // seconds, default 120
@@ -218,7 +222,7 @@ export interface ProjectionNode {
   readonly finishedAt?: number;
   readonly elapsedMs?: number;
   readonly attempt: number;
-  readonly iteration: number;
+  readonly iteration?: number;
   readonly error?: string;
   readonly output?: string;
   readonly gateData?: Record<string, unknown>;
