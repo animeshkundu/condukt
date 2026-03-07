@@ -656,17 +656,18 @@ describe('state-runtime branches', () => {
     );
   });
 
-  // SR2: handleOutput with non-node:output event (line ~64)
-  it('handleOutput ignores non-node:output events', () => {
+  // SR2: handleOutput persists node:tool events with encoded prefix
+  it('handleOutput persists node:tool events', () => {
     const storage = new MemoryStorage();
     const runtime = new StateRuntime(storage);
-    // node:tool events should be ignored
+    // node:tool events are now persisted with a \x00tool:phase\x00 prefix
     runtime.handleOutput({
       type: 'node:tool', executionId: 'test', nodeId: 'A',
       tool: 'bash', phase: 'start', summary: 'ls', ts: 1000,
     });
     const output = runtime.getNodeOutput('test', 'A');
-    expect(output.total).toBe(0);
+    expect(output.total).toBe(1);
+    expect(output.lines[0]).toBe('\x00tool:start\x00bash\x00ls');
   });
 
   // SR3: shutdown closes output for all nodes (line ~149-150)

@@ -267,4 +267,61 @@ describe('StateRuntime', () => {
     // Regular output is stored as-is
     expect(output.lines[1]).toBe('visible output');
   });
+
+  // ---------------------------------------------------------------------------
+  // Tool event persistence and empty-content filtering
+  // ---------------------------------------------------------------------------
+
+  it('handleOutput does not store empty reasoning content', () => {
+    const rt = new StateRuntime(storage);
+    rt.handleOutput({
+      type: 'node:reasoning',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: '',
+      ts: 1000,
+    });
+    const output = rt.getNodeOutput('exec-1', 'A');
+    expect(output.lines).toHaveLength(0);
+  });
+
+  it('handleOutput stores tool events with prefix', () => {
+    const rt = new StateRuntime(storage);
+    rt.handleOutput({
+      type: 'node:tool',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      tool: 'bash',
+      phase: 'start',
+      summary: 'Running git log',
+      ts: 1000,
+    });
+    rt.handleOutput({
+      type: 'node:tool',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      tool: 'bash',
+      phase: 'complete',
+      summary: '5 commits found',
+      ts: 1100,
+    });
+
+    const output = rt.getNodeOutput('exec-1', 'A');
+    expect(output.lines).toHaveLength(2);
+    expect(output.lines[0]).toBe('\x00tool:start\x00bash\x00Running git log');
+    expect(output.lines[1]).toBe('\x00tool:complete\x00bash\x005 commits found');
+  });
+
+  it('handleOutput does not store empty node:output content', () => {
+    const rt = new StateRuntime(storage);
+    rt.handleOutput({
+      type: 'node:output',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: '',
+      ts: 1000,
+    });
+    const output = rt.getNodeOutput('exec-1', 'A');
+    expect(output.lines).toHaveLength(0);
+  });
 });

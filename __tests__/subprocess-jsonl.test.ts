@@ -124,4 +124,184 @@ describe('JSONL line parser (subprocess stdout)', () => {
     const result = parseJsonlLine(line);
     expect(result).toEqual({ event: 'reasoning', args: [''] });
   });
+
+  // ---------------------------------------------------------------------------
+  // New CLI event types (multi-emit parser)
+  //
+  // The new CLI JSONL format uses nested `data` objects and can emit multiple
+  // events from a single line (e.g. assistant.message with content + toolRequests).
+  // These tests use processLine(), which mirrors the updated parsing logic and
+  // collects emitted events into an array.
+  // ---------------------------------------------------------------------------
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let events: Array<{ event: string; args: any[] }>;
+
+  /**
+   * Mirror of the updated parsing logic from subprocess-backend.ts.
+   * Handles both legacy (flat) and new (nested data) CLI event formats.
+   * Pushes emitted events into the `events` array for assertion.
+   */
+  function processLine(line: string): void {
+    events = [];
+    if (line.trim() === '') return;
+
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      if (line.startsWith('{')) {
+        parsed = JSON.parse(line);
+      }
+    } catch {
+      // Not valid JSON — fall through to text
+    }
+
+    if (!parsed || typeof parsed.type !== 'string') {
+      events.push({ event: 'text', args: [line] });
+      return;
+    }
+
+    const data = parsed.data as Record<string, unknown> | undefined;
+
+    switch (parsed.type) {
+      // --- Legacy flat format ---
+      case 'assistant.reasoning_delta':
+        events.push({ event: 'reasoning', args: [String(parsed.content ?? '')] });
+        break;
+      case 'assistant.message_delta':
+        events.push({ event: 'text', args: [String(parsed.content ?? '')] });
+        break;
+      case 'assistant.tool_start':
+        events.push({ event: 'tool_start', args: [String(parsed.tool ?? ''), String(parsed.input ?? '')] });
+        break;
+      case 'assistant.tool_complete':
+        events.push({ event: 'tool_complete', args: [String(parsed.tool ?? ''), String(parsed.output ?? '')] });
+        break;
+
+      // --- New nested data format ---
+      case 'assistant.message': {
+        const content = String(data?.content ?? '');
+        const toolRequests = Array.isArray(data?.toolRequests) ? data.toolRequests : [];
+        if (content) events.push({ event: 'text', args: [content] });
+        for (const req of toolRequests) {
+          const name = String(req.name ?? '');
+          const args = JSON.stringify(req.arguments ?? {});
+          events.push({ event: 'tool_start', args: [name, args] });
+        }
+        break;
+      }
+      case 'assistant.reasoning': {
+        const content = String(data?.content ?? '');
+        if (content) events.push({ event: 'reasoning', args: [content] });
+        break;
+      }
+      case 'tool.execution_start': {
+        const toolName = String(data?.toolName ?? '');
+        const args = JSON.stringify(data?.arguments ?? {});
+        events.push({ event: 'tool_start', args: [toolName, args] });
+        break;
+      }
+      case 'tool.execution_complete': {
+        const toolName = String(data?.toolName ?? '');
+        const result = data?.result as Record<string, unknown> | undefined;
+        const output = String(result?.content ?? result?.detailedContent ?? '');
+        events.push({ event: 'tool_complete', args: [toolName, output] });
+        break;
+      }
+      case 'subagent.started': {
+        const displayName = String(data?.agentDisplayName ?? data?.agentName ?? '');
+        events.push({ event: 'tool_start', args: [`subagent:${displayName}`, ''] });
+        break;
+      }
+      case 'subagent.completed': {
+        const displayName = String(data?.agentDisplayName ?? data?.agentName ?? '');
+        events.push({ event: 'tool_complete', args: [`subagent:${displayName}`, ''] });
+        break;
+      }
+
+      // --- Silently consumed (no events emitted) ---
+      case 'user.message':
+      case 'assistant.turn_start':
+      case 'assistant.turn_end':
+        break;
+
+      default:
+        events.push({ event: 'text', args: [line] });
+    }
+  }
+
+  it('assistant.message with data.content emits text', () => {
+    processLine('{"type":"assistant.message","data":{"content":"Hello world","toolRequests":[]}}');
+    expect(events).toEqual([{ event: 'text', args: ['Hello world'] }]);
+  });
+
+  it('assistant.message with toolRequests emits tool_start per request', () => {
+    processLine('{"type":"assistant.message","data":{"content":"","toolRequests":[{"name":"bash","arguments":{"cmd":"ls"}},{"name":"fetch","arguments":{"url":"http://x"}}]}}');
+    expect(events).toEqual([
+      { event: 'tool_start', args: ['bash', '{"cmd":"ls"}'] },
+      { event: 'tool_start', args: ['fetch', '{"url":"http://x"}'] },
+    ]);
+  });
+
+  it('assistant.message with content + toolRequests emits both', () => {
+    processLine('{"type":"assistant.message","data":{"content":"Analyzing...","toolRequests":[{"name":"search","arguments":{}}]}}');
+    expect(events).toEqual([
+      { event: 'text', args: ['Analyzing...'] },
+      { event: 'tool_start', args: ['search', '{}'] },
+    ]);
+  });
+
+  it('assistant.message with empty content and no toolRequests emits nothing', () => {
+    processLine('{"type":"assistant.message","data":{"content":"","toolRequests":[]}}');
+    expect(events).toEqual([]);
+  });
+
+  it('assistant.reasoning with data.content emits reasoning', () => {
+    processLine('{"type":"assistant.reasoning","data":{"content":"Thinking about it"}}');
+    expect(events).toEqual([{ event: 'reasoning', args: ['Thinking about it'] }]);
+  });
+
+  it('assistant.reasoning with empty content emits nothing', () => {
+    processLine('{"type":"assistant.reasoning","data":{"content":""}}');
+    expect(events).toEqual([]);
+  });
+
+  it('tool.execution_start emits tool_start with name and args', () => {
+    processLine('{"type":"tool.execution_start","data":{"toolName":"search_file_content","arguments":{"query":"error"}}}');
+    expect(events).toEqual([{ event: 'tool_start', args: ['search_file_content', '{"query":"error"}'] }]);
+  });
+
+  it('tool.execution_complete emits tool_complete with name and result', () => {
+    processLine('{"type":"tool.execution_complete","data":{"toolName":"bash","result":{"content":"5 files found"}}}');
+    expect(events).toEqual([{ event: 'tool_complete', args: ['bash', '5 files found'] }]);
+  });
+
+  it('tool.execution_complete uses detailedContent fallback', () => {
+    processLine('{"type":"tool.execution_complete","data":{"toolName":"report_intent","result":{"detailedContent":"Classifying repo"}}}');
+    expect(events).toEqual([{ event: 'tool_complete', args: ['report_intent', 'Classifying repo'] }]);
+  });
+
+  it('subagent.started maps to tool_start with subagent: prefix', () => {
+    processLine('{"type":"subagent.started","data":{"agentName":"implementer","agentDisplayName":"Implementer"}}');
+    expect(events).toEqual([{ event: 'tool_start', args: ['subagent:Implementer', ''] }]);
+  });
+
+  it('subagent.completed maps to tool_complete with subagent: prefix', () => {
+    processLine('{"type":"subagent.completed","data":{"agentName":"implementer","agentDisplayName":"Implementer"}}');
+    expect(events).toEqual([{ event: 'tool_complete', args: ['subagent:Implementer', ''] }]);
+  });
+
+  it('user.message is silently consumed', () => {
+    processLine('{"type":"user.message","data":{"content":"Hello"}}');
+    expect(events).toEqual([]);
+  });
+
+  it('assistant.turn_start is silently consumed', () => {
+    processLine('{"type":"assistant.turn_start","data":{"turnId":"0"}}');
+    expect(events).toEqual([]);
+  });
+
+  it('assistant.turn_end is silently consumed', () => {
+    processLine('{"type":"assistant.turn_end","data":{"turnId":"0"}}');
+    expect(events).toEqual([]);
+  });
 });

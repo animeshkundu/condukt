@@ -128,21 +128,27 @@ export function createNodeSSEStream(
       const page = stateRuntime.getNodeOutput(executionId, nodeId, 0, 10_000);
       const encoder = new TextEncoder();
       const REASONING_PREFIX = '\x00reasoning\x00';
+      const TOOL_PREFIX = '\x00tool:';
       for (const line of page.lines) {
-        const isReasoning = line.startsWith(REASONING_PREFIX);
-        const content = isReasoning ? line.slice(REASONING_PREFIX.length) : line;
-        const type = isReasoning ? 'node:reasoning' : 'node:output';
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type,
-              executionId,
-              nodeId,
-              content,
-              ts: 0,
-            })}\n\n`,
-          ),
-        );
+        if (line.startsWith(REASONING_PREFIX)) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            type: 'node:reasoning', executionId, nodeId,
+            content: line.slice(REASONING_PREFIX.length), ts: 0,
+          })}\n\n`));
+        } else if (line.startsWith(TOOL_PREFIX)) {
+          const rest = line.slice(1); // skip leading \x00
+          const parts = rest.split('\x00');
+          const phase = (parts[0] ?? '').split(':')[1] ?? 'start';
+          const tool = parts[1] ?? '';
+          const summary = parts[2] ?? '';
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            type: 'node:tool', executionId, nodeId, tool, phase, summary, ts: 0,
+          })}\n\n`));
+        } else {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            type: 'node:output', executionId, nodeId, content: line, ts: 0,
+          })}\n\n`));
+        }
       }
     },
     (event) => {

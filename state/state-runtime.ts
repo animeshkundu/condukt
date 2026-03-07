@@ -62,9 +62,13 @@ export class StateRuntime {
   }
 
   handleOutput(event: OutputEvent): void {
-    if (event.type === 'node:output' || event.type === 'node:reasoning') {
-      const prefix = event.type === 'node:reasoning' ? '\x00reasoning\x00' : '';
-      this.storage.appendOutput(event.executionId, event.nodeId, prefix + event.content);
+    if (event.type === 'node:output' && event.content) {
+      this.storage.appendOutput(event.executionId, event.nodeId, event.content);
+    } else if (event.type === 'node:reasoning' && event.content) {
+      this.storage.appendOutput(event.executionId, event.nodeId, '\x00reasoning\x00' + event.content);
+    } else if (event.type === 'node:tool') {
+      this.storage.appendOutput(event.executionId, event.nodeId,
+        `\x00tool:${event.phase}\x00${event.tool}\x00${event.summary}`);
     }
     this.onOutput?.(event);
   }

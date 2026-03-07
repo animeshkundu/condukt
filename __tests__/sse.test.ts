@@ -315,4 +315,60 @@ describe('SSE streaming', () => {
     expect(parsed.type).toBe('node:completed');
     expect(parsed.executionId).toBe('exec-1');
   });
+
+  it('node stream reconstructs tool events from stored prefix on replay', async () => {
+    const stateRuntime = createMockStateRuntime({
+      getNodeOutput: () => ({
+        lines: [
+          '\x00tool:start\x00bash\x00Running git log',
+          'regular output line',
+          '\x00tool:complete\x00bash\x005 commits found',
+          '\x00reasoning\x00thinking about it',
+        ],
+        offset: 0,
+        total: 4,
+        hasMore: false,
+      }),
+    });
+
+    const eventBus = createMockEventBus();
+
+    const stream = createNodeSSEStream(
+      stateRuntime,
+      eventBus,
+      'exec-1',
+      'nodeA',
+      60_000,
+    );
+
+    // Read 4 replayed events (one per stored line)
+    const chunks = await readChunks(stream, 4);
+    const events = chunks.map(c => parseSSE(c) as Record<string, unknown>);
+
+    // Tool start
+    expect(events[0].type).toBe('node:tool');
+    expect(events[0].tool).toBe('bash');
+    expect(events[0].phase).toBe('start');
+    expect(events[0].summary).toBe('Running git log');
+
+    // Regular output
+    expect(events[1].type).toBe('node:output');
+    expect(events[1].content).toBe('regular output line');
+
+    // Tool complete
+    expect(events[2].type).toBe('node:tool');
+    expect(events[2].tool).toBe('bash');
+    expect(events[2].phase).toBe('complete');
+    expect(events[2].summary).toBe('5 commits found');
+
+    // Reasoning
+    expect(events[3].type).toBe('node:reasoning');
+    expect(events[3].content).toBe('thinking about it');
+
+    // All events share correct executionId and nodeId
+    for (const event of events) {
+      expect(event.executionId).toBe('exec-1');
+      expect(event.nodeId).toBe('nodeA');
+    }
+  });
 });

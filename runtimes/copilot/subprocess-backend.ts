@@ -244,18 +244,84 @@ class SubprocessSession implements CopilotSession {
 
         if (parsed && typeof parsed.type === 'string') {
           switch (parsed.type) {
-            case 'assistant.reasoning_delta':
-              this.emit('reasoning', String(parsed.content ?? ''));
+            // --- Agent text response ---
+            case 'assistant.message': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const content = typeof data?.content === 'string' ? data.content : '';
+              if (content) this.emit('text', content);
+              const toolRequests = Array.isArray(data?.toolRequests) ? data.toolRequests : [];
+              for (const req of toolRequests) {
+                const r = req as Record<string, unknown>;
+                const name = String(r.name ?? '');
+                const args = typeof r.arguments === 'object'
+                  ? JSON.stringify(r.arguments).slice(0, 200) : '';
+                if (name) this.emit('tool_start', name, args);
+              }
               break;
+            }
             case 'assistant.message_delta':
               this.emit('text', String(parsed.content ?? ''));
               break;
+
+            // --- Reasoning ---
+            case 'assistant.reasoning': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const content = typeof data?.content === 'string' ? data.content : '';
+              if (content) this.emit('reasoning', content);
+              break;
+            }
+            case 'assistant.reasoning_delta':
+              if (parsed.content) this.emit('reasoning', String(parsed.content));
+              break;
+
+            // --- Tool execution ---
+            case 'tool.execution_start': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const toolName = String(data?.toolName ?? '');
+              const args = typeof data?.arguments === 'object'
+                ? JSON.stringify(data.arguments).slice(0, 200) : '';
+              if (toolName) this.emit('tool_start', toolName, args);
+              break;
+            }
+            case 'tool.execution_complete': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const toolName = String(data?.toolName ?? '');
+              const result = data?.result as Record<string, unknown> | undefined;
+              const output = typeof result?.content === 'string'
+                ? result.content.slice(0, 200)
+                : typeof result?.detailedContent === 'string'
+                  ? result.detailedContent.slice(0, 200) : '';
+              this.emit('tool_complete', toolName, output);
+              break;
+            }
+            // Legacy tool event formats
             case 'assistant.tool_start':
               this.emit('tool_start', String(parsed.tool ?? ''), String(parsed.input ?? ''));
               break;
             case 'assistant.tool_complete':
               this.emit('tool_complete', String(parsed.tool ?? ''), String(parsed.output ?? ''));
               break;
+
+            // --- Subagent lifecycle (mapped to tool events) ---
+            case 'subagent.started': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
+              this.emit('tool_start', `subagent:${name}`, '');
+              break;
+            }
+            case 'subagent.completed': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
+              this.emit('tool_complete', `subagent:${name}`, '');
+              break;
+            }
+
+            // --- Lifecycle events (silently consumed) ---
+            case 'user.message':
+            case 'assistant.turn_start':
+            case 'assistant.turn_end':
+              break;
+
             default:
               this.emit('text', line);
           }

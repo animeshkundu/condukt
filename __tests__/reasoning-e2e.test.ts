@@ -222,11 +222,12 @@ describe('Reasoning E2E', () => {
     expect(forwarded[1]).toBe(textEvent);
     expect(forwarded[2]).toBe(toolEvent);
 
-    // Verify storage: reasoning stored with prefix, text without prefix, tool not stored
+    // Verify storage: reasoning with prefix, text without prefix, tool with encoded prefix
     const stored = stateRuntime.getNodeOutput('exec-bridge', 'nodeA');
-    expect(stored.lines).toHaveLength(2); // reasoning + text (tool events not stored as lines)
+    expect(stored.lines).toHaveLength(3); // reasoning + text + tool (all persisted)
     expect(stored.lines[0]).toBe('\x00reasoning\x00deep thought');
     expect(stored.lines[1]).toBe('visible text');
+    expect(stored.lines[2]).toBe('\x00tool:start\x00read_file\x00/tmp/file.txt');
   });
 
   it('reasoning-only node (no text output) persists correctly', async () => {
