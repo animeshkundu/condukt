@@ -158,6 +158,18 @@ type EventHandler =
   | { event: 'idle'; handler: () => void }
   | { event: 'error'; handler: (err: Error) => void };
 
+/** Extract human-readable summary from tool arguments object. */
+function extractArgSummary(args: Record<string, unknown>): string {
+  for (const key of ['description', 'intent', 'summary', 'command', 'query',
+                      'path', 'pattern', 'glob', 'url', 'file_text']) {
+    const val = args[key];
+    if (typeof val === 'string' && val.length > 0) return val.slice(0, 200);
+  }
+  const firstStr = Object.values(args).find(v => typeof v === 'string' && (v as string).length > 0);
+  if (typeof firstStr === 'string') return firstStr.slice(0, 200);
+  return '';
+}
+
 class SubprocessSession implements CopilotSession {
   private child: ChildProcess | null = null;
   private handlers: EventHandler[] = [];
@@ -168,6 +180,7 @@ class SubprocessSession implements CopilotSession {
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private aborted = false;
+  private _toolCallNames = new Map<string, string>();
 
   get pid(): number | null {
     return this.child?.pid ?? null;
@@ -253,9 +266,10 @@ class SubprocessSession implements CopilotSession {
               for (const req of toolRequests) {
                 const r = req as Record<string, unknown>;
                 const name = String(r.name ?? '');
-                const args = typeof r.arguments === 'object'
-                  ? JSON.stringify(r.arguments).slice(0, 200) : '';
-                if (name) this.emit('tool_start', name, args);
+                const rArgs = typeof r.arguments === 'object' && r.arguments !== null
+                  ? r.arguments as Record<string, unknown> : null;
+                const argSummary = rArgs ? extractArgSummary(rArgs) : String(r.arguments ?? '').slice(0, 200);
+                if (name) this.emit('tool_start', name, argSummary);
               }
               break;
             }
@@ -278,14 +292,21 @@ class SubprocessSession implements CopilotSession {
             case 'tool.execution_start': {
               const data = parsed.data as Record<string, unknown> | undefined;
               const toolName = String(data?.toolName ?? '');
-              const args = typeof data?.arguments === 'object'
-                ? JSON.stringify(data.arguments).slice(0, 200) : '';
-              if (toolName) this.emit('tool_start', toolName, args);
+              const args = data?.arguments as Record<string, unknown> | undefined;
+              const summary = args ? extractArgSummary(args) : '';
+              // Track toolCallId → toolName for completion matching
+              const callId = String(data?.toolCallId ?? '');
+              if (callId && toolName) this._toolCallNames.set(callId, toolName);
+              if (toolName) this.emit('tool_start', toolName, summary);
               break;
             }
             case 'tool.execution_complete': {
               const data = parsed.data as Record<string, unknown> | undefined;
-              const toolName = String(data?.toolName ?? '');
+              const callId = String(data?.toolCallId ?? '');
+              let toolName = String(data?.toolName ?? '');
+              // Resolve tool name from start event if not in completion
+              if (!toolName && callId) toolName = this._toolCallNames.get(callId) ?? '';
+              this._toolCallNames.delete(callId);
               const result = data?.result as Record<string, unknown> | undefined;
               const output = typeof result?.content === 'string'
                 ? result.content.slice(0, 200)
@@ -327,12 +348,15 @@ class SubprocessSession implements CopilotSession {
             case 'assistant.turn_start':
             case 'assistant.turn_end':
             case 'session.info':
+            case 'result':
               break;
 
             default:
               this.emit('text', line);
           }
         } else {
+          // Non-JSON lines: filter internal CLI markers
+          if (line.includes('__BEGIN___COMMAND_DONE_MARKER') || line.includes('__END___COMMAND_DONE_MARKER')) return;
           this.emit('text', line);
         }
       });
