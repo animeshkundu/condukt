@@ -160,6 +160,16 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
+      session.on('reasoning', (text: string) => {
+        ctx.emitOutput({
+          type: 'node:reasoning',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          content: text,
+          ts: Date.now(),
+        });
+      });
+
       session.on('tool_start', (tool: string, toolInput: string) => {
         ctx.emitOutput({
           type: 'node:tool',

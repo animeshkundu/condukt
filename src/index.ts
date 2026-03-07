@@ -3,6 +3,8 @@ export { run, computeFrontier, validateGraph, normalizeTargets } from './schedul
 export { agent, wasCompletedBeforeCrash } from './agent';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
 export { verify, property } from './verify';
+export { createHmrSingleton } from './hmr-singleton';
+export { setupOnce, clearSetupCache } from './setup-once';
 
 // Types
 export type {
@@ -26,6 +28,6 @@ export type {
   GateResolvedEvent, NodeRetryingEvent, EdgeTraversedEvent,
   ArtifactWrittenEvent, CostRecordedEvent, MetadataEvent,
   NodeResetEvent,
-  NodeOutputEvent, NodeToolEvent,
+  NodeOutputEvent, NodeToolEvent, NodeReasoningEvent,
   GraphNodeSkeleton, GraphEdgeSkeleton,
 } from './events';

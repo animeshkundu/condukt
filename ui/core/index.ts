@@ -20,8 +20,13 @@ export { STATUS_COLORS, sc } from '../components/node-panel/types';
 export { useFlowExecution, useFlowExecutions } from '../hooks/useFlowExecution';
 export type { FlowSSEStatus } from '../hooks/useFlowExecution';
 export { useNodeOutput } from '../hooks/useNodeOutput';
+export { useNodeArtifact } from '../hooks/useNodeArtifact';
 export { useAutoSelectNode } from '../hooks/useAutoSelectNode';
 export { useNodeNavigation } from '../hooks/useNodeNavigation';
+
+// Markdown content renderer
+export { MarkdownContent } from '../components/MarkdownContent';
+export type { MarkdownContentProps } from '../components/MarkdownContent';
 
 // ANSI terminal output utilities
 export { ansiToHtml, stripAnsi, hasAnsi } from '../ansi';

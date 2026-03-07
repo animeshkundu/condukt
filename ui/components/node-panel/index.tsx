@@ -29,6 +29,7 @@ import { Gate } from './Gate';
 import { Controls } from './Controls';
 import { Output } from './Output';
 import type { OutputRenderer } from './Output';
+import { Artifact } from './Artifact';
 
 interface NodePanelProps {
   children: React.ReactNode;
@@ -60,6 +61,7 @@ export const NodePanel = Object.assign(NodePanelRoot, {
   Gate,
   Controls,
   Output,
+  Artifact,
 });
 
 export type { OutputRenderer };

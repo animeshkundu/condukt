@@ -393,6 +393,55 @@ describe('agent factory', () => {
     await expect(nodeFn(input, ctx)).rejects.toThrow(FlowAbortedError);
   });
 
+  it('streams reasoning events via emitOutput', async () => {
+    const config: AgentConfig = {
+      objective: 'test',
+      tools: [],
+      promptBuilder: () => 'go',
+    };
+
+    const nodeFn = agent(config);
+    const input = createMockInput();
+    const ctx = createMockContext(mockRuntime);
+
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => {
+        mockSession._emit('reasoning', 'thinking about it');
+        mockSession._emit('reasoning', 'still thinking');
+        mockSession._emit('text', 'final answer');
+        mockSession._emit('idle');
+      });
+    });
+
+    await nodeFn(input, ctx);
+
+    const emitCalls = (ctx.emitOutput as ReturnType<typeof vi.fn>).mock.calls;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const events = emitCalls.map((c: any[]) => c[0] as OutputEvent);
+
+    // Should have: 2 reasoning + 1 text = 3 events
+    expect(events).toHaveLength(3);
+
+    const reasoningEvents = events.filter(e => e.type === 'node:reasoning');
+    expect(reasoningEvents).toHaveLength(2);
+    expect(reasoningEvents[0]).toMatchObject({
+      type: 'node:reasoning',
+      content: 'thinking about it',
+      nodeId: 'node-1',
+    });
+    expect(reasoningEvents[1]).toMatchObject({
+      type: 'node:reasoning',
+      content: 'still thinking',
+      nodeId: 'node-1',
+    });
+
+    // Verify ordering: reasoning events come before text events
+    const allTypes = events.map(e => e.type);
+    const firstReasoning = allTypes.indexOf('node:reasoning');
+    const firstOutput = allTypes.indexOf('node:output');
+    expect(firstReasoning).toBeLessThan(firstOutput);
+  });
+
   it('deletes stale artifact before starting', async () => {
     const fs = await import('node:fs');
     (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);

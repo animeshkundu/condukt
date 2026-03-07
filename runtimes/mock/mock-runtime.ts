@@ -13,6 +13,8 @@ import * as path from 'path';
 export interface MockNodeConfig {
   /** Text lines to emit (each becomes a 'text' event). */
   text?: string[];
+  /** Reasoning lines to emit (each becomes a 'reasoning' event, emitted before text). */
+  reasoning?: string[];
   /** Tool call sequence to emit as tool_start / tool_complete pairs. */
   tools?: Array<{ name: string; input: string; output: string }>;
   /** Artifact content to write to `<cwd>/<artifactFilename>` (if provided). */
@@ -25,6 +27,7 @@ export interface MockNodeConfig {
 
 type SessionEvent =
   | { event: 'text'; handler: (text: string) => void }
+  | { event: 'reasoning'; handler: (text: string) => void }
   | { event: 'tool_start'; handler: (tool: string, input: string) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
@@ -81,6 +84,14 @@ class MockAgentSession implements AgentSession {
     const execute = () => {
       if (this.aborted) return;
 
+      // Emit reasoning events (before text, matching real agent behavior)
+      if (this.nodeConfig.reasoning) {
+        for (const line of this.nodeConfig.reasoning) {
+          if (this.aborted) return;
+          this.emit('reasoning', line);
+        }
+      }
+
       // Emit text events
       if (this.nodeConfig.text) {
         for (const line of this.nodeConfig.text) {
@@ -129,11 +140,12 @@ class MockAgentSession implements AgentSession {
   }
 
   on(event: 'text', handler: (text: string) => void): void;
+  on(event: 'reasoning', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as SessionEvent);
   }
 

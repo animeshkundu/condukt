@@ -25,6 +25,7 @@
     "runtimes/**/*",
     "ui/**/*",
     "theme/**/*",
+    "utils/**/*",
     "__tests__/**/*",
     "examples/**/*"
   ],

@@ -56,8 +56,11 @@ export function useNodeOutput({ executionId, nodeId, baseUrl = '', autoScroll = 
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'heartbeat') return;
-        if (data.type === 'node:output' && data.content) {
-          setLines((prev) => [...prev, data.content]);
+        if ((data.type === 'node:output' || data.type === 'node:reasoning') && data.content) {
+          const line = data.type === 'node:reasoning'
+            ? `\x1b[2m[thinking] ${data.content}\x1b[0m`
+            : data.content;
+          setLines((prev) => [...prev, line]);
           setTotal((prev) => prev + 1);
 
           // Auto-scroll

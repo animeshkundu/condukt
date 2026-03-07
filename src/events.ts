@@ -2,7 +2,7 @@
  * Flow framework events — the complete event contract.
  *
  * 15 execution events (persisted to JSONL event log).
- * 2 output events (streamed, not persisted in event log).
+ * 3 output events (streamed, not persisted in event log).
  *
  * All events carry executionId + ts. Zero domain types.
  */
@@ -186,7 +186,7 @@ export type ExecutionEvent =
   | NodeResetEvent;
 
 // ---------------------------------------------------------------------------
-// Output events (2 types — streamed, NOT persisted in event log)
+// Output events (3 types — streamed, NOT persisted in event log)
 // ---------------------------------------------------------------------------
 
 export interface NodeOutputEvent {
@@ -207,5 +207,13 @@ export interface NodeToolEvent {
   readonly ts: number;
 }
 
+export interface NodeReasoningEvent {
+  readonly type: 'node:reasoning';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly content: string;
+  readonly ts: number;
+}
+
 /** Discriminated union of output events (streamed, not persisted). */
-export type OutputEvent = NodeOutputEvent | NodeToolEvent;
+export type OutputEvent = NodeOutputEvent | NodeToolEvent | NodeReasoningEvent;

@@ -673,4 +673,136 @@ describe('loop-back', () => {
     const content = fs.readFileSync(artifactPath, 'utf-8');
     expect(content).toBe('content-v2');
   });
+
+  // Test 24: feedbackExtractor provides rich feedback for loop-back retry context
+  it('uses feedbackExtractor for loop-back retry context', async () => {
+    const capturedFeedback: Record<string, string> = {};
+    let cRunCount = 0;
+
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async (input) => {
+          if (input.retryContext) {
+            capturedFeedback['A'] = input.retryContext.feedback;
+          }
+          return { action: 'default' };
+        }),
+        B: mkEntry(async (input) => {
+          if (input.retryContext) {
+            capturedFeedback['B'] = input.retryContext.feedback;
+          }
+          return { action: 'default' };
+        }),
+        C: mkEntry(async () => {
+          cRunCount++;
+          if (cRunCount < 2) {
+            return { action: 'diverged', artifact: 'Models disagree on metric X' };
+          }
+          return { action: 'converged' };
+        }, { output: 'c.txt' }),
+        D: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        A: { default: 'C' },
+        B: { default: 'C' },
+        C: { diverged: ['A', 'B'], converged: 'D' },
+      },
+      start: ['A', 'B'],
+      loopFallback: {
+        'C:diverged': {
+          source: 'C',
+          action: 'diverged',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+          feedbackExtractor: (sourceOutput) => `Disagreement: ${sourceOutput}`,
+        },
+        'A:default': {
+          source: 'A',
+          action: 'default',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+        },
+        'B:default': {
+          source: 'B',
+          action: 'default',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+        },
+      },
+    };
+
+    const opts = mkOpts();
+    const result = await run(graph, opts);
+
+    expect(result.completed).toBe(true);
+    expect(cRunCount).toBe(2);
+    expect(capturedFeedback['A']).toBe('Disagreement: Models disagree on metric X');
+    expect(capturedFeedback['B']).toBe('Disagreement: Models disagree on metric X');
+  });
+
+  // Test 25: Without feedbackExtractor, falls back to "iteration N"
+  it('falls back to iteration N without feedbackExtractor', async () => {
+    const capturedFeedback: Record<string, string> = {};
+    let cRunCount = 0;
+
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async (input) => {
+          if (input.retryContext) {
+            capturedFeedback['A'] = input.retryContext.feedback;
+          }
+          return { action: 'default' };
+        }),
+        B: mkEntry(async (input) => {
+          if (input.retryContext) {
+            capturedFeedback['B'] = input.retryContext.feedback;
+          }
+          return { action: 'default' };
+        }),
+        C: mkEntry(async () => {
+          cRunCount++;
+          if (cRunCount < 2) {
+            return { action: 'diverged', artifact: 'Models disagree on metric X' };
+          }
+          return { action: 'converged' };
+        }, { output: 'c.txt' }),
+        D: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        A: { default: 'C' },
+        B: { default: 'C' },
+        C: { diverged: ['A', 'B'], converged: 'D' },
+      },
+      start: ['A', 'B'],
+      loopFallback: {
+        'C:diverged': {
+          source: 'C',
+          action: 'diverged',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+          // No feedbackExtractor — should fall back to "iteration N"
+        },
+        'A:default': {
+          source: 'A',
+          action: 'default',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+        },
+        'B:default': {
+          source: 'B',
+          action: 'default',
+          fallbackTarget: 'D',
+          maxIterations: 5,
+        },
+      },
+    };
+
+    const opts = mkOpts();
+    const result = await run(graph, opts);
+
+    expect(result.completed).toBe(true);
+    expect(cRunCount).toBe(2);
+    expect(capturedFeedback['A']).toBe('iteration 1');
+    expect(capturedFeedback['B']).toBe('iteration 1');
+  });
 });

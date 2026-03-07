@@ -22,6 +22,7 @@ export class StateRuntime {
   constructor(
     private readonly storage: StorageEngine,
     private readonly onEvent?: (event: ExecutionEvent) => void,
+    private readonly onOutput?: (event: OutputEvent) => void,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -61,9 +62,11 @@ export class StateRuntime {
   }
 
   handleOutput(event: OutputEvent): void {
-    if (event.type === 'node:output') {
-      this.storage.appendOutput(event.executionId, event.nodeId, event.content);
+    if (event.type === 'node:output' || event.type === 'node:reasoning') {
+      const prefix = event.type === 'node:reasoning' ? '\x00reasoning\x00' : '';
+      this.storage.appendOutput(event.executionId, event.nodeId, prefix + event.content);
     }
+    this.onOutput?.(event);
   }
 
   writeArtifact(execId: string, nodeId: string, name: string, content: string): void {

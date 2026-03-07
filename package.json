@@ -1,6 +1,6 @@
 {
   "name": "condukt",
-  "version": "0.2.1",
+  "version": "0.3.3",
   "description": "Composable AI agent workflow framework — execution, state, orchestration, runtimes, UI",
   "license": "MIT",
   "repository": {
@@ -22,44 +22,75 @@
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "require": "./dist/src/index.js",
       "default": "./dist/src/index.js"
     },
     "./state": {
       "types": "./dist/state/index.d.ts",
+      "import": "./dist/state/index.js",
+      "require": "./dist/state/index.js",
       "default": "./dist/state/index.js"
+    },
+    "./state/server": {
+      "types": "./dist/state/server.d.ts",
+      "import": "./dist/state/server.js",
+      "require": "./dist/state/server.js",
+      "default": "./dist/state/server.js"
     },
     "./bridge": {
       "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js",
+      "require": "./dist/bridge/index.js",
       "default": "./dist/bridge/index.js"
     },
     "./runtimes/copilot": {
       "types": "./dist/runtimes/copilot/index.d.ts",
+      "import": "./dist/runtimes/copilot/index.js",
+      "require": "./dist/runtimes/copilot/index.js",
       "default": "./dist/runtimes/copilot/index.js"
     },
     "./runtimes/mock": {
       "types": "./dist/runtimes/mock/index.d.ts",
+      "import": "./dist/runtimes/mock/index.js",
+      "require": "./dist/runtimes/mock/index.js",
       "default": "./dist/runtimes/mock/index.js"
     },
     "./ui": {
       "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js",
+      "require": "./dist/ui/index.js",
       "default": "./dist/ui/index.js"
     },
     "./ui/core": {
       "types": "./dist/ui/core/index.d.ts",
+      "import": "./dist/ui/core/index.js",
+      "require": "./dist/ui/core/index.js",
       "default": "./dist/ui/core/index.js"
     },
     "./ui/graph": {
       "types": "./dist/ui/graph/index.d.ts",
+      "import": "./dist/ui/graph/index.js",
+      "require": "./dist/ui/graph/index.js",
       "default": "./dist/ui/graph/index.js"
     },
     "./theme": {
       "types": "./dist/theme/index.d.ts",
+      "import": "./dist/theme/index.js",
+      "require": "./dist/theme/index.js",
       "default": "./dist/theme/index.js"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.ts",
+      "import": "./dist/utils/index.js",
+      "require": "./dist/utils/index.js",
+      "default": "./dist/utils/index.js"
     },
     "./ui/style.css": "./dist/ui/style.css"
   },
   "files": [
-    "dist"
+    "dist",
+    "ui/style.css"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node -e \"require('fs').cpSync('node_modules/@xyflow/react/dist/style.css','dist/ui/style.css')\"",
@@ -95,6 +126,8 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@testing-library/dom": "^10.4.1"
+    "@testing-library/dom": "^10.4.1",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1"
   }
 }

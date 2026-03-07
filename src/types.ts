@@ -73,6 +73,11 @@ export interface LoopFallbackEntry {
   readonly action: string;
   readonly fallbackTarget: EdgeTarget;
   readonly maxIterations?: number;
+  /** Extract rich feedback from source node output for loop-back retry context. */
+  readonly feedbackExtractor?: (
+    sourceOutput: string | null,
+    sourceMetadata: Record<string, unknown>,
+  ) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +162,7 @@ export interface AgentSession {
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
+  on(event: 'reasoning', handler: (text: string) => void): void;
   abort(): Promise<void>;
 }
 

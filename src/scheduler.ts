@@ -696,10 +696,11 @@ export async function run(
                 // ignore
               }
             }
-            loopRetryContexts.set(target, {
-              priorOutput,
-              feedback: `iteration ${currentIteration}`,
-            });
+            const fallback = graph.loopFallback?.[`${nodeId}:${action}`];
+            const feedback = fallback?.feedbackExtractor
+              ? fallback.feedbackExtractor(output.artifact ?? null, output.metadata ?? {})
+              : `iteration ${currentIteration}`;
+            loopRetryContexts.set(target, { priorOutput, feedback });
           }
 
           await resetLoopBody(

@@ -41,6 +41,8 @@ export interface CopilotSession {
   on(event: 'idle', handler: () => void): void;
   /** Agent encountered an error */
   on(event: 'error', handler: (err: Error) => void): void;
+  /** Subscribe to reasoning/thinking token output from the agent */
+  on(event: 'reasoning', handler: (text: string) => void): void;
 
   /** Abort the session -- kill the agent process */
   abort(): Promise<void>;

@@ -93,6 +93,7 @@ function createDefaultCommandFactory(options: SubprocessBackendOptions): Command
   return (config: SessionConfig): readonly [string, readonly string[]] => {
     const args: string[] = [
       '--model', config.model,
+      '--output-format', 'json',
       '--allow-all',          // Auto-approve all tool permissions (file, bash, URLs)
       '--no-ask-user',        // Agent works autonomously, never asks the user questions
       '--autopilot',          // Multi-turn: agent keeps working until task is complete
@@ -151,6 +152,7 @@ export class SubprocessBackend implements CopilotBackend {
 
 type EventHandler =
   | { event: 'text'; handler: (text: string) => void }
+  | { event: 'reasoning'; handler: (text: string) => void }
   | { event: 'tool_start'; handler: (tool: string, input: string) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
@@ -222,13 +224,44 @@ class SubprocessSession implements CopilotSession {
     // Set up heartbeat timeout
     this.resetHeartbeat();
 
-    // Stream stdout LINE BY LINE using readline
+    // Stream stdout LINE BY LINE using readline, parsing JSONL events.
     // (raw 'data' events split at arbitrary byte boundaries, breaking words mid-line)
     if (this.child.stdout) {
       const rl = createInterface({ input: this.child.stdout });
       rl.on('line', (line: string) => {
         this.resetHeartbeat();
-        this.emit('text', line);
+
+        if (line.trim() === '') return;
+
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          if (line.startsWith('{')) {
+            parsed = JSON.parse(line);
+          }
+        } catch {
+          // Not valid JSON — fall through to text
+        }
+
+        if (parsed && typeof parsed.type === 'string') {
+          switch (parsed.type) {
+            case 'assistant.reasoning_delta':
+              this.emit('reasoning', String(parsed.content ?? ''));
+              break;
+            case 'assistant.message_delta':
+              this.emit('text', String(parsed.content ?? ''));
+              break;
+            case 'assistant.tool_start':
+              this.emit('tool_start', String(parsed.tool ?? ''), String(parsed.input ?? ''));
+              break;
+            case 'assistant.tool_complete':
+              this.emit('tool_complete', String(parsed.tool ?? ''), String(parsed.output ?? ''));
+              break;
+            default:
+              this.emit('text', line);
+          }
+        } else {
+          this.emit('text', line);
+        }
       });
     }
 
@@ -270,11 +303,12 @@ class SubprocessSession implements CopilotSession {
   }
 
   on(event: 'text', handler: (text: string) => void): void;
+  on(event: 'reasoning', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as EventHandler);
   }
 

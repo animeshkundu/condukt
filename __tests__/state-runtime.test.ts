@@ -194,4 +194,77 @@ describe('StateRuntime', () => {
     expect(runtime.listExecutions()).toHaveLength(0);
     expect(storage.readEvents('exec-del')).toEqual([]);
   });
+
+  it('handleOutput fires onOutput callback for node:output', () => {
+    const calls: OutputEvent[] = [];
+    const rt = new StateRuntime(storage, undefined, (event) => calls.push(event));
+    const outputEvent: OutputEvent = {
+      type: 'node:output',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: 'hello',
+      ts: 1000,
+    };
+    rt.handleOutput(outputEvent);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(outputEvent);
+  });
+
+  it('handleOutput fires onOutput callback for node:reasoning', () => {
+    const calls: OutputEvent[] = [];
+    const rt = new StateRuntime(storage, undefined, (event) => calls.push(event));
+    const reasoningEvent: OutputEvent = {
+      type: 'node:reasoning',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: 'thinking about it',
+      ts: 1000,
+    };
+    rt.handleOutput(reasoningEvent);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(reasoningEvent);
+  });
+
+  it('handleOutput fires onOutput callback for node:tool', () => {
+    const calls: OutputEvent[] = [];
+    const rt = new StateRuntime(storage, undefined, (event) => calls.push(event));
+    const toolEvent: OutputEvent = {
+      type: 'node:tool',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      tool: 'search',
+      phase: 'start',
+      summary: 'searching...',
+      ts: 1000,
+    };
+    rt.handleOutput(toolEvent);
+    // node:tool is not persisted but callback should still fire
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(toolEvent);
+  });
+
+  it('handleOutput persists node:reasoning with prefix and reconstructs on read', () => {
+    const rt = new StateRuntime(storage);
+    rt.handleOutput({
+      type: 'node:reasoning',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: 'deep thought',
+      ts: 1000,
+    });
+    rt.handleOutput({
+      type: 'node:output',
+      executionId: 'exec-1',
+      nodeId: 'A',
+      content: 'visible output',
+      ts: 1100,
+    });
+
+    const output = rt.getNodeOutput('exec-1', 'A');
+    expect(output.lines).toHaveLength(2);
+    // Reasoning is stored with prefix
+    expect(output.lines[0]).toBe('\x00reasoning\x00deep thought');
+    // Regular output is stored as-is
+    expect(output.lines[1]).toBe('visible output');
+  });
 });
