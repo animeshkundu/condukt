@@ -294,6 +294,12 @@ class SubprocessSession implements CopilotSession {
               this.emit('tool_complete', toolName, output);
               break;
             }
+            case 'tool.execution_partial_result': {
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const partial = typeof data?.partialOutput === 'string' ? data.partialOutput : '';
+              if (partial) this.emit('text', partial);
+              break;
+            }
             // Legacy tool event formats
             case 'assistant.tool_start':
               this.emit('tool_start', String(parsed.tool ?? ''), String(parsed.input ?? ''));
@@ -320,6 +326,7 @@ class SubprocessSession implements CopilotSession {
             case 'user.message':
             case 'assistant.turn_start':
             case 'assistant.turn_end':
+            case 'session.info':
               break;
 
             default:
