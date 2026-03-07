@@ -63,7 +63,13 @@ export class StateRuntime {
 
   handleOutput(event: OutputEvent): void {
     if (event.type === 'node:output' && event.content) {
-      this.storage.appendOutput(event.executionId, event.nodeId, event.content);
+      if (event.tool) {
+        // Tool-attributed output: encode with tool name for per-tool classification
+        this.storage.appendOutput(event.executionId, event.nodeId,
+          `\x00tool:output\x00${event.tool}\x00${event.content}`);
+      } else {
+        this.storage.appendOutput(event.executionId, event.nodeId, event.content);
+      }
     } else if (event.type === 'node:reasoning' && event.content) {
       this.storage.appendOutput(event.executionId, event.nodeId, '\x00reasoning\x00' + event.content);
     } else if (event.type === 'node:tool') {

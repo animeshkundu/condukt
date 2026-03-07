@@ -155,6 +155,7 @@ type EventHandler =
   | { event: 'reasoning'; handler: (text: string) => void }
   | { event: 'tool_start'; handler: (tool: string, input: string) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
+  | { event: 'tool_output'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
   | { event: 'error'; handler: (err: Error) => void };
 
@@ -262,14 +263,15 @@ class SubprocessSession implements CopilotSession {
               const data = parsed.data as Record<string, unknown> | undefined;
               const content = typeof data?.content === 'string' ? data.content : '';
               if (content) this.emit('text', content);
+              // Pre-seed _toolCallNames from tool requests so tool.execution_complete
+              // can resolve names even if tool.execution_start lacks a toolCallId.
+              // Do NOT emit tool_start here — tool.execution_start handles that.
               const toolRequests = Array.isArray(data?.toolRequests) ? data.toolRequests : [];
               for (const req of toolRequests) {
                 const r = req as Record<string, unknown>;
                 const name = String(r.name ?? '');
-                const rArgs = typeof r.arguments === 'object' && r.arguments !== null
-                  ? r.arguments as Record<string, unknown> : null;
-                const argSummary = rArgs ? extractArgSummary(rArgs) : String(r.arguments ?? '').slice(0, 200);
-                if (name) this.emit('tool_start', name, argSummary);
+                const callId = String(r.toolCallId ?? '');
+                if (callId && name) this._toolCallNames.set(callId, name);
               }
               break;
             }
@@ -318,7 +320,14 @@ class SubprocessSession implements CopilotSession {
             case 'tool.execution_partial_result': {
               const data = parsed.data as Record<string, unknown> | undefined;
               const partial = typeof data?.partialOutput === 'string' ? data.partialOutput : '';
-              if (partial) this.emit('text', partial);
+              if (!partial) break;
+              const callId = String(data?.toolCallId ?? '');
+              const toolName = (callId && this._toolCallNames.get(callId)) || '';
+              if (toolName) {
+                this.emit('tool_output', toolName, partial);
+              } else {
+                this.emit('text', partial);
+              }
               break;
             }
             // Legacy tool event formats
@@ -403,9 +412,10 @@ class SubprocessSession implements CopilotSession {
   on(event: 'reasoning', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'tool_output' | 'idle' | 'error', handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as EventHandler);
   }
 

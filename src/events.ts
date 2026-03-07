@@ -194,6 +194,8 @@ export interface NodeOutputEvent {
   readonly executionId: string;
   readonly nodeId: string;
   readonly content: string;
+  /** Tool name when output is from a specific tool execution (tool.execution_partial_result). */
+  readonly tool?: string;
   readonly ts: number;
 }
 

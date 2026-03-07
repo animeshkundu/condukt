@@ -194,6 +194,18 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
+      session.on('tool_output', (tool: string, output: string) => {
+        outputLines.push(output);
+        ctx.emitOutput({
+          type: 'node:output',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          content: output,
+          tool,
+          ts: Date.now(),
+        });
+      });
+
       // Step 6: Send prompt
       session.send(promptStr);
 

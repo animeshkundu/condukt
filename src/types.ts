@@ -160,6 +160,7 @@ export interface AgentSession {
   on(event: 'text', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
   on(event: 'reasoning', handler: (text: string) => void): void;

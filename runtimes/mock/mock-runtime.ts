@@ -30,6 +30,7 @@ type SessionEvent =
   | { event: 'reasoning'; handler: (text: string) => void }
   | { event: 'tool_start'; handler: (tool: string, input: string) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
+  | { event: 'tool_output'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
   | { event: 'error'; handler: (err: Error) => void };
 
@@ -143,9 +144,10 @@ class MockAgentSession implements AgentSession {
   on(event: 'reasoning', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'tool_output' | 'idle' | 'error', handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as SessionEvent);
   }
 

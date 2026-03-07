@@ -37,6 +37,8 @@ export interface CopilotSession {
   on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
   /** Subscribe to tool execution completion */
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  /** Subscribe to tool execution output (partial results with tool attribution) */
+  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   /** Agent finished all work */
   on(event: 'idle', handler: () => void): void;
   /** Agent encountered an error */

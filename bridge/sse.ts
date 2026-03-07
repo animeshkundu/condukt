@@ -128,12 +128,21 @@ export function createNodeSSEStream(
       const page = stateRuntime.getNodeOutput(executionId, nodeId, 0, 10_000);
       const encoder = new TextEncoder();
       const REASONING_PREFIX = '\x00reasoning\x00';
+      const TOOL_OUTPUT_PREFIX = '\x00tool:output\x00';
       const TOOL_PREFIX = '\x00tool:';
       for (const line of page.lines) {
         if (line.startsWith(REASONING_PREFIX)) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'node:reasoning', executionId, nodeId,
             content: line.slice(REASONING_PREFIX.length), ts: 0,
+          })}\n\n`));
+        } else if (line.startsWith(TOOL_OUTPUT_PREFIX)) {
+          const rest = line.slice(TOOL_OUTPUT_PREFIX.length);
+          const sepIdx = rest.indexOf('\x00');
+          const tool = sepIdx >= 0 ? rest.slice(0, sepIdx) : '';
+          const content = sepIdx >= 0 ? rest.slice(sepIdx + 1) : rest;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            type: 'node:output', executionId, nodeId, content, tool, ts: 0,
           })}\n\n`));
         } else if (line.startsWith(TOOL_PREFIX)) {
           const rest = line.slice(1); // skip leading \x00
