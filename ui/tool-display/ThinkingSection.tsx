@@ -45,7 +45,7 @@ export function ensureAnimations(): void {
 
 // ── Thinking section item renderers ──────────────────────────────────────────
 
-function ThinkingTextItemView({ content }: { content: string }) {
+function ThinkingTextItemView({ content, renderMarkdown }: { content: string; renderMarkdown?: (content: string, key: string) => React.ReactNode }) {
   return (
     <div style={{
       padding: '6px 12px 6px 24px',
@@ -54,7 +54,7 @@ function ThinkingTextItemView({ content }: { content: string }) {
       fontSize: 12,
       fontFamily: MONO,
       lineHeight: 1.5,
-      whiteSpace: 'pre-wrap',
+      whiteSpace: renderMarkdown ? undefined : 'pre-wrap',
       wordBreak: 'break-word',
     }}>
       <span style={{
@@ -65,7 +65,7 @@ function ThinkingTextItemView({ content }: { content: string }) {
         fontSize: 8,
         lineHeight: 1,
       }}>&#9679;</span>
-      {content}
+      {renderMarkdown ? renderMarkdown(content, `thinking-text-${content.slice(0, 20)}`) : content}
     </div>
   );
 }
@@ -114,6 +114,7 @@ export interface ThinkingSectionProps {
   collapsed?: boolean;
   active?: boolean;
   onToggle?: () => void;
+  renderMarkdown?: (content: string, key: string) => React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -129,6 +130,7 @@ export function ThinkingSection({
   collapsed: controlledCollapsed,
   active = false,
   onToggle,
+  renderMarkdown,
   className,
   style,
 }: ThinkingSectionProps) {
@@ -152,8 +154,6 @@ export function ThinkingSection({
     <div
       className={className}
       style={{
-        border: '1px solid #3d3a36',
-        borderRadius: 8,
         margin: '4px 8px',
         position: 'relative',
         fontFamily: MONO,
@@ -221,7 +221,7 @@ export function ThinkingSection({
 
       {/* Content area */}
       {!collapsed && items.length > 0 && (
-        <div style={{ borderTop: '1px solid #3d3a36' }}>
+        <div style={{ border: '1px solid #3d3a36', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
           {items.map((item, idx) => {
             const isFirst = idx === 0;
             const isLast = idx === items.length - 1;
@@ -242,7 +242,7 @@ export function ThinkingSection({
                     background: '#3d3a36',
                   }} />
                 )}
-                {item.kind === 'thinking-text' && <ThinkingTextItemView content={item.content} />}
+                {item.kind === 'thinking-text' && <ThinkingTextItemView content={item.content} renderMarkdown={renderMarkdown} />}
                 {item.kind === 'pinned-tool' && <PinnedToolItemView tool={item.tool} />}
               </div>
             );

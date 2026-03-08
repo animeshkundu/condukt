@@ -177,7 +177,7 @@ export function agent(config: AgentConfig): NodeFn {
           nodeId: ctx.nodeId,
           tool,
           phase: 'start',
-          summary: toolInput.substring(0, 200),
+          summary: toolInput,
           ts: Date.now(),
         });
       });
@@ -189,7 +189,7 @@ export function agent(config: AgentConfig): NodeFn {
           nodeId: ctx.nodeId,
           tool,
           phase: 'complete',
-          summary: output.substring(0, 200),
+          summary: output,
           ts: Date.now(),
         });
       });

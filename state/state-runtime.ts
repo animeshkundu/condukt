@@ -14,6 +14,10 @@ import type {
 import type { ExecutionEvent, OutputEvent } from '../src/events';
 import { reduce, createEmptyProjection, replayEvents } from './reducer';
 
+function escapeForLog(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
 export class StateRuntime {
   private cache = new Map<string, ExecutionProjection>();
   // SYS-1: Per-execution async mutex — serializes events for each execution
@@ -66,15 +70,15 @@ export class StateRuntime {
       if (event.tool) {
         // Tool-attributed output: encode with tool name for per-tool classification
         this.storage.appendOutput(event.executionId, event.nodeId,
-          `\x00tool:output\x00${event.tool}\x00${event.content}`);
+          `\x00tool:output\x00${event.tool}\x00${escapeForLog(event.content)}`);
       } else {
-        this.storage.appendOutput(event.executionId, event.nodeId, event.content);
+        this.storage.appendOutput(event.executionId, event.nodeId, escapeForLog(event.content));
       }
     } else if (event.type === 'node:reasoning' && event.content) {
-      this.storage.appendOutput(event.executionId, event.nodeId, '\x00reasoning\x00' + event.content);
+      this.storage.appendOutput(event.executionId, event.nodeId, '\x00reasoning\x00' + escapeForLog(event.content));
     } else if (event.type === 'node:tool') {
       this.storage.appendOutput(event.executionId, event.nodeId,
-        `\x00tool:${event.phase}\x00${event.tool}\x00${event.summary}`);
+        `\x00tool:${event.phase}\x00${event.tool}\x00${escapeForLog(event.summary)}`);
     }
     this.onOutput?.(event);
   }

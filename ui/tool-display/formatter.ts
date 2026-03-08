@@ -294,7 +294,7 @@ const VERB_MAP: Record<string, string> = {
   default: 'Used',
 };
 
-function computeVerb(category: ToolCategory): string {
+export function computeVerb(category: ToolCategory): string {
   return VERB_MAP[category] ?? 'Used';
 }
 

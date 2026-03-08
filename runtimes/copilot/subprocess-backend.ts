@@ -164,10 +164,10 @@ function extractArgSummary(args: Record<string, unknown>): string {
   for (const key of ['description', 'intent', 'summary', 'command', 'query',
                       'path', 'pattern', 'glob', 'url', 'file_text']) {
     const val = args[key];
-    if (typeof val === 'string' && val.length > 0) return val.slice(0, 200);
+    if (typeof val === 'string' && val.length > 0) return val;
   }
   const firstStr = Object.values(args).find(v => typeof v === 'string' && (v as string).length > 0);
-  if (typeof firstStr === 'string') return firstStr.slice(0, 200);
+  if (typeof firstStr === 'string') return firstStr;
   return '';
 }
 
@@ -311,9 +311,9 @@ class SubprocessSession implements CopilotSession {
               this._toolCallNames.delete(callId);
               const result = data?.result as Record<string, unknown> | undefined;
               const output = typeof result?.content === 'string'
-                ? result.content.slice(0, 200)
+                ? result.content
                 : typeof result?.detailedContent === 'string'
-                  ? result.detailedContent.slice(0, 200) : '';
+                  ? result.detailedContent : '';
               this.emit('tool_complete', toolName, output);
               break;
             }

@@ -78,6 +78,7 @@ export function ResponsePartRenderer({
                 collapsed={part.collapsed}
                 active={part.active}
                 onToggle={onToggleThinking ? () => onToggleThinking(part.id) : undefined}
+                renderMarkdown={renderMarkdown}
               />
             );
 

@@ -1,7 +1,8 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import type { ToolInvocation } from './types';
+import { isSimpleData, isTerminalData } from './types';
 import { ensureAnimations } from './ThinkingSection';
 
 const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
@@ -60,41 +61,167 @@ export interface ToolProgressLineProps {
 export function ToolProgressLine({ tool, className, style }: ToolProgressLineProps) {
   ensureAnimations();
 
-  const message = tool.isComplete
-    ? (tool.pastTenseMessage ?? tool.invocationMessage)
-    : tool.invocationMessage;
+  const [expanded, setExpanded] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const hasDetails = tool.isComplete && !!tool.toolSpecificData;
 
+  // Running verb: when not complete, show active verb
   const isMcp = tool.category === 'mcp' || !!tool.serverName;
+  let message: string;
+  if (!tool.isComplete) {
+    if (isMcp) {
+      message = `Calling \`${tool.toolName}\`...`;
+    } else {
+      message = tool.invocationMessage;
+    }
+  } else {
+    message = tool.pastTenseMessage ?? tool.invocationMessage;
+  }
+
+  // Resolve the tool result text for expanded view
+  function getResultText(): string {
+    if (!tool.toolSpecificData) {
+      return tool.output.join('\n');
+    }
+    if (isSimpleData(tool.toolSpecificData)) {
+      return tool.toolSpecificData.output;
+    }
+    if (isTerminalData(tool.toolSpecificData)) {
+      return tool.toolSpecificData.output?.text ?? '';
+    }
+    return tool.output.join('\n');
+  }
+
+  const chevronChar = expanded ? '\u25BE' : '\u25B8'; // ▾ / ▸
 
   return (
     <div
       className={className}
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
         fontFamily: MONO,
-        fontSize: 13,
         margin: '0 0 6px',
-        paddingTop: 2,
-        paddingLeft: 8,
         ...style,
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      <ProgressIcon tool={tool} />
-      <span style={{ color: '#8a8578', fontSize: 12 }}>
-        {isMcp ? (
-          <>
-            {tool.verb}{' '}
-            <CodeBadge text={tool.toolName} />
-            {tool.serverName && (
-              <span style={{ opacity: 0.7 }}> – {tool.serverName} (MCP Server)</span>
-            )}
-          </>
-        ) : (
-          message
+      {/* Header line */}
+      <div
+        onClick={hasDetails ? () => setExpanded(e => !e) : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          fontSize: 13,
+          paddingTop: 2,
+          paddingLeft: 8,
+          cursor: hasDetails ? 'pointer' : 'default',
+        }}
+      >
+        <ProgressIcon tool={tool} />
+        <span style={{ color: '#8a8578', fontSize: 12, flex: 1 }}>
+          {isMcp && tool.isComplete ? (
+            <>
+              {tool.verb}{' '}
+              <CodeBadge text={tool.toolName} />
+              {tool.serverName && (
+                <span style={{ opacity: 0.7 }}> – {tool.serverName} (MCP Server)</span>
+              )}
+            </>
+          ) : isMcp && !tool.isComplete ? (
+            <>
+              Calling <CodeBadge text={tool.toolName} />
+              {tool.serverName && (
+                <span style={{ opacity: 0.7 }}> – {tool.serverName} (MCP Server)</span>
+              )}
+              <span style={{ opacity: 0.7 }}>...</span>
+            </>
+          ) : (
+            message
+          )}
+        </span>
+        {hasDetails && (
+          <span style={{
+            color: '#6b6660',
+            fontSize: 11,
+            opacity: hovered || expanded ? 1 : 0,
+            transition: 'opacity 150ms',
+            flexShrink: 0,
+          }}>
+            {chevronChar}
+          </span>
         )}
-      </span>
+      </div>
+
+      {/* Expanded content area */}
+      {expanded && hasDetails && (
+        <div style={{
+          border: '1px solid #3d3a36',
+          borderRadius: 8,
+          margin: '4px 0 4px 20px',
+          overflow: 'hidden',
+        }}>
+          {/* Input section */}
+          <div style={{ padding: '8px 12px' }}>
+            <div style={{
+              color: '#6b6660',
+              fontSize: 11,
+              fontWeight: 500,
+              textTransform: 'uppercase' as const,
+              letterSpacing: '0.08em',
+              marginBottom: 4,
+            }}>
+              Input
+            </div>
+            <pre style={{
+              fontFamily: MONO,
+              background: '#161411',
+              border: '1px solid #302e2b',
+              borderRadius: 6,
+              padding: '8px 12px',
+              fontSize: 11,
+              color: '#b1ada1',
+              maxHeight: 300,
+              overflowY: 'auto' as const,
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {tool.invocationMessage}
+            </pre>
+          </div>
+
+          {/* Output section */}
+          <div style={{ padding: '4px 12px 8px' }}>
+            <div style={{
+              color: '#6b6660',
+              fontSize: 11,
+              fontWeight: 500,
+              textTransform: 'uppercase' as const,
+              letterSpacing: '0.08em',
+              marginBottom: 4,
+            }}>
+              Output
+            </div>
+            <pre style={{
+              fontFamily: MONO,
+              background: '#161411',
+              border: '1px solid #302e2b',
+              borderRadius: 6,
+              padding: '8px 12px',
+              fontSize: 11,
+              color: '#b1ada1',
+              maxHeight: 300,
+              overflowY: 'auto' as const,
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {getResultText()}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

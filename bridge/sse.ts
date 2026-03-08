@@ -112,6 +112,10 @@ export function createExecutionSSEStream(
   );
 }
 
+function unescapeFromLog(s: string): string {
+  return s.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\\\/g, '\\');
+}
+
 /**
  * Create an SSE stream for a specific node's output.
  * Replays stored output lines, then streams live events filtered by executionId + nodeId.
@@ -134,13 +138,13 @@ export function createNodeSSEStream(
         if (line.startsWith(REASONING_PREFIX)) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'node:reasoning', executionId, nodeId,
-            content: line.slice(REASONING_PREFIX.length), ts: 0,
+            content: unescapeFromLog(line.slice(REASONING_PREFIX.length)), ts: 0,
           })}\n\n`));
         } else if (line.startsWith(TOOL_OUTPUT_PREFIX)) {
           const rest = line.slice(TOOL_OUTPUT_PREFIX.length);
           const sepIdx = rest.indexOf('\x00');
           const tool = sepIdx >= 0 ? rest.slice(0, sepIdx) : '';
-          const content = sepIdx >= 0 ? rest.slice(sepIdx + 1) : rest;
+          const content = sepIdx >= 0 ? unescapeFromLog(rest.slice(sepIdx + 1)) : unescapeFromLog(rest);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'node:output', executionId, nodeId, content, tool, ts: 0,
           })}\n\n`));
@@ -149,13 +153,13 @@ export function createNodeSSEStream(
           const parts = rest.split('\x00');
           const phase = (parts[0] ?? '').split(':')[1] ?? 'start';
           const tool = parts[1] ?? '';
-          const summary = parts[2] ?? '';
+          const summary = unescapeFromLog(parts[2] ?? '');
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'node:tool', executionId, nodeId, tool, phase, summary, ts: 0,
           })}\n\n`));
         } else {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-            type: 'node:output', executionId, nodeId, content: line, ts: 0,
+            type: 'node:output', executionId, nodeId, content: unescapeFromLog(line), ts: 0,
           })}\n\n`));
         }
       }

@@ -11,7 +11,7 @@
 
 import type { ToolInvocation, ToolCategory } from './types';
 import type { ToolFormatterRegistry } from './formatter';
-import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable } from './formatter';
+import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable, computeVerb } from './formatter';
 
 // ── Thinking section item types ──────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ export class ResponsePartBuilder {
       toolCallId,
       category,
       friendlyName: fmt.friendlyName,
-      verb: _computeVerb(category),
+      verb: computeVerb(category),
       serverName: undefined,
       isPinnable: isPinnable(toolName),
       invocationMessage: message || fmt.friendlyName,
@@ -220,6 +220,8 @@ export class ResponsePartBuilder {
    * Always pins to the active thinking section (creating one if needed).
    */
   onReasoning(content: string): void {
+    if (!content) return;
+
     this._ensureThinkingSection();
 
     // Merge with last thinking-text item if possible
@@ -330,15 +332,4 @@ export class ResponsePartBuilder {
 
     this._activeThinking = null;
   }
-}
-
-// ── Helper for onToolStartRaw (avoids circular import with formatter) ────────
-
-const VERB_MAP: Record<string, string> = {
-  shell: 'Ran', file: 'Read', search: 'Searched', edit: 'Edited',
-  subagent: 'Delegated', task: 'Updated', mcp: 'Ran', default: 'Used',
-};
-
-function _computeVerb(category: ToolCategory): string {
-  return VERB_MAP[category] ?? 'Used';
 }
