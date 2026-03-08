@@ -27,12 +27,14 @@ import {
   classifyTool,
   createToolInvocation,
   completeToolInvocation as completeInvocation,
+  isPinnable,
 } from '../ui/tool-display/formatter';
 
 import {
   ResponsePartBuilder,
 } from '../ui/tool-display/response-parts';
 
+import type { ResponsePart, ThinkingSectionPart, ToolProgressPart, MarkdownPart, StatusPart } from '../ui/tool-display/response-parts';
 import type { ToolInvocation } from '../ui/tool-display/types';
 import { isTerminalData, isSimpleData, isSubagentData, isTodoData } from '../ui/tool-display/types';
 
@@ -292,11 +294,38 @@ describe('classifyTool', () => {
   });
 });
 
+describe('isPinnable', () => {
+  it('marks file/search/edit/shell tools as pinnable', () => {
+    expect(isPinnable('Bash')).toBe(true);
+    expect(isPinnable('Read')).toBe(true);
+    expect(isPinnable('Grep')).toBe(true);
+    expect(isPinnable('Glob')).toBe(true);
+    expect(isPinnable('Edit')).toBe(true);
+    expect(isPinnable('Write')).toBe(true);
+    expect(isPinnable('view')).toBe(true);
+    expect(isPinnable('create')).toBe(true);
+    expect(isPinnable('str_replace')).toBe(true);
+  });
+
+  it('marks MCP/subagent/meta tools as not pinnable', () => {
+    expect(isPinnable('kusto-mcp-server-executeQuery')).toBe(false);
+    expect(isPinnable('Task')).toBe(false);
+    expect(isPinnable('Agent')).toBe(false);
+    expect(isPinnable('AskUserQuestion')).toBe(false);
+    expect(isPinnable('Skill')).toBe(false);
+    expect(isPinnable('WebFetch')).toBe(false);
+    expect(isPinnable('WebSearch')).toBe(false);
+  });
+});
+
 describe('createToolInvocation + completeToolInvocation', () => {
   it('creates and completes a bash invocation', () => {
     const registry = createToolFormatterRegistry();
     const inv = createToolInvocation(registry, 'Bash', 'tc-1', { command: 'npm test' });
     expect(inv.category).toBe('shell');
+    expect(inv.friendlyName).toBe('Shell');
+    expect(inv.verb).toBe('Ran');
+    expect(inv.isPinnable).toBe(true);
     expect(inv.invocationMessage).toBe('npm test');
     expect(inv.isComplete).toBe(false);
 
@@ -310,6 +339,9 @@ describe('createToolInvocation + completeToolInvocation', () => {
     const registry = createToolFormatterRegistry();
     const inv = createToolInvocation(registry, 'Read', 'tc-2', { file_path: 'src/app.ts' });
     expect(inv.category).toBe('file');
+    expect(inv.friendlyName).toBe('Read');
+    expect(inv.verb).toBe('Read');
+    expect(inv.isPinnable).toBe(true);
     expect(inv.invocationMessage).toContain('src/app.ts');
 
     completeInvocation(registry, inv, 'file contents here', { file_path: 'src/app.ts' });
@@ -321,9 +353,28 @@ describe('createToolInvocation + completeToolInvocation', () => {
     const registry = createToolFormatterRegistry();
     const inv = createToolInvocation(registry, 'Task', 'tc-3', { description: 'Find bugs', subagent_type: 'reviewer', prompt: 'Review code' });
     expect(inv.category).toBe('subagent');
+    expect(inv.isPinnable).toBe(false);
 
     completeInvocation(registry, inv, 'Found 2 issues', { description: 'Find bugs', subagent_type: 'reviewer', prompt: 'Review code' });
     expect(isSubagentData(inv.toolSpecificData!)).toBe(true);
+  });
+
+  it('creates an MCP tool invocation with server name', () => {
+    const custom = {
+      'executeQuery': {
+        friendlyName: 'Kusto',
+        category: 'mcp' as const,
+        formatStart: () => 'Kusto query',
+        formatComplete: () => undefined,
+      },
+    };
+    const registry = createToolFormatterRegistry(custom);
+    const inv = createToolInvocation(registry, 'kusto-mcp-server-executeQuery', 'tc-4', {});
+    expect(inv.category).toBe('mcp');
+    expect(inv.friendlyName).toBe('Kusto');
+    expect(inv.verb).toBe('Ran');
+    expect(inv.isPinnable).toBe(false);
+    expect(inv.serverName).toBe('kusto-mcp-server');
   });
 });
 
@@ -343,7 +394,7 @@ describe('type guards', () => {
 
   it('isSubagentData', () => {
     expect(isSubagentData({ agentName: 'test', prompt: 'do stuff' })).toBe(true);
-    expect(isSubagentData({ todoList: [] })).toBe(false);
+    expect(isSubagentData({ title: 'test', todoList: [] })).toBe(false);
   });
 
   it('isTodoData', () => {
@@ -353,7 +404,7 @@ describe('type guards', () => {
 });
 
 
-// ── ResponsePartBuilder ──────────────────────────────────────────────────────
+// ── ResponsePartBuilder (pin-to-thinking model) ──────────────────────────────
 
 describe('ResponsePartBuilder', () => {
   it('accumulates markdown parts', () => {
@@ -362,70 +413,76 @@ describe('ResponsePartBuilder', () => {
     builder.onOutput('world');
     expect(builder.parts).toHaveLength(1);
     expect(builder.parts[0].kind).toBe('markdown');
-    expect((builder.parts[0] as { content: string }).content).toBe('Hello world');
+    expect((builder.parts[0] as MarkdownPart).content).toBe('Hello world');
   });
 
-  it('creates new markdown part after tool group', () => {
-    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
-    builder.onOutput('Before');
-    builder.onToolStart('Bash', 'tc-1', { command: 'ls' });
-    builder.onToolComplete('tc-1', 'file.txt');
-    builder.onOutput('After');
-    expect(builder.parts).toHaveLength(3);
-    expect(builder.parts[0].kind).toBe('markdown');
-    expect(builder.parts[1].kind).toBe('tool-group');
-    expect(builder.parts[2].kind).toBe('markdown');
-  });
-
-  it('groups consecutive tools', () => {
-    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
-    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
-    builder.onToolStart('Read', 'tc-2', { file_path: 'b.ts' });
-    builder.onToolComplete('tc-1', 'content a');
-    builder.onToolComplete('tc-2', 'content b');
-    expect(builder.parts).toHaveLength(1);
-    expect(builder.parts[0].kind).toBe('tool-group');
-    const group = builder.parts[0] as { tools: ToolInvocation[] };
-    expect(group.tools).toHaveLength(2);
-  });
-
-  it('tracks group status', () => {
-    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
-    builder.onToolStart('Bash', 'tc-1', { command: 'echo hi' });
-
-    const group = builder.parts[0] as { status: string; tools: ToolInvocation[] };
-    expect(group.status).toBe('running');
-
-    builder.onToolComplete('tc-1', 'hi');
-    expect(group.status).toBe('complete');
-  });
-
-  it('marks group error when tool errors', () => {
-    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
-    builder.onToolStart('Bash', 'tc-1', { command: 'false' });
-    builder.onToolComplete('tc-1', 'error', true);
-    const group = builder.parts[0] as { status: string };
-    expect(group.status).toBe('error');
-  });
-
-  it('accumulates reasoning', () => {
+  it('pins reasoning into thinking section', () => {
     const builder = new ResponsePartBuilder();
     builder.onReasoning('Step 1');
     builder.onReasoning('Step 2');
     expect(builder.parts).toHaveLength(1);
-    expect(builder.parts[0].kind).toBe('thinking');
-    expect((builder.parts[0] as { content: string }).content).toBe('Step 1\nStep 2');
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.active).toBe(true);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].kind).toBe('thinking-text');
+    expect((section.items[0] as { content: string }).content).toBe('Step 1\nStep 2');
   });
 
-  it('closes reasoning on output', () => {
-    const builder = new ResponsePartBuilder();
+  it('pins pinnable tools (Read, Bash) into thinking section', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onReasoning('Let me check the file...');
+    builder.onToolStart('Read', 'tc-1', { file_path: 'src/app.ts' });
+    builder.onToolStart('Grep', 'tc-2', { pattern: 'import' });
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.items).toHaveLength(3); // thinking-text + 2 pinned-tool
+    expect(section.items[0].kind).toBe('thinking-text');
+    expect(section.items[1].kind).toBe('pinned-tool');
+    expect(section.items[2].kind).toBe('pinned-tool');
+  });
+
+  it('renders standalone tools (MCP) as tool-progress lines', () => {
+    const custom = {
+      'kusto-executeQuery': {
+        friendlyName: 'Kusto',
+        category: 'mcp' as const,
+        formatStart: () => 'Kusto query',
+        formatComplete: () => undefined,
+      },
+    };
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry(custom) });
+    builder.onToolStart('kusto-executeQuery', 'tc-1', {});
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('tool-progress');
+    const progress = builder.parts[0] as ToolProgressPart;
+    expect(progress.tool.friendlyName).toBe('Kusto');
+  });
+
+  it('finalizes thinking section when output arrives', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onReasoning('Thinking...');
-    builder.onOutput('Result');
-    builder.onReasoning('More thinking');
-    expect(builder.parts).toHaveLength(3);
-    expect(builder.parts[0].kind).toBe('thinking');
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+    builder.onOutput('Here is my analysis');
+    expect(builder.parts).toHaveLength(2);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.active).toBe(false);
+    expect(section.collapsed).toBe(true);
     expect(builder.parts[1].kind).toBe('markdown');
-    expect(builder.parts[2].kind).toBe('thinking');
+  });
+
+  it('creates new thinking section after finalization', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onReasoning('First thought');
+    builder.onOutput('Response 1');
+    builder.onReasoning('Second thought');
+    expect(builder.parts).toHaveLength(3);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    expect(builder.parts[1].kind).toBe('markdown');
+    expect(builder.parts[2].kind).toBe('thinking-section');
   });
 
   it('handles metadata tools as status lines', () => {
@@ -433,7 +490,7 @@ describe('ResponsePartBuilder', () => {
     builder.onToolStart('report_intent', 'tc-1', { intent: 'Analyzing code' });
     expect(builder.parts).toHaveLength(1);
     expect(builder.parts[0].kind).toBe('status');
-    expect((builder.parts[0] as { text: string }).text).toBe('Analyzing code');
+    expect((builder.parts[0] as StatusPart).text).toBe('Analyzing code');
   });
 
   it('tracks pending tool count', () => {
@@ -452,8 +509,9 @@ describe('ResponsePartBuilder', () => {
     builder.onToolStart('Bash', 'tc-1', { command: 'long-cmd' });
     builder.onToolOutput('tc-1', 'line 1');
     builder.onToolOutput('tc-1', 'line 2');
-    const group = builder.parts[0] as { tools: ToolInvocation[] };
-    expect(group.tools[0].output).toEqual(['line 1', 'line 2']);
+    const section = builder.parts[0] as ThinkingSectionPart;
+    const pinnedTool = section.items[0] as { kind: string; tool: ToolInvocation };
+    expect(pinnedTool.tool.output).toEqual(['line 1', 'line 2']);
   });
 
   it('reset clears all state', () => {
@@ -463,5 +521,153 @@ describe('ResponsePartBuilder', () => {
     builder.reset();
     expect(builder.parts).toHaveLength(0);
     expect(builder.pendingToolCount).toBe(0);
+  });
+
+  it('generates summary title when thinking section finalizes', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStart('Read', 'tc-1', { file_path: 'src/app.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+    builder.onOutput('Done');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.title).toContain('src/app.ts');
+    expect(section.verb).toBe('Read');
+  });
+
+  it('mixes standalone and pinned tools correctly', () => {
+    const custom = {
+      'kusto-executeQuery': {
+        friendlyName: 'Kusto',
+        category: 'mcp' as const,
+        formatStart: () => 'Kusto query',
+        formatComplete: () => undefined,
+      },
+    };
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry(custom) });
+
+    // Reasoning → creates thinking section
+    builder.onReasoning('Let me investigate');
+    // Pinnable tool → pins to thinking section
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+
+    // Standalone MCP tool → finalizes thinking, emits progress line
+    builder.onToolStart('kusto-executeQuery', 'tc-2', {});
+    builder.onToolComplete('tc-2', 'results');
+
+    // More output
+    builder.onOutput('Analysis complete');
+
+    expect(builder.parts).toHaveLength(3);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    expect(builder.parts[1].kind).toBe('tool-progress');
+    expect(builder.parts[2].kind).toBe('markdown');
+  });
+
+  it('pins markdown inside thinking section when tools are still running', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStart('Bash', 'tc-1', { command: 'npm test' });
+    builder.onOutput('Processing...');
+    // Tool still pending → markdown should be pinned inside thinking
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.items).toHaveLength(2); // pinned-tool + pinned-markdown
+    expect(section.items[1].kind).toBe('pinned-markdown');
+  });
+
+  it('thinking-only section gets first-line title', () => {
+    const builder = new ResponsePartBuilder();
+    builder.onReasoning('I need to analyze the error logs for patterns');
+    builder.onOutput('Found the issue');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.title).toBe('I need to analyze the error logs for patterns');
+    expect(section.verb).toBe('Thought about');
+  });
+
+  // ── I1: standalone tool complete does not finalize thinking-only section ──
+
+  it('standalone tool complete does not finalize thinking-only section (I1)', () => {
+    const custom = {
+      'kusto-query': {
+        friendlyName: 'Kusto',
+        category: 'mcp' as const,
+        formatStart: () => 'Kusto query',
+        formatComplete: () => undefined,
+      },
+    };
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry(custom) });
+
+    // Read → complete → standalone MCP → reasoning → MCP complete
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+    // Section finalizes because all pinned tools done
+
+    builder.onToolStart('kusto-query', 'tc-2', {}); // standalone
+    builder.onReasoning('Let me think about this...');
+    // Now we have thinking section 2 (active, thinking-only)
+
+    builder.onToolComplete('tc-2', 'results');
+    // tc-2 is NOT pinnable → should NOT finalize section 2
+
+    const thinkingSections = builder.parts.filter(p => p.kind === 'thinking-section');
+    expect(thinkingSections).toHaveLength(2);
+    // Section 2 should still be active (not prematurely finalized)
+    const section2 = thinkingSections[1] as ThinkingSectionPart;
+    expect(section2.active).toBe(true);
+  });
+
+  // ── I3: standalone tool start doesn't finalize when pinned tools pending ──
+
+  it('standalone tool start does not finalize section with pending pinned tools (I3)', () => {
+    const custom = {
+      'kusto-query': {
+        friendlyName: 'Kusto',
+        category: 'mcp' as const,
+        formatStart: () => 'Kusto query',
+        formatComplete: () => undefined,
+      },
+    };
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry(custom) });
+
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' }); // pinned, pending
+    builder.onToolStart('kusto-query', 'tc-2', {}); // standalone — should NOT finalize
+
+    // Read is still pending → thinking section should still be active
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.active).toBe(true);
+    expect(section.collapsed).toBe(false);
+
+    // Standalone tool rendered after the thinking section
+    expect(builder.parts[1].kind).toBe('tool-progress');
+  });
+
+  // ── I2: flush() finalizes open thinking section ──
+
+  it('flush() finalizes open thinking section (I2)', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onReasoning('Analyzing...');
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+
+    // Section has all pinned tools complete but no output arrived yet
+    // to trigger finalization — flush() should do it
+    const sectionBefore = builder.parts[0] as ThinkingSectionPart;
+    // Actually, all pinned tools completing triggers finalization already.
+    // Test the case where only reasoning exists:
+    builder.reset();
+    builder.onReasoning('Still thinking...');
+
+    expect((builder.parts[0] as ThinkingSectionPart).active).toBe(true);
+    builder.flush();
+    expect((builder.parts[0] as ThinkingSectionPart).active).toBe(false);
+    expect((builder.parts[0] as ThinkingSectionPart).collapsed).toBe(true);
+  });
+
+  it('flush() is a no-op when no active thinking section', () => {
+    const builder = new ResponsePartBuilder();
+    builder.onOutput('Hello');
+    builder.flush();
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('markdown');
   });
 });

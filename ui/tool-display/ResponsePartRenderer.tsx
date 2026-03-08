@@ -2,12 +2,11 @@
 
 import React from 'react';
 import type { ResponsePart } from './response-parts';
-import { ToolGroupCard } from './ToolGroupCard';
-import { ToolInvocationRow } from './ToolInvocationRow';
-import { ThinkingBlock } from './ThinkingBlock';
+import { ToolProgressLine } from './ToolProgressLine';
+import { ThinkingSection } from './ThinkingSection';
 import { StatusLine } from './StatusLine';
 
-// ── Markdown content (inline, lightweight) ───────────────────────────────────
+// ── Markdown content (inline, lightweight fallback) ──────────────────────────
 
 const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
 
@@ -23,8 +22,6 @@ function InlineMarkdown({ content }: { content: string }) {
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
       }}
-      // Safe: content is agent-generated markdown, not user HTML
-      dangerouslySetInnerHTML={undefined}
     >
       {content}
     </div>
@@ -37,10 +34,8 @@ export interface ResponsePartRendererProps {
   parts: readonly ResponsePart[];
   /** Optional: called to render markdown content. Defaults to plain text. */
   renderMarkdown?: (content: string, key: string) => React.ReactNode;
-  /** Optional: controls tool group collapsed state externally. */
-  onToggleGroup?: (groupId: string) => void;
-  /** Optional: controls thinking block collapsed state externally. */
-  onToggleThinking?: (thinkingId: string) => void;
+  /** Optional: controls thinking section collapsed state externally. */
+  onToggleThinking?: (sectionId: string) => void;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -48,13 +43,15 @@ export interface ResponsePartRendererProps {
 /**
  * Maps ResponseParts to React components.
  *
- * Consumers can provide a custom `renderMarkdown` for rich markdown rendering
- * (e.g. using condukt's MarkdownContent component). The default renders plain text.
+ * Routes:
+ * - markdown → renderMarkdown callback or InlineMarkdown
+ * - tool-progress → ToolProgressLine (flat standalone line)
+ * - thinking-section → ThinkingSection (collapsible block)
+ * - status → StatusLine (dim metadata)
  */
 export function ResponsePartRenderer({
   parts,
   renderMarkdown,
-  onToggleGroup,
   onToggleThinking,
   className,
   style,
@@ -68,27 +65,18 @@ export function ResponsePartRenderer({
               ? <React.Fragment key={part.id}>{renderMarkdown(part.content, part.id)}</React.Fragment>
               : <InlineMarkdown key={part.id} content={part.content} />;
 
-          case 'tool-group':
-            return (
-              <ToolGroupCard
-                key={part.id}
-                tools={part.tools}
-                collapsed={part.collapsed}
-                status={part.status}
-                onToggle={onToggleGroup ? () => onToggleGroup(part.id) : undefined}
-              >
-                {part.tools.map(tool => (
-                  <ToolInvocationRow key={tool.toolCallId} tool={tool} />
-                ))}
-              </ToolGroupCard>
-            );
+          case 'tool-progress':
+            return <ToolProgressLine key={part.id} tool={part.tool} />;
 
-          case 'thinking':
+          case 'thinking-section':
             return (
-              <ThinkingBlock
+              <ThinkingSection
                 key={part.id}
-                content={part.content}
+                items={part.items}
+                title={part.title}
+                verb={part.verb}
                 collapsed={part.collapsed}
+                active={part.active}
                 onToggle={onToggleThinking ? () => onToggleThinking(part.id) : undefined}
               />
             );

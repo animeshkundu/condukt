@@ -74,6 +74,14 @@ export interface ToolInvocation {
   toolName: string;
   toolCallId: string;
   category: ToolCategory;
+  /** Human-readable display name: "Shell", "Read", "Kusto Query" */
+  friendlyName: string;
+  /** Past-tense verb for completed state: "Ran", "Read", "Searched" */
+  verb: string;
+  /** MCP server name when tool is server-prefixed, e.g. "icm-mcp" */
+  serverName?: string;
+  /** Whether this tool should be absorbed into a thinking section. */
+  isPinnable: boolean;
   /** Human-readable action: "Read src/app/page.tsx", "Searched for `pattern`" */
   invocationMessage: string;
   pastTenseMessage?: string;

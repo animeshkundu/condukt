@@ -1,9 +1,10 @@
 /**
  * condukt/ui/tool-display — structured agent output rendering.
  *
- * Typed response parts model inspired by VS Code Copilot Chat (MIT).
- * Replaces flat ANSI line lists with a stream of typed parts:
- * markdown, tool-group, thinking, status.
+ * VS Code Copilot Chat-inspired "pin to thinking" model:
+ * - Pinnable tools absorbed into collapsible thinking sections
+ * - Standalone tools as flat progress lines
+ * - Agent speech as full-size markdown between sections
  */
 
 // Core data types
@@ -79,28 +80,30 @@ export {
   classifyTool,
   createToolInvocation,
   completeToolInvocation,
+  isPinnable,
 } from './formatter';
 
 // Response part model + builder
 export type {
   ResponsePart,
   MarkdownPart,
-  ToolGroupPart,
-  ThinkingPart,
+  ToolProgressPart,
+  ThinkingSectionPart,
   StatusPart,
+  ThinkingSectionItem,
+  ThinkingTextItem,
+  PinnedToolItem,
+  PinnedMarkdownItem,
   ResponsePartBuilderOptions,
 } from './response-parts';
 export { ResponsePartBuilder } from './response-parts';
 
 // React components
-export { ToolGroupCard } from './ToolGroupCard';
-export type { ToolGroupCardProps } from './ToolGroupCard';
+export { ToolProgressLine } from './ToolProgressLine';
+export type { ToolProgressLineProps } from './ToolProgressLine';
 
-export { ToolInvocationRow } from './ToolInvocationRow';
-export type { ToolInvocationRowProps } from './ToolInvocationRow';
-
-export { ThinkingBlock } from './ThinkingBlock';
-export type { ThinkingBlockProps } from './ThinkingBlock';
+export { ThinkingSection, ensureAnimations } from './ThinkingSection';
+export type { ThinkingSectionProps } from './ThinkingSection';
 
 export { StatusLine } from './StatusLine';
 export type { StatusLineProps } from './StatusLine';

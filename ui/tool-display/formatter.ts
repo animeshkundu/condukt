@@ -257,6 +257,67 @@ const DEFAULT_FORMATTER: ToolFormatter = {
   }),
 };
 
+// ── Pinnable classification (matches VS Code shouldPinPart) ──────────────────
+
+const PINNABLE_TOOLS = new Set([
+  // Shell
+  'Bash', 'bash', 'powershell',
+  // File
+  'Read', 'view', 'show_file',
+  // Search
+  'Grep', 'grep', 'rg', 'Glob', 'glob', 'search', 'semantic_code_search',
+  // Edit
+  'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'str_replace', 'create', 'insert', 'undo_edit',
+]);
+
+/**
+ * Returns true if a tool should be absorbed into the active thinking section
+ * (pinned), matching VS Code's `shouldPinPart()` logic.
+ *
+ * Pinnable: file, search, edit, shell tools.
+ * NOT pinnable: MCP tools, subagent/task tools, ask_user, Skill, meta tools.
+ */
+export function isPinnable(toolName: string): boolean {
+  return PINNABLE_TOOLS.has(toolName);
+}
+
+// ── Verb computation ─────────────────────────────────────────────────────────
+
+const VERB_MAP: Record<string, string> = {
+  shell: 'Ran',
+  file: 'Read',
+  search: 'Searched',
+  edit: 'Edited',
+  subagent: 'Delegated',
+  task: 'Updated',
+  mcp: 'Ran',
+  default: 'Used',
+};
+
+function computeVerb(category: ToolCategory): string {
+  return VERB_MAP[category] ?? 'Used';
+}
+
+// ── Server name extraction ────────────────────────────────────────────────────
+
+/**
+ * Extract MCP server name from a prefixed tool name.
+ * E.g. `kusto-mcp-server-executeQuery` → `kusto-mcp-server`
+ * Returns undefined if no server prefix detected.
+ */
+function extractServerName(toolName: string, registry: ToolFormatterRegistry): string | undefined {
+  // If the tool has a direct formatter, it's not MCP-prefixed
+  if (registry[toolName]) { return undefined; }
+  const lastDash = toolName.lastIndexOf('-');
+  if (lastDash > 0) {
+    const suffix = toolName.slice(lastDash + 1);
+    if (registry[suffix]) {
+      return toolName.slice(0, lastDash);
+    }
+  }
+  return undefined;
+}
+
 // ── Registry factory ─────────────────────────────────────────────────────────
 
 /**
@@ -320,11 +381,22 @@ export function createToolInvocation(
   args: Record<string, unknown>,
 ): ToolInvocation {
   const fmt = resolveFormatter(registry, toolName);
+  const category = fmt.category;
+  let msg = fmt.formatStart(toolName, args);
+  // If message is essentially empty after the verb, fall back to friendlyName + toolName
+  const stripped = msg.replace(/^(Read|Searched|Search|Editing|Writing|Creating|Show|Inserting|Undoing)\s*/i, '').trim();
+  if (!stripped || stripped === '``' || stripped === "for regex ``" || stripped === "for files matching ``") {
+    msg = fmt.friendlyName !== 'Tool' ? fmt.friendlyName : toolName;
+  }
   return {
     toolName,
     toolCallId,
-    category: fmt.category,
-    invocationMessage: fmt.formatStart(toolName, args),
+    category,
+    friendlyName: fmt.friendlyName,
+    verb: computeVerb(category),
+    serverName: extractServerName(toolName, registry),
+    isPinnable: isPinnable(toolName),
+    invocationMessage: msg,
     isComplete: false,
     isError: false,
     output: [],
@@ -346,7 +418,11 @@ export function completeToolInvocation(
   invocation.isComplete = true;
   invocation.isError = isError;
   invocation.toolSpecificData = fmt.formatComplete(invocation.toolName, result, args);
-  if (fmt.friendlyName) {
-    invocation.pastTenseMessage = invocation.invocationMessage;
-  }
+  // Generate past-tense message using the verb + stripped present-tense prefix
+  const stripped = invocation.invocationMessage.replace(
+    /^(Reading|Searching|Editing|Writing|Creating|Fetching|Executing|Inserting|Undoing|Delegating|Updating|Listing|Showing)\s+/i, ''
+  );
+  invocation.pastTenseMessage = stripped !== invocation.invocationMessage
+    ? invocation.verb + ' ' + stripped
+    : invocation.invocationMessage;
 }
