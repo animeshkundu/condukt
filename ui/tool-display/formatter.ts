@@ -77,6 +77,53 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
     },
   },
 
+  // Interactive PowerShell session tools (GPT-5.4 shell management)
+  read_powershell: {
+    friendlyName: 'Read Shell',
+    category: 'shell',
+    formatStart: (_name, args) => {
+      const id = String(args.shellId ?? args.id ?? '');
+      return id ? `Read output from shell ${id}` : 'Read shell output';
+    },
+    formatComplete: (_name, result): TerminalToolData => ({
+      commandLine: { original: 'read_powershell' },
+      language: 'powershell',
+      output: result ? { text: result.replace(/\n/g, '\r\n') } : undefined,
+    }),
+  },
+
+  write_powershell: {
+    friendlyName: 'Write Shell',
+    category: 'shell',
+    formatStart: (_name, args) => {
+      const id = String(args.shellId ?? args.id ?? '');
+      const input = String(args.input ?? args.command ?? '');
+      return id ? `Write to shell ${id}${input ? ': ' + input.slice(0, 60) : ''}` : 'Write to shell';
+    },
+    formatComplete: () => undefined,
+  },
+
+  stop_powershell: {
+    friendlyName: 'Stop Shell',
+    category: 'shell',
+    formatStart: (_name, args) => {
+      const id = String(args.shellId ?? args.id ?? '');
+      return id ? `Stop shell ${id}` : 'Stop shell';
+    },
+    formatComplete: (_name, result): SimpleToolData | undefined => {
+      return result ? { input: '', output: result } : undefined;
+    },
+  },
+
+  list_powershell: {
+    friendlyName: 'List Shells',
+    category: 'shell',
+    formatStart: () => 'List active shell sessions',
+    formatComplete: (_name, result): SimpleToolData | undefined => {
+      return result ? { input: '', output: result } : undefined;
+    },
+  },
+
   // File tools
   Read: {
     friendlyName: 'Read',
