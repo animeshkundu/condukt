@@ -137,7 +137,12 @@ export function ToolProgressLine({ tool, className, style }: ToolProgressLinePro
               <span style={{ opacity: 0.7 }}>...</span>
             </>
           ) : (
-            message
+            <>
+              {tool.friendlyName}
+              {message && message !== tool.friendlyName && (
+                <span style={{ opacity: 0.7 }}>: {message}</span>
+              )}
+            </>
           )}
         </span>
         {hasDetails && (
