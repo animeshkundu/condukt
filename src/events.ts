@@ -206,6 +206,8 @@ export interface NodeToolEvent {
   readonly tool: string;
   readonly phase: 'start' | 'complete';
   readonly summary: string;
+  /** Full structured tool arguments (only on phase: 'start'). */
+  readonly args?: Readonly<Record<string, unknown>>;
   readonly ts: number;
 }
 

@@ -524,6 +524,8 @@ describe('ResponsePartBuilder', () => {
 
   it('generates summary title when thinking section finalizes', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    // Use reasoning + tool so section has text items and isn't restored to tool-progress
+    builder.onReasoning('Checking file...');
     builder.onToolStart('Read', 'tc-1', { file_path: 'src/app.ts' });
     builder.onToolComplete('tc-1', 'contents');
     builder.onOutput('Done');
@@ -567,10 +569,10 @@ describe('ResponsePartBuilder', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStart('Bash', 'tc-1', { command: 'npm test' });
     builder.onOutput('Processing...');
-    // VS Code rule: output ALWAYS finalizes thinking and renders standalone
+    // VS Code rule: output ALWAYS finalizes thinking and renders standalone.
+    // Single-item restoration: 1 pinned tool + 0 text → restored to tool-progress.
     expect(builder.parts).toHaveLength(2);
-    expect(builder.parts[0].kind).toBe('thinking-section');
-    expect((builder.parts[0] as ThinkingSectionPart).active).toBe(false);
+    expect(builder.parts[0].kind).toBe('tool-progress');
     expect(builder.parts[1].kind).toBe('markdown');
   });
 
@@ -599,7 +601,8 @@ describe('ResponsePartBuilder', () => {
     // Read → complete → standalone MCP → reasoning → MCP complete
     builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
     builder.onToolComplete('tc-1', 'contents');
-    // Section finalizes because all pinned tools done
+    // Section finalizes because all pinned tools done.
+    // G5: single pinned tool + no text → restored to tool-progress.
 
     builder.onToolStart('kusto-query', 'tc-2', {}); // standalone
     builder.onReasoning('Let me think about this...');
@@ -608,10 +611,11 @@ describe('ResponsePartBuilder', () => {
     builder.onToolComplete('tc-2', 'results');
     // tc-2 is NOT pinnable → should NOT finalize section 2
 
+    // Section 1 was restored to tool-progress by G5, section 2 is the only thinking-section
     const thinkingSections = builder.parts.filter(p => p.kind === 'thinking-section');
-    expect(thinkingSections).toHaveLength(2);
+    expect(thinkingSections).toHaveLength(1);
     // Section 2 should still be active (not prematurely finalized)
-    const section2 = thinkingSections[1] as ThinkingSectionPart;
+    const section2 = thinkingSections[0] as ThinkingSectionPart;
     expect(section2.active).toBe(true);
   });
 
@@ -693,5 +697,63 @@ describe('ResponsePartBuilder', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStartRaw('report_intent', 'tc-1', 'Analyzing code');
     expect(builder.parts).toHaveLength(0);
+  });
+
+  // ── G5: Single-item restoration ──
+
+  it('restores single-pinned-tool thinking section to tool-progress on finalize', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    // Single pinned tool, no reasoning text
+    builder.onToolStart('Read', 'tc-1', { file_path: 'src/index.ts' });
+    builder.onToolComplete('tc-1', 'file contents');
+    // All pinned tools done → finalize → single-item restoration
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('tool-progress');
+    const progress = builder.parts[0] as ToolProgressPart;
+    expect(progress.tool.toolName).toBe('Read');
+    expect(progress.tool.isComplete).toBe(true);
+  });
+
+  it('does not restore thinking section with reasoning text + single tool', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onReasoning('Let me check the file');
+    builder.onToolStart('Read', 'tc-1', { file_path: 'src/index.ts' });
+    builder.onToolComplete('tc-1', 'file contents');
+    // Has thinking-text items → stays as thinking-section
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+  });
+
+  it('does not restore thinking section with multiple pinned tools', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolStart('Grep', 'tc-2', { pattern: 'import' });
+    builder.onToolComplete('tc-1', 'contents');
+    builder.onToolComplete('tc-2', 'matches');
+    // 2 pinned tools → stays as thinking-section
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+  });
+
+  it('restores single-tool section via flush()', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStart('Bash', 'tc-1', { command: 'ls' });
+    builder.onToolComplete('tc-1', 'output');
+    // Flush should finalize and restore
+    builder.flush();
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('tool-progress');
+  });
+
+  it('restores single-tool section via output and preserves subsequent parts', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
+    builder.onToolComplete('tc-1', 'contents');
+    builder.onOutput('Here is the analysis');
+    // parts[0] restored from thinking-section to tool-progress, parts[1] is markdown
+    expect(builder.parts).toHaveLength(2);
+    expect(builder.parts[0].kind).toBe('tool-progress');
+    expect(builder.parts[1].kind).toBe('markdown');
+    expect((builder.parts[1] as MarkdownPart).content).toBe('Here is the analysis');
   });
 });

@@ -261,13 +261,13 @@ const DEFAULT_FORMATTER: ToolFormatter = {
 
 const PINNABLE_TOOLS = new Set([
   // Shell
-  'Bash', 'bash', 'powershell',
+  'Bash', 'bash', 'powershell', 'read_powershell', 'stop_powershell', 'list_powershell', 'write_powershell',
   // File
-  'Read', 'view', 'show_file',
+  'Read', 'view', 'show_file', 'read_agent',
   // Search
   'Grep', 'grep', 'rg', 'Glob', 'glob', 'search', 'semantic_code_search',
   // Edit
-  'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'str_replace', 'create', 'insert', 'undo_edit',
+  'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'str_replace', 'create', 'insert', 'undo_edit', 'apply_patch',
 ]);
 
 /**

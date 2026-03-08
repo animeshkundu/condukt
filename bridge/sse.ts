@@ -154,8 +154,15 @@ export function createNodeSSEStream(
           const phase = (parts[0] ?? '').split(':')[1] ?? 'start';
           const tool = parts[1] ?? '';
           const summary = unescapeFromLog(parts[2] ?? '');
+          // 4th field: JSON-encoded args (only for tool:start, added in Phase 2)
+          let args: Record<string, unknown> | undefined;
+          if (phase === 'start' && parts[3]) {
+            try { args = JSON.parse(unescapeFromLog(parts[3])); } catch { /* old format */ }
+          }
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-            type: 'node:tool', executionId, nodeId, tool, phase, summary, ts: 0,
+            type: 'node:tool', executionId, nodeId, tool, phase, summary,
+            ...(args ? { args } : {}),
+            ts: 0,
           })}\n\n`));
         } else {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({

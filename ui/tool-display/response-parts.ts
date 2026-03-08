@@ -331,6 +331,24 @@ export class ResponsePartBuilder {
       }
     }
 
+    // G5: Single-item restoration — if finalized section has 1 pinned tool and no text,
+    // restore it as a standalone tool-progress line (VS Code behavior).
+    const pinnedToolItems = section.items.filter(
+      (item): item is PinnedToolItem => item.kind === 'pinned-tool'
+    );
+    const thinkingTextItems = section.items.filter(item => item.kind === 'thinking-text');
+
+    if (pinnedToolItems.length === 1 && thinkingTextItems.length === 0) {
+      const idx = this._parts.indexOf(section);
+      if (idx >= 0) {
+        this._parts[idx] = {
+          kind: 'tool-progress',
+          id: section.id,
+          tool: pinnedToolItems[0].tool,
+        };
+      }
+    }
+
     this._activeThinking = null;
   }
 }

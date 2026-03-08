@@ -28,7 +28,7 @@ export interface MockNodeConfig {
 type SessionEvent =
   | { event: 'text'; handler: (text: string) => void }
   | { event: 'reasoning'; handler: (text: string) => void }
-  | { event: 'tool_start'; handler: (tool: string, input: string) => void }
+  | { event: 'tool_start'; handler: (tool: string, input: string, args: Record<string, unknown>) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
   | { event: 'tool_output'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
@@ -105,7 +105,7 @@ class MockAgentSession implements AgentSession {
       if (this.nodeConfig.tools) {
         for (const tool of this.nodeConfig.tools) {
           if (this.aborted) return;
-          this.emit('tool_start', tool.name, tool.input);
+          this.emit('tool_start', tool.name, tool.input, {});
           this.emit('tool_complete', tool.name, tool.output);
         }
       }
@@ -142,7 +142,7 @@ class MockAgentSession implements AgentSession {
 
   on(event: 'text', handler: (text: string) => void): void;
   on(event: 'reasoning', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;

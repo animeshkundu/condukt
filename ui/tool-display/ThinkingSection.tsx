@@ -6,6 +6,26 @@ import type { ToolInvocation } from './types';
 
 const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
 
+/** Render simple inline markdown: convert `backtick` patterns to <code> elements. */
+function renderInlineCode(text: string): React.ReactNode {
+  const parts = text.split(/(`[^`]+`)/g);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code key={i} style={{
+          fontSize: '0.846em',
+          padding: '1px 3px',
+          borderRadius: 4,
+          background: '#2b2a27',
+          color: '#d4d0c8',
+        }}>{part.slice(1, -1)}</code>
+      );
+    }
+    return part;
+  });
+}
+
 // ── Tool icon mapping (from VS Code getToolInvocationIcon) ───────────────────
 
 function getToolIcon(toolName: string): string {
@@ -21,8 +41,8 @@ function getToolIcon(toolName: string): string {
 
 const ANIMATIONS_CSS = `
 @keyframes thinkingShimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% { background-position: 120% 0; }
+  100% { background-position: -20% 0; }
 }
 @keyframes spin {
   from { transform: rotate(0deg); }
@@ -93,7 +113,7 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
         left: 3,
         fontSize: 11,
       }}>{icon}</span>
-      <span style={{ color: '#b1ada1' }}>{message}</span>
+      <span style={{ color: '#b1ada1' }}>{renderInlineCode(message)}</span>
       {!tool.isComplete && (
         <span style={{ display: 'inline-flex', width: 10, height: 10, flexShrink: 0, marginLeft: 2 }}>
           <svg width="10" height="10" viewBox="0 0 10 10" style={{ animation: 'spin 1s linear infinite' }}>
@@ -155,6 +175,7 @@ export function ThinkingSection({
       className={className}
       style={{
         margin: '4px 8px',
+        marginBottom: 16,
         position: 'relative',
         fontFamily: MONO,
         ...style,
@@ -168,10 +189,11 @@ export function ThinkingSection({
         onFocus={() => setHovered(true)}
         onBlur={() => setHovered(false)}
         style={{
-          display: 'flex',
+          display: collapsed ? 'inline-flex' : 'flex',
           alignItems: 'center',
-          width: '100%',
-          padding: '8px 12px',
+          width: collapsed ? 'fit-content' : '100%',
+          padding: collapsed ? '2px 6px 2px 2px' : '8px 12px',
+          borderRadius: collapsed ? 4 : 0,
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',
@@ -190,11 +212,11 @@ export function ThinkingSection({
           <>
             <span style={{
               fontWeight: 500,
-              background: 'linear-gradient(90deg, #6b6660 0%, #8a8578 50%, #6b6660 100%)',
-              backgroundSize: '200% 100%',
+              background: 'linear-gradient(90deg, #6b6660 0%, #6b6660 30%, #8a8578 50%, #6b6660 70%, #6b6660 100%)',
+              backgroundSize: '400% 100%',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
-              animation: 'thinkingShimmer 1.5s linear infinite',
+              animation: 'thinkingShimmer 2s linear infinite',
             }}>
               Working:
             </span>
@@ -240,6 +262,16 @@ export function ThinkingSection({
                     bottom: isLast ? undefined : 0,
                     width: 1,
                     background: '#3d3a36',
+                    maskImage: isFirst
+                      ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)'
+                      : isLast
+                        ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 100%)'
+                        : 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)',
+                    WebkitMaskImage: isFirst
+                      ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)'
+                      : isLast
+                        ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 100%)'
+                        : 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)',
                   }} />
                 )}
                 {item.kind === 'thinking-text' && <ThinkingTextItemView content={item.content} renderMarkdown={renderMarkdown} />}

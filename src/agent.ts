@@ -170,7 +170,7 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
-      session.on('tool_start', (tool: string, toolInput: string) => {
+      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>) => {
         ctx.emitOutput({
           type: 'node:tool',
           executionId: ctx.executionId,
@@ -178,6 +178,7 @@ export function agent(config: AgentConfig): NodeFn {
           tool,
           phase: 'start',
           summary: toolInput,
+          args,
           ts: Date.now(),
         });
       });

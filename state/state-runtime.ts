@@ -77,8 +77,11 @@ export class StateRuntime {
     } else if (event.type === 'node:reasoning' && event.content) {
       this.storage.appendOutput(event.executionId, event.nodeId, '\x00reasoning\x00' + escapeForLog(event.content));
     } else if (event.type === 'node:tool') {
+      const argsJson = event.phase === 'start' && event.args
+        ? '\x00' + escapeForLog(JSON.stringify(event.args))
+        : '';
       this.storage.appendOutput(event.executionId, event.nodeId,
-        `\x00tool:${event.phase}\x00${event.tool}\x00${escapeForLog(event.summary)}`);
+        `\x00tool:${event.phase}\x00${event.tool}\x00${escapeForLog(event.summary)}${argsJson}`);
     }
     this.onOutput?.(event);
   }

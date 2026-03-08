@@ -153,7 +153,7 @@ export class SubprocessBackend implements CopilotBackend {
 type EventHandler =
   | { event: 'text'; handler: (text: string) => void }
   | { event: 'reasoning'; handler: (text: string) => void }
-  | { event: 'tool_start'; handler: (tool: string, input: string) => void }
+  | { event: 'tool_start'; handler: (tool: string, input: string, args: Record<string, unknown>) => void }
   | { event: 'tool_complete'; handler: (tool: string, output: string) => void }
   | { event: 'tool_output'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
@@ -308,7 +308,7 @@ class SubprocessSession implements CopilotSession {
                   this._pendingPartials.delete(callId);
                 }
               }
-              if (toolName) this.emit('tool_start', toolName, summary);
+              if (toolName) this.emit('tool_start', toolName, summary, args ?? {});
               break;
             }
             case 'tool.execution_complete': {
@@ -347,7 +347,7 @@ class SubprocessSession implements CopilotSession {
             }
             // Legacy tool event formats
             case 'assistant.tool_start':
-              this.emit('tool_start', String(parsed.tool ?? ''), String(parsed.input ?? ''));
+              this.emit('tool_start', String(parsed.tool ?? ''), String(parsed.input ?? ''), {});
               break;
             case 'assistant.tool_complete':
               this.emit('tool_complete', String(parsed.tool ?? ''), String(parsed.output ?? ''));
@@ -357,7 +357,7 @@ class SubprocessSession implements CopilotSession {
             case 'subagent.started': {
               const data = parsed.data as Record<string, unknown> | undefined;
               const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
-              this.emit('tool_start', `subagent:${name}`, '');
+              this.emit('tool_start', `subagent:${name}`, '', {});
               break;
             }
             case 'subagent.completed': {
@@ -425,7 +425,7 @@ class SubprocessSession implements CopilotSession {
 
   on(event: 'text', handler: (text: string) => void): void;
   on(event: 'reasoning', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;

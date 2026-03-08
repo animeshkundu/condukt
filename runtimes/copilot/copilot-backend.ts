@@ -34,7 +34,7 @@ export interface CopilotSession {
   /** Subscribe to streaming text output from the agent */
   on(event: 'text', handler: (text: string) => void): void;
   /** Subscribe to tool execution start (file read, bash, Kusto, etc.) */
-  on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
   /** Subscribe to tool execution completion */
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   /** Subscribe to tool execution output (partial results with tool attribution) */

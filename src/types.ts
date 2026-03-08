@@ -158,7 +158,7 @@ export interface AgentSession {
   readonly pid: number | null;
   send(prompt: string): void;
   on(event: 'text', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
   on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
   on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
