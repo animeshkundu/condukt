@@ -3,12 +3,13 @@
  *
  * Implements VS Code Copilot Chat's "pin to thinking" model:
  * - Pinnable tools (file, search, edit, shell) are absorbed into collapsible
- *   thinking sections with chain-of-thought vertical lines.
+ *   thinking sections — only the progress line (icon + message), never output.
  * - Standalone tools (MCP, subagent, task) render as flat progress lines.
- * - Markdown (agent speech) renders full-size between sections.
+ * - Markdown (agent speech) ALWAYS renders full-size, never absorbed into thinking.
+ * - Tool output goes to onToolOutput() and is invisible in thinking blocks.
  */
 
-import type { ToolInvocation } from './types';
+import type { ToolInvocation, ToolCategory } from './types';
 import type { ToolFormatterRegistry } from './formatter';
 import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable } from './formatter';
 
@@ -24,12 +25,7 @@ export interface PinnedToolItem {
   tool: ToolInvocation;
 }
 
-export interface PinnedMarkdownItem {
-  readonly kind: 'pinned-markdown';
-  content: string;
-}
-
-export type ThinkingSectionItem = ThinkingTextItem | PinnedToolItem | PinnedMarkdownItem;
+export type ThinkingSectionItem = ThinkingTextItem | PinnedToolItem;
 
 // ── Response part types ──────────────────────────────────────────────────────
 
@@ -86,9 +82,11 @@ export interface ResponsePartBuilderOptions {
  * State machine that accumulates streaming agent events into typed
  * ResponseParts using VS Code's pin-to-thinking model.
  *
- * Pinnable tools and reasoning are absorbed into collapsible thinking sections.
- * Standalone tools (MCP, subagent) render as flat progress lines.
- * Agent speech (markdown) renders full-size between sections.
+ * Key rules (matching VS Code exactly):
+ * - Tool output is NEVER shown inside thinking blocks — only progress lines
+ * - Agent speech (onOutput) ALWAYS finalizes thinking and renders standalone
+ * - Reasoning (onReasoning) is always pinned to the thinking section
+ * - Tool streaming output goes to onToolOutput (invisible in UI)
  */
 export class ResponsePartBuilder {
   private _parts: ResponsePart[] = [];
@@ -113,22 +111,11 @@ export class ResponsePartBuilder {
 
   /**
    * Append agent speech / markdown content.
-   * Finalizes any active thinking section, then merges into last markdown part.
+   * ALWAYS finalizes any active thinking section and renders standalone.
+   * VS Code rule: output text is never absorbed into thinking blocks.
    */
   onOutput(content: string): void {
-    // If we have an active thinking section, pin the markdown there instead
-    if (this._activeThinking) {
-      // Only close thinking if there's no pending pinned tool in it
-      const hasPendingPinned = this._activeThinking.items.some(
-        item => item.kind === 'pinned-tool' && !item.tool.isComplete
-      );
-      if (hasPendingPinned) {
-        // Pin markdown inside thinking section while tools are still running
-        this._activeThinking.items.push({ kind: 'pinned-markdown', content });
-        return;
-      }
-      this._finalizeThinking();
-    }
+    this._finalizeThinking();
 
     const last = this._parts[this._parts.length - 1];
     if (last?.kind === 'markdown') {
@@ -160,21 +147,43 @@ export class ResponsePartBuilder {
     this._pendingTools.set(toolCallId, invocation);
     this._pendingArgs.set(toolCallId, args);
 
-    if (invocation.isPinnable) {
-      // Pin to active thinking section (create one if needed)
-      this._ensureThinkingSection();
-      this._activeThinking!.items.push({ kind: 'pinned-tool', tool: invocation });
-    } else {
-      // Standalone tool → flat progress line
-      // Only finalize thinking if no pinned tools are still pending
-      if (this._activeThinking) {
-        const hasPending = this._activeThinking.items.some(
-          item => item.kind === 'pinned-tool' && !item.tool.isComplete
-        );
-        if (!hasPending) { this._finalizeThinking(); }
+    this._routeInvocation(invocation);
+  }
+
+  /**
+   * Start a tool with a pre-formatted invocation message from the backend.
+   * Bypasses formatter args parsing — useful when the backend provides
+   * a human-readable summary instead of raw JSON args.
+   */
+  onToolStartRaw(toolName: string, toolCallId: string, message: string): void {
+    // Metadata tools → status line
+    if (this._metadataTools.has(toolName)) {
+      if (message) {
+        this._parts.push({ kind: 'status', id: uid(), text: message });
       }
-      this._parts.push({ kind: 'tool-progress', id: uid(), tool: invocation });
+      return;
     }
+
+    const fmt = resolveFormatter(this._formatters, toolName);
+    const category = fmt.category;
+    const invocation: ToolInvocation = {
+      toolName,
+      toolCallId,
+      category,
+      friendlyName: fmt.friendlyName,
+      verb: _computeVerb(category),
+      serverName: undefined,
+      isPinnable: isPinnable(toolName),
+      invocationMessage: message || fmt.friendlyName,
+      isComplete: false,
+      isError: false,
+      output: [],
+    };
+
+    this._pendingTools.set(toolCallId, invocation);
+    this._pendingArgs.set(toolCallId, {});
+
+    this._routeInvocation(invocation);
   }
 
   /**
@@ -202,6 +211,8 @@ export class ResponsePartBuilder {
 
   /**
    * Append streaming output to a pending tool invocation.
+   * This output is NOT visible in thinking blocks — it's stored on the
+   * tool's output[] array for tools that want to display it elsewhere.
    */
   onToolOutput(toolCallId: string, line: string): void {
     const invocation = this._pendingTools.get(toolCallId);
@@ -254,6 +265,25 @@ export class ResponsePartBuilder {
 
   // ── Internal ─────────────────────────────────────────────────────────────
 
+  /** Route a tool invocation to thinking section (pinnable) or progress line (standalone). */
+  private _routeInvocation(invocation: ToolInvocation): void {
+    if (invocation.isPinnable) {
+      // Pin to active thinking section (create one if needed)
+      this._ensureThinkingSection();
+      this._activeThinking!.items.push({ kind: 'pinned-tool', tool: invocation });
+    } else {
+      // Standalone tool → flat progress line
+      // Only finalize thinking if no pinned tools are still pending
+      if (this._activeThinking) {
+        const hasPending = this._activeThinking.items.some(
+          item => item.kind === 'pinned-tool' && !item.tool.isComplete
+        );
+        if (!hasPending) { this._finalizeThinking(); }
+      }
+      this._parts.push({ kind: 'tool-progress', id: uid(), tool: invocation });
+    }
+  }
+
   /** Ensure a thinking section exists. Creates one if needed. */
   private _ensureThinkingSection(): void {
     if (this._activeThinking) { return; }
@@ -304,4 +334,15 @@ export class ResponsePartBuilder {
 
     this._activeThinking = null;
   }
+}
+
+// ── Helper for onToolStartRaw (avoids circular import with formatter) ────────
+
+const VERB_MAP: Record<string, string> = {
+  shell: 'Ran', file: 'Read', search: 'Searched', edit: 'Edited',
+  subagent: 'Delegated', task: 'Updated', mcp: 'Ran', default: 'Used',
+};
+
+function _computeVerb(category: ToolCategory): string {
+  return VERB_MAP[category] ?? 'Used';
 }

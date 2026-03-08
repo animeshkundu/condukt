@@ -101,28 +101,6 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
           </svg>
         </span>
       )}
-      {tool.isComplete && !tool.isError && (
-        <span style={{ color: '#4ade80', fontSize: 11 }}>&#10003;</span>
-      )}
-      {tool.isComplete && tool.isError && (
-        <span style={{ color: '#f87171', fontSize: 11 }}>&#10007;</span>
-      )}
-    </div>
-  );
-}
-
-function PinnedMarkdownItemView({ content }: { content: string }) {
-  return (
-    <div style={{
-      padding: '4px 12px 4px 24px',
-      color: '#b1ada1',
-      fontSize: 12,
-      fontFamily: MONO,
-      lineHeight: 1.5,
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-word',
-    }}>
-      {content}
     </div>
   );
 }
@@ -266,7 +244,6 @@ export function ThinkingSection({
                 )}
                 {item.kind === 'thinking-text' && <ThinkingTextItemView content={item.content} />}
                 {item.kind === 'pinned-tool' && <PinnedToolItemView tool={item.tool} />}
-                {item.kind === 'pinned-markdown' && <PinnedMarkdownItemView content={item.content} />}
               </div>
             );
           })}

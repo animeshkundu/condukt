@@ -93,7 +93,6 @@ export type {
   ThinkingSectionItem,
   ThinkingTextItem,
   PinnedToolItem,
-  PinnedMarkdownItem,
   ResponsePartBuilderOptions,
 } from './response-parts';
 export { ResponsePartBuilder } from './response-parts';

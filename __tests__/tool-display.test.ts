@@ -563,16 +563,15 @@ describe('ResponsePartBuilder', () => {
     expect(builder.parts[2].kind).toBe('markdown');
   });
 
-  it('pins markdown inside thinking section when tools are still running', () => {
+  it('output always finalizes thinking section (VS Code rule)', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStart('Bash', 'tc-1', { command: 'npm test' });
     builder.onOutput('Processing...');
-    // Tool still pending → markdown should be pinned inside thinking
-    expect(builder.parts).toHaveLength(1);
+    // VS Code rule: output ALWAYS finalizes thinking and renders standalone
+    expect(builder.parts).toHaveLength(2);
     expect(builder.parts[0].kind).toBe('thinking-section');
-    const section = builder.parts[0] as ThinkingSectionPart;
-    expect(section.items).toHaveLength(2); // pinned-tool + pinned-markdown
-    expect(section.items[1].kind).toBe('pinned-markdown');
+    expect((builder.parts[0] as ThinkingSectionPart).active).toBe(false);
+    expect(builder.parts[1].kind).toBe('markdown');
   });
 
   it('thinking-only section gets first-line title', () => {
@@ -669,5 +668,31 @@ describe('ResponsePartBuilder', () => {
     builder.flush();
     expect(builder.parts).toHaveLength(1);
     expect(builder.parts[0].kind).toBe('markdown');
+  });
+
+  it('onToolStartRaw uses provided message instead of formatter', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStartRaw('view', 'tc-1', 'Q:\\Software\\investigation\\file.ts');
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('thinking-section');
+    const section = builder.parts[0] as ThinkingSectionPart;
+    expect(section.items[0].kind).toBe('pinned-tool');
+    const tool = (section.items[0] as { tool: ToolInvocation }).tool;
+    expect(tool.invocationMessage).toBe('Q:\\Software\\investigation\\file.ts');
+    expect(tool.isPinnable).toBe(true);
+  });
+
+  it('onToolStartRaw routes MCP tools to standalone progress line', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStartRaw('sql', 'tc-1', 'Execute SQL query');
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('tool-progress');
+  });
+
+  it('onToolStartRaw routes metadata tools to status lines', () => {
+    const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
+    builder.onToolStartRaw('report_intent', 'tc-1', 'Analyzing code');
+    expect(builder.parts).toHaveLength(1);
+    expect(builder.parts[0].kind).toBe('status');
   });
 });
