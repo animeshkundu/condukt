@@ -63,8 +63,10 @@ Output events are persisted as NUL-byte-prefixed lines in `output/{nodeId}.log`:
 | Plain text | `{escaped_content}\n` |
 | Tool-attributed | `\x00tool:output\x00{tool}\x00{escaped_content}\n` |
 | Reasoning | `\x00reasoning\x00{escaped_content}\n` |
-| Tool start | `\x00tool:start\x00{tool}\x00{escaped_summary}\n` |
+| Tool start | `\x00tool:start\x00{tool}\x00{escaped_summary}\x00{escaped_args_json}\n` |
 | Tool complete | `\x00tool:complete\x00{tool}\x00{escaped_summary}\n` |
+
+**Tool start args field** (4th NUL-delimited field): JSON-encoded structured args from `tool.execution_start`. Optional — old logs without this field replay via `onToolStartRaw`. New logs include it to enable the full formatter pipeline (`onToolStart` with parsed args).
 
 **Newline escaping**: Content is escaped before storage (`\n` → `\\n`, `\r` → `\\r`, `\\` → `\\\\`). Unescaped on read. This prevents multi-line content from being split into separate lines during replay.
 
@@ -78,7 +80,7 @@ Output events are persisted as NUL-byte-prefixed lines in `output/{nodeId}.log`:
 
 The builder receives events via `onOutput`, `onReasoning`, `onToolStartRaw`, `onToolComplete`, `onToolOutput`. It produces a `ResponsePart[]` array.
 
-**State**: `_parts` (accumulated output), `_activeThinking` (current open thinking section or null), `_pendingTools` (toolCallId → ToolInvocation map).
+**State**: `_parts` (accumulated output), `_activeThinking` (current open thinking section or null), `_pendingTools` (toolCallId → ToolInvocation map), `_pendingArgs` (toolCallId → args map).
 
 **Transitions**:
 
@@ -86,14 +88,19 @@ The builder receives events via `onOutput`, `onReasoning`, `onToolStartRaw`, `on
 |-------|-----------------|--------|
 | onReasoning | No | Create thinking section, push thinking-text |
 | onReasoning | Yes | Merge into last thinking-text item |
-| onToolStartRaw (pinnable) | No | Create thinking section, push pinned-tool |
-| onToolStartRaw (pinnable) | Yes | Push pinned-tool to existing section |
+| onToolStart (pinnable) | No | Create thinking section, push pinned-tool |
+| onToolStart (pinnable) | Yes | Push pinned-tool to existing section |
+| onToolStart (standalone) | Any | Push tool-progress line (no finalization) |
+| onToolStart (metadata) | Any | Silently ignored |
+| onToolStartRaw (pinnable) | No/Yes | Same as onToolStart, but bypasses formatter args parsing |
 | onToolStartRaw (standalone) | Any | Push tool-progress line (no finalization) |
 | onToolStartRaw (metadata) | Any | Silently ignored |
 | onToolComplete (all pinned done) | Yes | Finalize thinking section |
 | onOutput | Yes | Finalize thinking, push markdown |
 | onOutput | No | Merge/push markdown |
 | flush() | Yes | Finalize thinking section |
+
+**Partial buffering**: `_pendingPartials` in `SubprocessSession` buffers `tool.execution_partial_result` events that arrive before the corresponding `tool.execution_start`. On start, buffered partials are flushed to the tool output stream. This handles a race condition in the Copilot CLI event ordering.
 
 **Determinism**: The builder produces identical output for identical event sequences regardless of timing.
 
@@ -113,7 +120,7 @@ Maps `ResponsePart` types to React components:
 ### condukt (framework)
 | File | Purpose |
 |------|---------|
-| `runtimes/copilot/subprocess-backend.ts` | JSONL parsing, event classification |
+| `runtimes/copilot/subprocess-backend.ts` | JSONL parsing, event classification, full args emission |
 | `src/agent.ts` | Session event wiring to OutputEvents |
 | `state/state-runtime.ts` | Output storage with newline escaping |
 | `bridge/sse.ts` | SSE replay with newline unescaping |

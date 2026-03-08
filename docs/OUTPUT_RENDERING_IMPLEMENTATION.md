@@ -1,16 +1,20 @@
 # Agent Output Rendering: Implementation Record
 
-## What Was Built (7 commits across 2 repos)
+## What Was Built (13 commits across 2 repos)
 
-### condukt commits
+### condukt commits (Phase 1)
 | Hash | Title | Files | Lines |
 |------|-------|-------|-------|
 | `947739e` | feat: pin-to-thinking model — VS Code Copilot Chat visual overhaul | 11 | +902/-624 |
 | `46246c5` | fix: match VS Code output rules — no tool results in thinking blocks | 4 | +111/-69 |
 | `68f1f7b` | fix: VS Code parity — suppress ephemeral progress, don't fragment thinking | 2 | +33/-38 |
 | `0e5fe20` | feat: VS Code parity — storage format fix, remove truncation, visual overhaul | 9 | +185/-58 |
+| `73fc2cd` | docs: agent output rendering — philosophy, architecture, design, implementation | 5 | docs |
+| `5d0d11c` | fix: buffer tool partials arriving before execution_start | 1 | +20/-3 |
+| `1753120` | fix: show tool friendlyName for non-MCP standalone tools | 1 | +3/-1 |
+| `fbc2fb3` | fix: shorten absolute paths in tool display messages | 2 | +35/-1 |
 
-### taco-helper commits
+### taco-helper commits (Phase 1)
 | Hash | Title | Files | Lines |
 |------|-------|-------|-------|
 | `ae3e8d6` | feat: adopt pin-to-thinking model, fix toggle state ownership | 2 | +52/-37 |
@@ -62,6 +66,24 @@
 **Decision**: Escape `\n` → `\\n`, `\r` → `\\r`, `\\` → `\\\\` before storage. Unescape on read.
 
 **Rationale**: The NUL-byte log format uses `\n` as record delimiter. Multi-line content (reasoning, tool output) was split into separate lines on replay, causing misclassification. This was THE root cause of the streaming vs replay rendering difference, identified by the adversarial team.
+
+### D8: Partial buffering for out-of-order events
+
+**Decision**: Buffer `tool.execution_partial_result` events in `_pendingPartials` when they arrive before the corresponding `tool.execution_start`.
+
+**Rationale**: The Copilot CLI sometimes emits partial results before the start event for the same `toolCallId`. Without buffering, these partials are either lost (no tool name to attribute them to) or emitted as unattributed text (corrupting the output). On `tool.execution_start`, any buffered partials for that callId are flushed to the tool's output stream.
+
+### D9: Path shortening in tool display messages
+
+**Decision**: Shorten absolute paths to the last 2 segments (e.g., `Q:\Software\investigation\taco-helper\src\app.ts` → `src/app.ts`).
+
+**Rationale**: Agent tool calls use absolute paths, which are long and obscure the meaningful filename. VS Code shows relative paths. `shortenPath()` normalizes and trims, `shortenToolMessage()` applies it to comma-separated path lists in tool messages.
+
+### D10: FriendlyName display for non-MCP standalone tools
+
+**Decision**: When `onToolStartRaw` receives an empty or trivial message, fall back to the formatter's `friendlyName` instead of showing a raw tool call ID.
+
+**Rationale**: Some tools (especially edit tools) have minimal args summaries. The friendlyName ("Shell", "Read", "Search") provides a meaningful display label when the args-derived message is empty.
 
 ## Test Coverage
 

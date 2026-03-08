@@ -92,3 +92,11 @@ Storage is not a concern — these are investigation artifacts that the user exp
 The newline escaping in the storage format is backward-compatible: old logs without escaping parse correctly because bare `\n` was already split by the line reader (appearing as separate lines). The escape sequences (`\\n`, `\\r`) only appear in logs written by the new code.
 
 The component APIs are additive: `renderMarkdown` is an optional callback, `onToggle` works in both controlled and uncontrolled modes, the expandable ToolProgressLine degrades to a flat line when no data is available.
+
+### 7. Rich Tool Descriptions from Structured Args
+
+VS Code generates rich tool messages via `prepareToolInvocation(args)` — the full structured args object is passed to each tool's formatter, which produces human-readable messages like "Read `SettingsStoreEventsController.cs`, lines 1 to 100" or "Searched for regex `pattern`".
+
+Our formatter system (`formatter.ts`) already produces these same rich messages — it was being bypassed because `onToolStartRaw` received only the `extractArgSummary()` text, not the full JSON args. The fix: pass the complete `args` object through the entire pipeline (subprocess-backend → agent.ts → events.ts → state-runtime → sse.ts → page.tsx) so the consumer can call `onToolStart(name, callId, args)` instead of `onToolStartRaw(name, callId, message)`.
+
+The pipeline must remain backward-compatible: the 4th NUL-delimited field in storage is optional. Old logs without it replay via `onToolStartRaw` as before. New logs include JSON-encoded args that enable the full formatter pipeline.
