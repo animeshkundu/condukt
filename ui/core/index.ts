@@ -31,6 +31,10 @@ export type { MarkdownContentProps } from '../components/MarkdownContent';
 // ANSI terminal output utilities
 export { ansiToHtml, stripAnsi, hasAnsi } from '../ansi';
 
+// Tool display (response parts model — no graph dependency)
+export { ResponsePartBuilder, ResponsePartRenderer } from '../tool-display/index';
+export type { ResponsePart, ToolInvocation, ToolFormatter, ToolFormatterRegistry } from '../tool-display/index';
+
 // Utilities
 export { cn } from '../utils';
 export { formatElapsed, formatDuration } from './utils';

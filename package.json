@@ -1,6 +1,6 @@
 {
   "name": "condukt",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "description": "Composable AI agent workflow framework — execution, state, orchestration, runtimes, UI",
   "license": "MIT",
   "repository": {
@@ -85,6 +85,12 @@
       "import": "./dist/utils/index.js",
       "require": "./dist/utils/index.js",
       "default": "./dist/utils/index.js"
+    },
+    "./ui/tool-display": {
+      "types": "./dist/ui/tool-display/index.d.ts",
+      "import": "./dist/ui/tool-display/index.js",
+      "require": "./dist/ui/tool-display/index.js",
+      "default": "./dist/ui/tool-display/index.js"
     },
     "./ui/style.css": "./dist/ui/style.css"
   },
