@@ -182,6 +182,7 @@ class SubprocessSession implements CopilotSession {
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private aborted = false;
   private _toolCallNames = new Map<string, string>();
+  private _pendingPartials = new Map<string, string[]>();
 
   get pid(): number | null {
     return this.child?.pid ?? null;
@@ -298,7 +299,15 @@ class SubprocessSession implements CopilotSession {
               const summary = args ? extractArgSummary(args) : '';
               // Track toolCallId → toolName for completion matching
               const callId = String(data?.toolCallId ?? '');
-              if (callId && toolName) this._toolCallNames.set(callId, toolName);
+              if (callId && toolName) {
+                this._toolCallNames.set(callId, toolName);
+                // Flush any partials that arrived before this start event
+                const buffered = this._pendingPartials.get(callId);
+                if (buffered) {
+                  for (const p of buffered) this.emit('tool_output', toolName, p);
+                  this._pendingPartials.delete(callId);
+                }
+              }
               if (toolName) this.emit('tool_start', toolName, summary);
               break;
             }
@@ -325,7 +334,13 @@ class SubprocessSession implements CopilotSession {
               const toolName = (callId && this._toolCallNames.get(callId)) || '';
               if (toolName) {
                 this.emit('tool_output', toolName, partial);
+              } else if (callId) {
+                // Buffer until tool.execution_start arrives with this callId
+                const buf = this._pendingPartials.get(callId) ?? [];
+                buf.push(partial);
+                this._pendingPartials.set(callId, buf);
               } else {
+                // No callId at all — truly unattributable output
                 this.emit('text', partial);
               }
               break;
