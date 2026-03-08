@@ -130,16 +130,11 @@ export class ResponsePartBuilder {
 
   /**
    * Called when a tool invocation starts.
-   * Routes to: status line (metadata), thinking section (pinnable), or progress line (standalone).
+   * Routes to: silently ignored (metadata), thinking section (pinnable), or progress line (standalone).
    */
   onToolStart(toolName: string, toolCallId: string, args: Record<string, unknown>): void {
-    // Metadata tools → status line
+    // Metadata tools → silently ignored (ephemeral progress, VS Code hides them)
     if (this._metadataTools.has(toolName)) {
-      const fmt = resolveFormatter(this._formatters, toolName);
-      const msg = fmt.formatStart(toolName, args);
-      if (msg) {
-        this._parts.push({ kind: 'status', id: uid(), text: msg });
-      }
       return;
     }
 
@@ -156,11 +151,8 @@ export class ResponsePartBuilder {
    * a human-readable summary instead of raw JSON args.
    */
   onToolStartRaw(toolName: string, toolCallId: string, message: string): void {
-    // Metadata tools → status line
+    // Metadata tools → silently ignored (ephemeral progress, VS Code hides them)
     if (this._metadataTools.has(toolName)) {
-      if (message) {
-        this._parts.push({ kind: 'status', id: uid(), text: message });
-      }
       return;
     }
 
@@ -242,9 +234,8 @@ export class ResponsePartBuilder {
 
   // ── Status lines ─────────────────────────────────────────────────────────
 
-  /** Append a dim metadata / status line. */
+  /** Append a dim metadata / status line. Does not interrupt thinking flow. */
   onStatus(text: string): void {
-    this._finalizeThinking();
     this._parts.push({ kind: 'status', id: uid(), text });
   }
 
@@ -272,14 +263,9 @@ export class ResponsePartBuilder {
       this._ensureThinkingSection();
       this._activeThinking!.items.push({ kind: 'pinned-tool', tool: invocation });
     } else {
-      // Standalone tool → flat progress line
-      // Only finalize thinking if no pinned tools are still pending
-      if (this._activeThinking) {
-        const hasPending = this._activeThinking.items.some(
-          item => item.kind === 'pinned-tool' && !item.tool.isComplete
-        );
-        if (!hasPending) { this._finalizeThinking(); }
-      }
+      // Standalone tool → flat progress line (does NOT finalize thinking)
+      // VS Code: standalone tools render alongside thinking section, don't interrupt it.
+      // Thinking is only finalized by agent speech (onOutput) or stream end (flush).
       this._parts.push({ kind: 'tool-progress', id: uid(), tool: invocation });
     }
   }
@@ -315,12 +301,22 @@ export class ResponsePartBuilder {
     );
 
     if (pinnedTools.length > 0) {
-      const summaries = pinnedTools.slice(0, 3).map(item => {
-        const t = item.tool;
-        return t.pastTenseMessage ?? t.invocationMessage;
-      }).filter(s => s.length > 0);
-      const more = pinnedTools.length > 3 ? ` + ${pinnedTools.length - 3} more` : '';
-      section.title = summaries.length > 0 ? summaries.join(', ') + more : `${pinnedTools.length} tools`;
+      if (pinnedTools.length <= 3) {
+        const summaries = pinnedTools.map(item => {
+          const t = item.tool;
+          return t.pastTenseMessage ?? t.invocationMessage;
+        }).filter(s => s.length > 0);
+        section.title = summaries.join(', ') || `${pinnedTools.length} tools`;
+      } else {
+        // 4+ tools: "Read file.ts, Searched for pattern + 3 more"
+        const first2 = pinnedTools.slice(0, 2).map(item => {
+          const t = item.tool;
+          return t.pastTenseMessage ?? t.invocationMessage;
+        }).filter(s => s.length > 0);
+        section.title = first2.length > 0
+          ? `${first2.join(', ')} + ${pinnedTools.length - 2} more`
+          : `Finished with ${pinnedTools.length} steps`;
+      }
       section.verb = pinnedTools[0].tool.verb;
     } else {
       // Thinking-only section

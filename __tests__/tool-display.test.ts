@@ -485,12 +485,11 @@ describe('ResponsePartBuilder', () => {
     expect(builder.parts[2].kind).toBe('thinking-section');
   });
 
-  it('handles metadata tools as status lines', () => {
+  it('handles metadata tools silently (no status lines)', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStart('report_intent', 'tc-1', { intent: 'Analyzing code' });
-    expect(builder.parts).toHaveLength(1);
-    expect(builder.parts[0].kind).toBe('status');
-    expect((builder.parts[0] as StatusPart).text).toBe('Analyzing code');
+    // VS Code hides progress messages — metadata tools produce no output
+    expect(builder.parts).toHaveLength(0);
   });
 
   it('tracks pending tool count', () => {
@@ -550,15 +549,16 @@ describe('ResponsePartBuilder', () => {
     builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' });
     builder.onToolComplete('tc-1', 'contents');
 
-    // Standalone MCP tool → finalizes thinking, emits progress line
+    // Standalone MCP tool → does NOT finalize thinking (VS Code rule)
     builder.onToolStart('kusto-executeQuery', 'tc-2', {});
     builder.onToolComplete('tc-2', 'results');
 
-    // More output
+    // Agent speech → finalizes thinking, emits markdown
     builder.onOutput('Analysis complete');
 
     expect(builder.parts).toHaveLength(3);
     expect(builder.parts[0].kind).toBe('thinking-section');
+    expect((builder.parts[0] as ThinkingSectionPart).active).toBe(false); // finalized by onOutput
     expect(builder.parts[1].kind).toBe('tool-progress');
     expect(builder.parts[2].kind).toBe('markdown');
   });
@@ -617,7 +617,7 @@ describe('ResponsePartBuilder', () => {
 
   // ── I3: standalone tool start doesn't finalize when pinned tools pending ──
 
-  it('standalone tool start does not finalize section with pending pinned tools (I3)', () => {
+  it('standalone tool start does not finalize thinking (I3)', () => {
     const custom = {
       'kusto-query': {
         friendlyName: 'Kusto',
@@ -631,7 +631,7 @@ describe('ResponsePartBuilder', () => {
     builder.onToolStart('Read', 'tc-1', { file_path: 'a.ts' }); // pinned, pending
     builder.onToolStart('kusto-query', 'tc-2', {}); // standalone — should NOT finalize
 
-    // Read is still pending → thinking section should still be active
+    // Thinking section stays active (VS Code: standalone tools don't interrupt thinking)
     const section = builder.parts[0] as ThinkingSectionPart;
     expect(section.active).toBe(true);
     expect(section.collapsed).toBe(false);
@@ -689,10 +689,9 @@ describe('ResponsePartBuilder', () => {
     expect(builder.parts[0].kind).toBe('tool-progress');
   });
 
-  it('onToolStartRaw routes metadata tools to status lines', () => {
+  it('onToolStartRaw silently ignores metadata tools', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStartRaw('report_intent', 'tc-1', 'Analyzing code');
-    expect(builder.parts).toHaveLength(1);
-    expect(builder.parts[0].kind).toBe('status');
+    expect(builder.parts).toHaveLength(0);
   });
 });
