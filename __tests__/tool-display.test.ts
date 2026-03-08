@@ -670,7 +670,7 @@ describe('ResponsePartBuilder', () => {
     expect(builder.parts[0].kind).toBe('markdown');
   });
 
-  it('onToolStartRaw uses provided message instead of formatter', () => {
+  it('onToolStartRaw shortens absolute paths in message', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStartRaw('view', 'tc-1', 'Q:\\Software\\investigation\\file.ts');
     expect(builder.parts).toHaveLength(1);
@@ -678,7 +678,7 @@ describe('ResponsePartBuilder', () => {
     const section = builder.parts[0] as ThinkingSectionPart;
     expect(section.items[0].kind).toBe('pinned-tool');
     const tool = (section.items[0] as { tool: ToolInvocation }).tool;
-    expect(tool.invocationMessage).toBe('Q:\\Software\\investigation\\file.ts');
+    expect(tool.invocationMessage).toBe('investigation/file.ts');
     expect(tool.isPinnable).toBe(true);
   });
 

@@ -170,3 +170,34 @@ export function parseTodoMarkdown(markdown: string): ParsedTodo {
 
   return { title, todoList };
 }
+
+// ── Path shortening ──────────────────────────────────────────────────────────
+
+/**
+ * Shorten an absolute file path to the last 2 segments for display.
+ * `Q:\Software\investigation\taco-helper\.flow-data\icm\projection.json`
+ * → `icm/projection.json`
+ */
+export function shortenPath(p: string): string {
+  const normalized = p.replace(/\\/g, '/');
+  const segments = normalized.split('/').filter(Boolean);
+  if (segments.length <= 2) return p;
+  return segments.slice(-2).join('/');
+}
+
+/**
+ * Shorten a tool invocation message that may contain comma-separated paths.
+ * Each path-like segment is shortened via `shortenPath`.
+ * Non-path segments pass through unchanged.
+ */
+export function shortenToolMessage(msg: string): string {
+  if (!msg) return msg;
+  return msg.split(/,\s*/).map(part => {
+    const trimmed = part.trim();
+    // Detect absolute paths: Windows drive letter or Unix root
+    if (/^[A-Z]:[\\\/]/i.test(trimmed) || /^\/[a-z]/i.test(trimmed)) {
+      return shortenPath(trimmed);
+    }
+    return trimmed;
+  }).join(', ');
+}

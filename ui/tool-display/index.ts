@@ -70,6 +70,8 @@ export {
   parseExitCode,
   stripExitCodeTrailer,
   parseTodoMarkdown,
+  shortenPath,
+  shortenToolMessage,
 } from './format-utils';
 
 // Tool formatting registry

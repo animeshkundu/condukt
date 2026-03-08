@@ -12,6 +12,7 @@
 import type { ToolInvocation, ToolCategory } from './types';
 import type { ToolFormatterRegistry } from './formatter';
 import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable, computeVerb } from './formatter';
+import { shortenToolMessage } from './format-utils';
 
 // ── Thinking section item types ──────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ export class ResponsePartBuilder {
       verb: computeVerb(category),
       serverName: undefined,
       isPinnable: isPinnable(toolName),
-      invocationMessage: message || fmt.friendlyName,
+      invocationMessage: shortenToolMessage(message) || fmt.friendlyName,
       isComplete: false,
       isError: false,
       output: [],
