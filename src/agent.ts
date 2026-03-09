@@ -21,6 +21,43 @@ import type {
   PromptOutput,
 } from './types';
 import { FlowAbortedError } from './types';
+import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
+import type { ToolSpecificData, ImageToolData, ResourceToolData } from '../ui/tool-display/types';
+
+// ---------------------------------------------------------------------------
+// ContentBlock → ToolSpecificData bridge (SDK rich events → UI rendering)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert SDK ContentBlock array to a ToolSpecificData value.
+ * Picks the first block that maps to a known data shape (image or resource).
+ * Returns undefined if no blocks match a renderable type.
+ */
+function contentBlocksToToolData(
+  contents: ReadonlyArray<ContentBlock>,
+): ToolSpecificData | undefined {
+  for (const block of contents) {
+    if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string') {
+      const imageData: ImageToolData = {
+        data: block.data,
+        mimeType: block.mimeType,
+        alt: typeof block.alt === 'string' ? block.alt : undefined,
+      };
+      return imageData;
+    }
+    if (block.type === 'resource' && typeof block.uri === 'string' && typeof block.name === 'string') {
+      const resourceData: ResourceToolData = {
+        uri: block.uri,
+        name: block.name,
+        title: typeof block.title === 'string' ? block.title : undefined,
+        mimeType: typeof block.mimeType === 'string' ? block.mimeType : undefined,
+        text: typeof block.text === 'string' ? block.text : undefined,
+      };
+      return resourceData;
+    }
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // GT-3 dual-condition crash recovery helper
@@ -170,7 +207,7 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
-      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>) => {
+      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>, callId?: string) => {
         ctx.emitOutput({
           type: 'node:tool',
           executionId: ctx.executionId,
@@ -179,11 +216,12 @@ export function agent(config: AgentConfig): NodeFn {
           phase: 'start',
           summary: toolInput,
           args,
+          toolCallId: callId,
           ts: Date.now(),
         });
       });
 
-      session.on('tool_complete', (tool: string, output: string) => {
+      session.on('tool_complete', (tool: string, output: string, callId?: string) => {
         ctx.emitOutput({
           type: 'node:tool',
           executionId: ctx.executionId,
@@ -191,6 +229,7 @@ export function agent(config: AgentConfig): NodeFn {
           tool,
           phase: 'complete',
           summary: output,
+          toolCallId: callId,
           ts: Date.now(),
         });
       });
@@ -203,6 +242,85 @@ export function agent(config: AgentConfig): NodeFn {
           nodeId: ctx.nodeId,
           content: output,
           tool,
+          ts: Date.now(),
+        });
+      });
+
+      // Rich events (SdkBackend emits these; SubprocessBackend silently accepts the on() call)
+      session.on('intent', (intent: string) => {
+        ctx.emitOutput({
+          type: 'node:intent',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          intent,
+          ts: Date.now(),
+        });
+      });
+
+      session.on('usage', (data: Record<string, unknown>) => {
+        ctx.emitOutput({
+          type: 'node:usage',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          inputTokens: typeof data.inputTokens === 'number' ? data.inputTokens : undefined,
+          outputTokens: typeof data.outputTokens === 'number' ? data.outputTokens : undefined,
+          totalTokens: typeof data.totalTokens === 'number' ? data.totalTokens : undefined,
+          model: typeof data.model === 'string' ? data.model : undefined,
+          ts: Date.now(),
+        });
+      });
+
+      session.on('tool_complete_rich', (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => {
+        const toolData = contentBlocksToToolData(contents as ReadonlyArray<ContentBlock>);
+        if (toolData) {
+          // Emit a supplemental node:tool event with structured data
+          ctx.emitOutput({
+            type: 'node:tool',
+            executionId: ctx.executionId,
+            nodeId: ctx.nodeId,
+            tool,
+            phase: 'complete',
+            summary: '',
+            toolCallId: callId,
+            toolSpecificData: toolData,
+            ts: Date.now(),
+          });
+        }
+      });
+
+      session.on('subagent_start', (name: string, data: Record<string, unknown>) => {
+        ctx.emitOutput({
+          type: 'node:subagent',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          agentName: name,
+          phase: 'start',
+          info: data,
+          ts: Date.now(),
+        });
+      });
+
+      session.on('subagent_end', (name: string, data: Record<string, unknown>) => {
+        ctx.emitOutput({
+          type: 'node:subagent',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          agentName: name,
+          phase: 'end',
+          info: data,
+          error: typeof data.error === 'string' ? data.error : undefined,
+          ts: Date.now(),
+        });
+      });
+
+      session.on('permission', (data: Record<string, unknown>) => {
+        ctx.emitOutput({
+          type: 'node:permission',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          kind: typeof data.kind === 'string' ? data.kind : undefined,
+          detail: typeof data.detail === 'string' ? data.detail : undefined,
+          approved: typeof data.approved === 'boolean' ? data.approved : undefined,
           ts: Date.now(),
         });
       });

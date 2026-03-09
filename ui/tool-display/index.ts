@@ -18,12 +18,16 @@ export type {
   TodoToolData,
   TodoItem,
   TodoStatus,
+  ImageToolData,
+  ResourceToolData,
 } from './types';
 export {
   isTerminalData,
   isSimpleData,
   isSubagentData,
   isTodoData,
+  isImageData,
+  isResourceData,
 } from './types';
 
 // Agent debug event types

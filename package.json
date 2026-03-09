@@ -106,6 +106,7 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
+    "@github/copilot-sdk": ">=0.1.0",
     "@xyflow/react": ">=12",
     "react": ">=18"
   },
@@ -114,6 +115,9 @@
       "optional": true
     },
     "@xyflow/react": {
+      "optional": true
+    },
+    "@github/copilot-sdk": {
       "optional": true
     }
   },

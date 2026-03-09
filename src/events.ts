@@ -2,10 +2,12 @@
  * Flow framework events — the complete event contract.
  *
  * 15 execution events (persisted to JSONL event log).
- * 3 output events (streamed, not persisted in event log).
+ * 7 output events (streamed, not persisted in event log).
  *
  * All events carry executionId + ts. Zero domain types.
  */
+
+import type { ToolSpecificData } from '../ui/tool-display/types';
 
 // ---------------------------------------------------------------------------
 // Graph skeleton — seeded from FlowGraph at run start
@@ -208,6 +210,10 @@ export interface NodeToolEvent {
   readonly summary: string;
   /** Full structured tool arguments (only on phase: 'start'). */
   readonly args?: Readonly<Record<string, unknown>>;
+  /** Real tool call ID from the backend (when available). */
+  readonly toolCallId?: string;
+  /** Structured completion data from the SDK (images, resources, terminal state). */
+  readonly toolSpecificData?: ToolSpecificData;
   readonly ts: number;
 }
 
@@ -219,5 +225,52 @@ export interface NodeReasoningEvent {
   readonly ts: number;
 }
 
+export interface NodeIntentEvent {
+  readonly type: 'node:intent';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly intent: string;
+  readonly ts: number;
+}
+
+export interface NodeUsageEvent {
+  readonly type: 'node:usage';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+  readonly model?: string;
+  readonly ts: number;
+}
+
+export interface NodeSubagentEvent {
+  readonly type: 'node:subagent';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly agentName: string;
+  readonly phase: 'start' | 'end';
+  readonly info?: Record<string, unknown>;
+  readonly error?: string;
+  readonly ts: number;
+}
+
+export interface NodePermissionEvent {
+  readonly type: 'node:permission';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly kind?: string;
+  readonly detail?: string;
+  readonly approved?: boolean;
+  readonly ts: number;
+}
+
 /** Discriminated union of output events (streamed, not persisted). */
-export type OutputEvent = NodeOutputEvent | NodeToolEvent | NodeReasoningEvent;
+export type OutputEvent =
+  | NodeOutputEvent
+  | NodeToolEvent
+  | NodeReasoningEvent
+  | NodeIntentEvent
+  | NodeUsageEvent
+  | NodeSubagentEvent
+  | NodePermissionEvent;

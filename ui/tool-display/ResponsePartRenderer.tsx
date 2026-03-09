@@ -2,11 +2,12 @@
 
 import React from 'react';
 import type { ResponsePart } from './response-parts';
+import type { ToolInvocation } from './types';
 import { ToolProgressLine } from './ToolProgressLine';
 import { ThinkingSection } from './ThinkingSection';
 import { StatusLine } from './StatusLine';
 
-// ── Markdown content (inline, lightweight fallback) ──────────────────────────
+// -- Markdown content (inline, lightweight fallback) --------------------------
 
 const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
 
@@ -28,12 +29,14 @@ function InlineMarkdown({ content }: { content: string }) {
   );
 }
 
-// ── ResponsePartRenderer ─────────────────────────────────────────────────────
+// -- ResponsePartRenderer -----------------------------------------------------
 
 export interface ResponsePartRendererProps {
   parts: readonly ResponsePart[];
   /** Optional: called to render markdown content. Defaults to plain text. */
   renderMarkdown?: (content: string, key: string) => React.ReactNode;
+  /** Optional: called to render custom expanded tool content. Return undefined to fall through to default. */
+  renderToolExpanded?: (tool: ToolInvocation) => React.ReactNode | undefined;
   /** Optional: controls thinking section collapsed state externally. */
   onToggleThinking?: (sectionId: string) => void;
   className?: string;
@@ -44,14 +47,15 @@ export interface ResponsePartRendererProps {
  * Maps ResponseParts to React components.
  *
  * Routes:
- * - markdown → renderMarkdown callback or InlineMarkdown
- * - tool-progress → ToolProgressLine (flat standalone line)
- * - thinking-section → ThinkingSection (collapsible block)
- * - status → StatusLine (dim metadata)
+ * - markdown -> renderMarkdown callback or InlineMarkdown
+ * - tool-progress -> ToolProgressLine (flat standalone line)
+ * - thinking-section -> ThinkingSection (collapsible block)
+ * - status -> StatusLine (dim metadata)
  */
 export function ResponsePartRenderer({
   parts,
   renderMarkdown,
+  renderToolExpanded,
   onToggleThinking,
   className,
   style,
@@ -66,7 +70,13 @@ export function ResponsePartRenderer({
               : <InlineMarkdown key={part.id} content={part.content} />;
 
           case 'tool-progress':
-            return <ToolProgressLine key={part.id} tool={part.tool} />;
+            return (
+              <ToolProgressLine
+                key={part.id}
+                tool={part.tool}
+                renderToolExpanded={renderToolExpanded}
+              />
+            );
 
           case 'thinking-section':
             return (

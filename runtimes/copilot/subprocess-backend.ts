@@ -4,7 +4,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import type { ChildProcess } from 'child_process';
-import type { CopilotBackend, CopilotSession, SessionConfig } from './copilot-backend';
+import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
 import { killProcessTree } from './process-killer';
 
 type CommandFactory = (config: SessionConfig) => readonly [string, readonly string[]];
@@ -423,14 +423,22 @@ class SubprocessSession implements CopilotSession {
     });
   }
 
+  // Overloads match CopilotSession interface exactly.
   on(event: 'text', handler: (text: string) => void): void;
-  on(event: 'reasoning', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
-  on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string) => void): void;
+  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string) => void): void;
   on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'tool_output' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'reasoning', handler: (text: string) => void): void;
+  // Rich events: accepted but never fired by SubprocessBackend.
+  on(event: 'intent', handler: (intent: string) => void): void;
+  on(event: 'usage', handler: (data: UsageData) => void): void;
+  on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<ContentBlock>, callId?: string) => void): void;
+  on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
+  on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
+  on(event: 'permission', handler: (data: PermissionInfo) => void): void;
+  on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as EventHandler);
   }
 

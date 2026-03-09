@@ -9,7 +9,7 @@
  * - Tool output goes to onToolOutput() and is invisible in thinking blocks.
  */
 
-import type { ToolInvocation, ToolCategory } from './types';
+import type { ToolInvocation, ToolCategory, ToolSpecificData } from './types';
 import type { ToolFormatterRegistry } from './formatter';
 import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable, computeVerb } from './formatter';
 import { shortenToolMessage } from './format-utils';
@@ -181,13 +181,23 @@ export class ResponsePartBuilder {
 
   /**
    * Called when a tool invocation completes.
+   *
+   * When toolSpecificData is provided (e.g. from SDK rich events), it takes
+   * precedence over the formatter's formatComplete() output. This preserves
+   * backward compatibility -- SubprocessBackend still uses string-based formatters.
    */
-  onToolComplete(toolCallId: string, result: string, isError = false): void {
+  onToolComplete(toolCallId: string, result: string, isError = false, toolSpecificData?: ToolSpecificData): void {
     const invocation = this._pendingTools.get(toolCallId);
     if (!invocation) { return; }
 
     const args = this._pendingArgs.get(toolCallId) ?? {};
     completeToolInvocation(this._formatters, invocation, result, args, isError);
+
+    // Override with structured data when provided by the SDK
+    if (toolSpecificData) {
+      invocation.toolSpecificData = toolSpecificData;
+    }
+
     this._pendingTools.delete(toolCallId);
     this._pendingArgs.delete(toolCallId);
 

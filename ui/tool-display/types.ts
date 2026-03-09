@@ -2,12 +2,12 @@
  * Tool invocation data contracts for structured agent output rendering.
  *
  * Adapted from VS Code Copilot Chat (MIT). All VS Code specifics removed:
- * - MarkdownString → string
- * - Uri → string
- * - Classes → plain interfaces
+ * - MarkdownString -> string
+ * - Uri -> string
+ * - Classes -> plain interfaces
  */
 
-// ── Terminal tool data (bash, powershell, etc.) ──────────────────────────────
+// -- Terminal tool data (bash, powershell, etc.) ------------------------------
 
 export interface TerminalToolData {
   commandLine: { original: string };
@@ -17,14 +17,14 @@ export interface TerminalToolData {
   state?: { exitCode?: number; duration?: number };
 }
 
-// ── Simple input/output data (read, grep, glob, etc.) ────────────────────────
+// -- Simple input/output data (read, grep, glob, etc.) ------------------------
 
 export interface SimpleToolData {
   input: string;
   output: string;
 }
 
-// ── Subagent data (task/agent delegation) ────────────────────────────────────
+// -- Subagent data (task/agent delegation) ------------------------------------
 
 export interface SubagentToolData {
   description?: string;
@@ -33,7 +33,7 @@ export interface SubagentToolData {
   result?: string;
 }
 
-// ── Todo list data ───────────────────────────────────────────────────────────
+// -- Todo list data -----------------------------------------------------------
 
 export type TodoStatus = 'not-started' | 'in-progress' | 'completed';
 
@@ -48,15 +48,35 @@ export interface TodoToolData {
   todoList: TodoItem[];
 }
 
-// ── Union of all tool-specific data shapes ───────────────────────────────────
+// -- Image data (base64 encoded image from tool result) -----------------------
+
+export interface ImageToolData {
+  data: string;      // base64
+  mimeType: string;
+  alt?: string;
+}
+
+// -- Resource data (file/URI reference from tool result) ----------------------
+
+export interface ResourceToolData {
+  uri: string;
+  name: string;
+  title?: string;
+  mimeType?: string;
+  text?: string;     // inline text content
+}
+
+// -- Union of all tool-specific data shapes -----------------------------------
 
 export type ToolSpecificData =
   | TerminalToolData
   | SimpleToolData
   | SubagentToolData
-  | TodoToolData;
+  | TodoToolData
+  | ImageToolData
+  | ResourceToolData;
 
-// ── Tool categories ──────────────────────────────────────────────────────────
+// -- Tool categories ----------------------------------------------------------
 
 export type ToolCategory =
   | 'shell'
@@ -68,7 +88,7 @@ export type ToolCategory =
   | 'mcp'
   | 'default';
 
-// ── Tool invocation (the core display unit) ──────────────────────────────────
+// -- Tool invocation (the core display unit) ----------------------------------
 
 export interface ToolInvocation {
   toolName: string;
@@ -92,7 +112,7 @@ export interface ToolInvocation {
   output: string[];
 }
 
-// ── Type guards ──────────────────────────────────────────────────────────────
+// -- Type guards --------------------------------------------------------------
 
 export function isTerminalData(data: ToolSpecificData): data is TerminalToolData {
   return 'commandLine' in data && 'language' in data;
@@ -108,4 +128,12 @@ export function isSubagentData(data: ToolSpecificData): data is SubagentToolData
 
 export function isTodoData(data: ToolSpecificData): data is TodoToolData {
   return 'todoList' in data;
+}
+
+export function isImageData(data: ToolSpecificData): data is ImageToolData {
+  return 'data' in data && 'mimeType' in data;
+}
+
+export function isResourceData(data: ToolSpecificData): data is ResourceToolData {
+  return 'uri' in data && 'name' in data && !('data' in data);
 }

@@ -38,6 +38,7 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
       // Map flow SessionConfig → CopilotBackend SessionConfig
       const copilotConfig = {
         model: config.model,
+        thinkingBudget: config.thinkingBudget,
         cwd: config.cwd,
         addDirs: config.addDirs,
         timeout: config.timeout,

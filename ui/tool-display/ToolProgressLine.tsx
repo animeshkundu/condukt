@@ -4,10 +4,11 @@ import React, { useState } from 'react';
 import type { ToolInvocation } from './types';
 import { isSimpleData, isTerminalData } from './types';
 import { ensureAnimations } from './ThinkingSection';
+import { ansiToHtml, hasAnsi } from '../ansi';
 
 const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
 
-// ── Status icon ──────────────────────────────────────────────────────────────
+// -- Status icon --------------------------------------------------------------
 
 function ProgressIcon({ tool }: { tool: ToolInvocation }) {
   if (!tool.isComplete) {
@@ -25,7 +26,7 @@ function ProgressIcon({ tool }: { tool: ToolInvocation }) {
   return <span style={{ color: '#4ade80', fontSize: 12, lineHeight: 1, flexShrink: 0 }}>&#10003;</span>;
 }
 
-// ── Code badge ───────────────────────────────────────────────────────────────
+// -- Code badge ---------------------------------------------------------------
 
 function CodeBadge({ text }: { text: string }) {
   return (
@@ -43,10 +44,42 @@ function CodeBadge({ text }: { text: string }) {
   );
 }
 
-// ── ToolProgressLine ─────────────────────────────────────────────────────────
+// -- Exit code badge ----------------------------------------------------------
+
+function ExitCodeBadge({ exitCode }: { exitCode: number }) {
+  const isSuccess = exitCode === 0;
+  return (
+    <span style={{
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: '0.08em',
+      color: isSuccess ? '#4ade80' : '#f87171',
+      background: isSuccess ? '#4ade8018' : '#f8717118',
+      padding: '1px 6px',
+      borderRadius: 4,
+    }}>
+      EXIT {exitCode}
+    </span>
+  );
+}
+
+// -- ANSI-aware output rendering ----------------------------------------------
+
+function TerminalOutput({ text }: { text: string }) {
+  if (hasAnsi(text)) {
+    return (
+      <span dangerouslySetInnerHTML={{ __html: ansiToHtml(text) }} />
+    );
+  }
+  return <>{text}</>;
+}
+
+// -- ToolProgressLine ---------------------------------------------------------
 
 export interface ToolProgressLineProps {
   tool: ToolInvocation;
+  /** Optional callback to render custom expanded content. Return undefined to fall through to default. */
+  renderToolExpanded?: (tool: ToolInvocation) => React.ReactNode | undefined;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -55,10 +88,10 @@ export interface ToolProgressLineProps {
  * Flat progress line for standalone (non-pinned) tools.
  * Pattern 1 from VS Code: icon + message, single line.
  *
- * MCP format: "✓ Ran `tool_name` – server (MCP Server)"
- * Default: "✓ Read src/app/page.tsx"
+ * MCP format: "check Ran `tool_name` -- server (MCP Server)"
+ * Default: "check Read src/app/page.tsx"
  */
-export function ToolProgressLine({ tool, className, style }: ToolProgressLineProps) {
+export function ToolProgressLine({ tool, renderToolExpanded, className, style }: ToolProgressLineProps) {
   ensureAnimations();
 
   const [expanded, setExpanded] = useState(false);
@@ -92,7 +125,12 @@ export function ToolProgressLine({ tool, className, style }: ToolProgressLinePro
     return tool.output.join('\n');
   }
 
-  const chevronChar = expanded ? '\u25BE' : '\u25B8'; // ▾ / ▸
+  const chevronChar = expanded ? '\u25BE' : '\u25B8'; // down / right
+
+  // Check for terminal exit code
+  const terminalState = tool.toolSpecificData && isTerminalData(tool.toolSpecificData)
+    ? tool.toolSpecificData.state
+    : undefined;
 
   return (
     <div
@@ -125,14 +163,14 @@ export function ToolProgressLine({ tool, className, style }: ToolProgressLinePro
               {tool.verb}{' '}
               <CodeBadge text={tool.toolName} />
               {tool.serverName && (
-                <span style={{ opacity: 0.7 }}> – {tool.serverName} (MCP Server)</span>
+                <span style={{ opacity: 0.7 }}> -- {tool.serverName} (MCP Server)</span>
               )}
             </>
           ) : isMcp && !tool.isComplete ? (
             <>
               Calling <CodeBadge text={tool.toolName} />
               {tool.serverName && (
-                <span style={{ opacity: 0.7 }}> – {tool.serverName} (MCP Server)</span>
+                <span style={{ opacity: 0.7 }}> -- {tool.serverName} (MCP Server)</span>
               )}
               <span style={{ opacity: 0.7 }}>...</span>
             </>
@@ -159,74 +197,110 @@ export function ToolProgressLine({ tool, className, style }: ToolProgressLinePro
       </div>
 
       {/* Expanded content area */}
-      {expanded && hasDetails && (
-        <div style={{
-          border: '1px solid #3d3a36',
-          borderRadius: 8,
-          margin: '4px 0 4px 20px',
-          overflow: 'hidden',
-        }}>
-          {/* Input section */}
-          <div style={{ padding: '8px 12px' }}>
+      {expanded && hasDetails && (() => {
+        // Check custom renderer first
+        const customContent = renderToolExpanded?.(tool);
+        if (customContent !== undefined) {
+          return (
             <div style={{
-              color: '#6b6660',
-              fontSize: 11,
-              fontWeight: 500,
-              textTransform: 'uppercase' as const,
-              letterSpacing: '0.08em',
-              marginBottom: 4,
+              border: '1px solid #3d3a36',
+              borderRadius: 8,
+              margin: '4px 0 4px 20px',
+              overflow: 'hidden',
             }}>
-              Input
+              {customContent}
             </div>
-            <pre style={{
-              fontFamily: MONO,
-              background: '#161411',
-              border: '1px solid #302e2b',
-              borderRadius: 6,
-              padding: '8px 12px',
-              fontSize: 11,
-              color: '#b1ada1',
-              maxHeight: 300,
-              overflowY: 'auto' as const,
-              margin: 0,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}>
-              {tool.invocationMessage}
-            </pre>
-          </div>
+          );
+        }
 
-          {/* Output section */}
-          <div style={{ padding: '4px 12px 8px' }}>
-            <div style={{
-              color: '#6b6660',
-              fontSize: 11,
-              fontWeight: 500,
-              textTransform: 'uppercase' as const,
-              letterSpacing: '0.08em',
-              marginBottom: 4,
-            }}>
-              Output
+        // Default expanded rendering
+        const resultText = getResultText();
+        const isTerminal = tool.toolSpecificData && isTerminalData(tool.toolSpecificData);
+
+        return (
+          <div style={{
+            border: '1px solid #3d3a36',
+            borderRadius: 8,
+            margin: '4px 0 4px 20px',
+            overflow: 'hidden',
+          }}>
+            {/* Input section */}
+            <div style={{ padding: '8px 12px' }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 4,
+              }}>
+                <div style={{
+                  color: '#6b6660',
+                  fontSize: 11,
+                  fontWeight: 500,
+                  textTransform: 'uppercase' as const,
+                  letterSpacing: '0.08em',
+                }}>
+                  Input
+                </div>
+              </div>
+              <pre style={{
+                fontFamily: MONO,
+                background: '#161411',
+                border: '1px solid #302e2b',
+                borderRadius: 6,
+                padding: '8px 12px',
+                fontSize: 11,
+                color: '#b1ada1',
+                maxHeight: 300,
+                overflowY: 'auto' as const,
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                {tool.invocationMessage}
+              </pre>
             </div>
-            <pre style={{
-              fontFamily: MONO,
-              background: '#161411',
-              border: '1px solid #302e2b',
-              borderRadius: 6,
-              padding: '8px 12px',
-              fontSize: 11,
-              color: '#b1ada1',
-              maxHeight: 300,
-              overflowY: 'auto' as const,
-              margin: 0,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}>
-              {getResultText()}
-            </pre>
+
+            {/* Output section */}
+            <div style={{ padding: '4px 12px 8px' }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 4,
+              }}>
+                <div style={{
+                  color: '#6b6660',
+                  fontSize: 11,
+                  fontWeight: 500,
+                  textTransform: 'uppercase' as const,
+                  letterSpacing: '0.08em',
+                }}>
+                  Output
+                </div>
+                {terminalState?.exitCode !== undefined && (
+                  <ExitCodeBadge exitCode={terminalState.exitCode} />
+                )}
+              </div>
+              <pre style={{
+                fontFamily: MONO,
+                background: '#161411',
+                border: '1px solid #302e2b',
+                borderRadius: 6,
+                padding: '8px 12px',
+                fontSize: 11,
+                color: '#b1ada1',
+                maxHeight: 300,
+                overflowY: 'auto' as const,
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                {isTerminal ? <TerminalOutput text={resultText} /> : resultText}
+              </pre>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

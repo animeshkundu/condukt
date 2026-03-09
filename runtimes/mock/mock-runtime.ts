@@ -140,14 +140,22 @@ class MockAgentSession implements AgentSession {
     }
   }
 
+  // Overloads match AgentSession interface exactly.
   on(event: 'text', handler: (text: string) => void): void;
-  on(event: 'reasoning', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>) => void): void;
-  on(event: 'tool_complete', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string) => void): void;
+  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string) => void): void;
   on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
-  on(event: 'text' | 'reasoning' | 'tool_start' | 'tool_complete' | 'tool_output' | 'idle' | 'error', handler: (...args: never[]) => void): void {
+  on(event: 'reasoning', handler: (text: string) => void): void;
+  // Rich events: accepted but never fired by MockAgentSession.
+  on(event: 'intent', handler: (intent: string) => void): void;
+  on(event: 'usage', handler: (data: Record<string, unknown>) => void): void;
+  on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => void): void;
+  on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
+  on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
+  on(event: 'permission', handler: (data: Record<string, unknown>) => void): void;
+  on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as SessionEvent);
   }
 
