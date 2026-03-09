@@ -219,7 +219,9 @@ export class SdkBackend implements CopilotBackend {
   async isAvailable(): Promise<boolean> {
     try {
       const sdkModuleName = '@github/copilot-sdk';
-      await import(sdkModuleName);
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<unknown>;
+      await dynamicImport(sdkModuleName);
       return true;
     } catch {
       return false;
@@ -306,7 +308,9 @@ class SdkSession implements CopilotSession {
     // Use string indirection to avoid TS2307 when the SDK is not installed
     // (it's an optional peer dependency).
     const sdkModuleName = '@github/copilot-sdk';
-    const { CopilotClient, approveAll } = await (import(sdkModuleName) as Promise<CopilotSdkModule>);
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<CopilotSdkModule>;
+    const { CopilotClient, approveAll } = await dynamicImport(sdkModuleName);
 
     // ---------------------------------------------------------------
     // Build hardened environment (strip NODE_OPTIONS, extend PATH)
