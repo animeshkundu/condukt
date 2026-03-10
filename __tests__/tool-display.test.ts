@@ -762,3 +762,112 @@ describe('ResponsePartBuilder', () => {
     expect((builder.parts[1] as MarkdownPart).content).toBe('Here is the analysis');
   });
 });
+
+
+// ── F7: pastTenseMessage ─────────────────────────────────────────────────────
+
+describe('pastTenseMessage', () => {
+  const registry = createToolFormatterRegistry();
+
+  it('Read: "Reading src/app.ts" -> "Read src/app.ts"', () => {
+    const inv = createToolInvocation(registry, 'Read', 'tc-1', { file_path: 'src/app.ts' });
+    completeInvocation(registry, inv, 'contents', { file_path: 'src/app.ts' });
+    expect(inv.pastTenseMessage).toBe('Read src/app.ts');
+  });
+
+  it('Grep: "Searching for `import`" -> "Searched for `import`"', () => {
+    const inv = createToolInvocation(registry, 'Grep', 'tc-2', { pattern: 'import' });
+    completeInvocation(registry, inv, 'matches', { pattern: 'import' });
+    expect(inv.pastTenseMessage).toBe('Searched for `import`');
+  });
+
+  it('Edit: "Editing src/file.ts" -> "Edited src/file.ts"', () => {
+    const inv = createToolInvocation(registry, 'Edit', 'tc-3', { file_path: 'src/file.ts' });
+    completeInvocation(registry, inv, 'ok', { file_path: 'src/file.ts' });
+    expect(inv.pastTenseMessage).toBe('Edited src/file.ts');
+  });
+
+  it('Bash: "npm test" -> "npm test" (no progressive prefix, unchanged)', () => {
+    const inv = createToolInvocation(registry, 'Bash', 'tc-4', { command: 'npm test' });
+    completeInvocation(registry, inv, 'passed', { command: 'npm test' });
+    expect(inv.pastTenseMessage).toBe('npm test');
+  });
+
+  it('Write: "Writing out.txt" -> "Edited out.txt"', () => {
+    const inv = createToolInvocation(registry, 'Write', 'tc-5', { file_path: 'out.txt' });
+    completeInvocation(registry, inv, '', { file_path: 'out.txt' });
+    expect(inv.pastTenseMessage).toBe('Edited out.txt');
+  });
+
+  it('WebFetch: "Fetching https://..." -> "Ran https://..."', () => {
+    const inv = createToolInvocation(registry, 'WebFetch', 'tc-6', { url: 'https://example.com' });
+    completeInvocation(registry, inv, 'html', { url: 'https://example.com' });
+    expect(inv.pastTenseMessage).toBe('Ran https://example.com');
+  });
+});
+
+
+// ── F8: Edit SimpleToolData ──────────────────────────────────────────────────
+
+describe('Edit SimpleToolData', () => {
+  const registry = createToolFormatterRegistry();
+
+  it('Edit with non-empty result returns SimpleToolData', () => {
+    const inv = createToolInvocation(registry, 'Edit', 'tc-1', { file_path: 'a.ts' });
+    completeInvocation(registry, inv, 'Applied edit', { file_path: 'a.ts' });
+    expect(inv.toolSpecificData).toBeDefined();
+    expect(isSimpleData(inv.toolSpecificData!)).toBe(true);
+  });
+
+  it('Edit with empty result returns undefined toolSpecificData', () => {
+    const inv = createToolInvocation(registry, 'Edit', 'tc-2', { file_path: 'b.ts' });
+    completeInvocation(registry, inv, '', { file_path: 'b.ts' });
+    expect(inv.toolSpecificData).toBeUndefined();
+  });
+
+  it('Write returns undefined toolSpecificData', () => {
+    const inv = createToolInvocation(registry, 'Write', 'tc-3', { file_path: 'c.ts' });
+    completeInvocation(registry, inv, 'ok', { file_path: 'c.ts' });
+    expect(inv.toolSpecificData).toBeUndefined();
+  });
+});
+
+
+// ── F9: isPinnable boundaries ────────────────────────────────────────────────
+
+describe('isPinnable boundaries', () => {
+  it('mcp__filesystem__read_file is pinnable (double underscore MCP pattern)', () => {
+    expect(isPinnable('mcp__filesystem__read_file')).toBe(true);
+  });
+
+  it('tool name with -mcp- infix is pinnable', () => {
+    expect(isPinnable('kusto-mcp-server-executeQuery')).toBe(true);
+  });
+
+  it('my_mcp_tool (single underscore) is not pinnable', () => {
+    expect(isPinnable('my_mcp_tool')).toBe(false);
+  });
+
+  it('Task, SendMessage, report_intent are not pinnable', () => {
+    expect(isPinnable('Task')).toBe(false);
+    expect(isPinnable('SendMessage')).toBe(false);
+    expect(isPinnable('report_intent')).toBe(false);
+  });
+});
+
+
+// ── F10: Present progressive tense ──────────────────────────────────────────
+
+describe('present progressive tense (invocationMessage)', () => {
+  const registry = createToolFormatterRegistry();
+
+  it('Read invocationMessage starts with "Reading "', () => {
+    const inv = createToolInvocation(registry, 'Read', 'tc-1', { file_path: 'src/app.ts' });
+    expect(inv.invocationMessage).toMatch(/^Reading /);
+  });
+
+  it('Grep invocationMessage starts with "Searching for "', () => {
+    const inv = createToolInvocation(registry, 'Grep', 'tc-2', { pattern: 'useState' });
+    expect(inv.invocationMessage).toMatch(/^Searching for /);
+  });
+});

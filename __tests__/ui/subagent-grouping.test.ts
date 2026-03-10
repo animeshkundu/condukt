@@ -170,4 +170,30 @@ describe('ResponsePartBuilder sub-agent grouping', () => {
     // The text gets buffered in _pendingSubagentEvents, so no parts created
     expect(builder.parts).toHaveLength(0);
   });
+
+  it('onSubagentEnd sets collapsed=true on success', () => {
+    const builder = new ResponsePartBuilder();
+    builder.onSubagentStart('tc-sa-1', 'worker', 'Worker');
+
+    const section = builder.parts[0] as SubagentSectionPart;
+    expect(section.collapsed).toBe(false);
+
+    builder.onSubagentEnd('tc-sa-1');
+
+    expect(section.status).toBe('completed');
+    expect(section.collapsed).toBe(true);
+  });
+
+  it('onSubagentEnd does NOT collapse on failure', () => {
+    const builder = new ResponsePartBuilder();
+    builder.onSubagentStart('tc-sa-1', 'worker', 'Worker');
+
+    const section = builder.parts[0] as SubagentSectionPart;
+    expect(section.collapsed).toBe(false);
+
+    builder.onSubagentEnd('tc-sa-1', 'Agent crashed');
+
+    expect(section.status).toBe('failed');
+    expect(section.collapsed).toBe(false);
+  });
 });

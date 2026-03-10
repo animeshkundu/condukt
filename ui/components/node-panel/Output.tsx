@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ansiToHtml, stripAnsi, hasAnsi } from '../../ansi';
-import { SANS, MONO } from '../../tool-display/constants';
+import { MONO } from '../../tool-display/constants';
 
 export type OutputRenderer = 'plain' | 'ansi' | ((line: string, index: number) => React.ReactNode);
 

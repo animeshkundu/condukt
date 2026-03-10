@@ -437,7 +437,7 @@ export function createToolInvocation(
   let msg = fmt.formatStart(toolName, args);
   // If message is essentially empty after the verb, fall back to friendlyName + toolName
   const stripped = msg.replace(/^(Reading|Searching|Editing|Writing|Creating|Showing|Inserting|Undoing|Delegating)\s*/i, '').trim();
-  if (!stripped || stripped === '``' || stripped === "for ``" || stripped === "for files matching ``") {
+  if (!stripped || stripped === ':' || stripped === '``' || stripped === "for ``" || stripped === "for files matching ``") {
     msg = fmt.friendlyName !== 'Tool' ? fmt.friendlyName : toolName;
   }
   return {

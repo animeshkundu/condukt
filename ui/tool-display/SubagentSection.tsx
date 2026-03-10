@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import type { SubagentSectionPart, SubagentSectionItem, ToolInvocation } from './types';
 import { ToolProgressLine } from './ToolProgressLine';
 import { ensureAnimations } from './ThinkingSection';
@@ -60,6 +60,12 @@ export function SubagentSection({
   ensureAnimations();
 
   const [collapsed, setCollapsed] = useState(section.collapsed);
+
+  // Sync external collapsed state (e.g., auto-collapse on completion)
+  useEffect(() => {
+    setCollapsed(section.collapsed);
+  }, [section.collapsed]);
+
   const [showAllTools, setShowAllTools] = useState(false);
 
   const handleToggle = useCallback(() => {

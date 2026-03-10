@@ -10,10 +10,10 @@ export interface DiffBlockProps {
   style?: React.CSSProperties;
 }
 
-function classifyLine(line: string): 'add' | 'remove' | 'header' | 'context' {
+export function classifyLine(line: string): 'add' | 'remove' | 'header' | 'context' {
+  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) return 'header';
   if (line.startsWith('+')) return 'add';
   if (line.startsWith('-')) return 'remove';
-  if (line.startsWith('@')) return 'header';
   return 'context';
 }
 

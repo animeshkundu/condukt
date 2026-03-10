@@ -111,7 +111,7 @@ export function ResponsePartRenderer({
           default:
             return null;
         }
-        return <div key={part.id} role="listitem" tabIndex={0}>{child}</div>;
+        return <div key={part.id} role="listitem" tabIndex={-1}>{child}</div>;
       })}
     </div>
   );
