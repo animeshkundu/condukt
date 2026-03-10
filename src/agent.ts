@@ -186,13 +186,14 @@ export function agent(config: AgentConfig): NodeFn {
       }
 
       // Step 5: Wire session events to emitOutput
-      session.on('text', (text: string) => {
+      session.on('text', (text: string, parentToolCallId?: string) => {
         outputLines.push(text);
         ctx.emitOutput({
           type: 'node:output',
           executionId: ctx.executionId,
           nodeId: ctx.nodeId,
           content: text,
+          parentToolCallId,
           ts: Date.now(),
         });
       });
@@ -207,7 +208,7 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
-      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>, callId?: string) => {
+      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>, callId?: string, parentToolCallId?: string) => {
         ctx.emitOutput({
           type: 'node:tool',
           executionId: ctx.executionId,
@@ -217,11 +218,12 @@ export function agent(config: AgentConfig): NodeFn {
           summary: toolInput,
           args,
           toolCallId: callId,
+          parentToolCallId,
           ts: Date.now(),
         });
       });
 
-      session.on('tool_complete', (tool: string, output: string, callId?: string) => {
+      session.on('tool_complete', (tool: string, output: string, callId?: string, parentToolCallId?: string) => {
         ctx.emitOutput({
           type: 'node:tool',
           executionId: ctx.executionId,
@@ -230,11 +232,12 @@ export function agent(config: AgentConfig): NodeFn {
           phase: 'complete',
           summary: output,
           toolCallId: callId,
+          parentToolCallId,
           ts: Date.now(),
         });
       });
 
-      session.on('tool_output', (tool: string, output: string) => {
+      session.on('tool_output', (tool: string, output: string, parentToolCallId?: string) => {
         outputLines.push(output);
         ctx.emitOutput({
           type: 'node:output',
@@ -242,6 +245,7 @@ export function agent(config: AgentConfig): NodeFn {
           nodeId: ctx.nodeId,
           content: output,
           tool,
+          parentToolCallId,
           ts: Date.now(),
         });
       });
@@ -289,24 +293,28 @@ export function agent(config: AgentConfig): NodeFn {
       });
 
       session.on('subagent_start', (name: string, data: Record<string, unknown>) => {
+        const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
         ctx.emitOutput({
           type: 'node:subagent',
           executionId: ctx.executionId,
           nodeId: ctx.nodeId,
           agentName: name,
           phase: 'start',
+          toolCallId,
           info: data,
           ts: Date.now(),
         });
       });
 
       session.on('subagent_end', (name: string, data: Record<string, unknown>) => {
+        const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
         ctx.emitOutput({
           type: 'node:subagent',
           executionId: ctx.executionId,
           nodeId: ctx.nodeId,
           agentName: name,
           phase: 'end',
+          toolCallId,
           info: data,
           error: typeof data.error === 'string' ? data.error : undefined,
           ts: Date.now(),

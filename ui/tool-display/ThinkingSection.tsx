@@ -48,6 +48,10 @@ const ANIMATIONS_CSS = `
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+@keyframes pulse-status {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 `;
 
 declare const globalThis: Record<string, unknown>;

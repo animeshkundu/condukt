@@ -112,6 +112,26 @@ export interface ToolInvocation {
   output: string[];
 }
 
+// -- Sub-agent section types --------------------------------------------------
+
+export type SubagentSectionItem =
+  | { readonly kind: 'pinned-tool'; tool: ToolInvocation }
+  | { readonly kind: 'agent-text'; content: string };
+
+export interface SubagentSectionPart {
+  readonly kind: 'subagent-section';
+  readonly id: string;
+  /** The tool call ID that identifies this sub-agent (grouping key). */
+  readonly toolCallId: string;
+  agentName: string;
+  agentDisplayName: string;
+  description?: string;
+  status: 'running' | 'completed' | 'failed';
+  error?: string;
+  items: SubagentSectionItem[];
+  collapsed: boolean;
+}
+
 // -- Type guards --------------------------------------------------------------
 
 export function isTerminalData(data: ToolSpecificData): data is TerminalToolData {

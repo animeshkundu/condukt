@@ -20,6 +20,8 @@ export type {
   TodoStatus,
   ImageToolData,
   ResourceToolData,
+  SubagentSectionPart,
+  SubagentSectionItem,
 } from './types';
 export {
   isTerminalData,
@@ -112,6 +114,9 @@ export type { ThinkingSectionProps } from './ThinkingSection';
 
 export { StatusLine } from './StatusLine';
 export type { StatusLineProps } from './StatusLine';
+
+export { SubagentSection } from './SubagentSection';
+export type { SubagentSectionProps } from './SubagentSection';
 
 export { ResponsePartRenderer } from './ResponsePartRenderer';
 export type { ResponsePartRendererProps } from './ResponsePartRenderer';

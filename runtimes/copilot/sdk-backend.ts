@@ -266,6 +266,14 @@ class SdkSession implements CopilotSession {
   private _toolCallNames = new Map<string, string>();
 
   /**
+   * Maps toolCallId -> parentToolCallId for attributing child events to
+   * their parent sub-agent. Populated from tool.execution_start events
+   * that carry a parentToolCallId. Used to look up the parent for
+   * tool.execution_partial_result (which lacks parentToolCallId).
+   */
+  private _callIdToParent = new Map<string, string>();
+
+  /**
    * Buffers partial results that arrive before their tool.execution_start.
    */
   private _pendingPartials = new Map<string, string[]>();
@@ -395,7 +403,8 @@ class SdkSession implements CopilotSession {
 
       const data = e.data;
       const content = typeof data?.content === 'string' ? data.content : '';
-      if (content) this.emit('text', content);
+      const parentToolCallId = typeof data?.parentToolCallId === 'string' ? data.parentToolCallId : undefined;
+      if (content) this.emit('text', content, parentToolCallId);
 
       // Pre-seed _toolCallNames from tool requests so tool.execution_complete
       // can resolve names even if tool.execution_start lacks a toolCallId.
@@ -411,8 +420,10 @@ class SdkSession implements CopilotSession {
     sdkSession.on('assistant.message_delta', (e: SdkEvent) => {
       if (this.aborted) return;
       this.resetHeartbeat();
-      const delta = typeof e.data?.deltaContent === 'string' ? e.data.deltaContent : '';
-      if (delta) this.emit('text', delta);
+      const data = e.data;
+      const delta = typeof data?.deltaContent === 'string' ? data.deltaContent : '';
+      const parentToolCallId = typeof data?.parentToolCallId === 'string' ? data.parentToolCallId : undefined;
+      if (delta) this.emit('text', delta, parentToolCallId);
     });
 
     // --- Reasoning ---
@@ -439,19 +450,25 @@ class SdkSession implements CopilotSession {
       const toolName = String(data?.toolName ?? '');
       const args = data?.arguments as Record<string, unknown> | undefined;
       const summary = args ? extractArgSummary(args) : '';
+      const parentToolCallId = typeof data?.parentToolCallId === 'string' ? data.parentToolCallId : undefined;
 
       const callId = String(data?.toolCallId ?? '');
       if (callId && toolName) {
         this._toolCallNames.set(callId, toolName);
+        // Record parent mapping for partial_result lookups
+        if (parentToolCallId) {
+          this._callIdToParent.set(callId, parentToolCallId);
+        }
         // Flush any partials that arrived before this start event
         const buffered = this._pendingPartials.get(callId);
         if (buffered) {
-          for (const p of buffered) this.emit('tool_output', toolName, p);
+          const resolvedParent = parentToolCallId ?? this._callIdToParent.get(callId);
+          for (const p of buffered) this.emit('tool_output', toolName, p, resolvedParent);
           this._pendingPartials.delete(callId);
         }
       }
 
-      if (toolName) this.emit('tool_start', toolName, summary, args ?? {}, callId);
+      if (toolName) this.emit('tool_start', toolName, summary, args ?? {}, callId, parentToolCallId);
     });
 
     // --- Tool execution complete ---
@@ -461,6 +478,9 @@ class SdkSession implements CopilotSession {
 
       const data = e.data;
       const callId = String(data?.toolCallId ?? '');
+      const parentToolCallId = typeof data?.parentToolCallId === 'string'
+        ? data.parentToolCallId
+        : this._callIdToParent.get(callId);
       let toolName = '';
 
       if (typeof data?.toolName === 'string' && data.toolName)
@@ -468,6 +488,7 @@ class SdkSession implements CopilotSession {
       if (!toolName && callId)
         toolName = this._toolCallNames.get(callId) ?? '';
       this._toolCallNames.delete(callId);
+      this._callIdToParent.delete(callId);
 
       const result = data?.result as SdkToolResult | undefined;
       const output = typeof result?.content === 'string'
@@ -475,7 +496,7 @@ class SdkSession implements CopilotSession {
         : typeof result?.detailedContent === 'string'
           ? result.detailedContent : '';
 
-      this.emit('tool_complete', toolName, output, callId);
+      this.emit('tool_complete', toolName, output, callId, parentToolCallId);
 
       // Rich event: structured content blocks for consumers that want them
       if (result?.contents && Array.isArray(result.contents)) {
@@ -484,6 +505,9 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Tool execution partial result ---
+    // Note: tool.execution_partial_result does NOT carry parentToolCallId in
+    // the SDK. We look it up from the _callIdToParent map populated by
+    // tool.execution_start.
     sdkSession.on('tool.execution_partial_result', (e: SdkEvent) => {
       if (this.aborted) return;
       this.resetHeartbeat();
@@ -494,9 +518,10 @@ class SdkSession implements CopilotSession {
 
       const callId = String(data?.toolCallId ?? '');
       const toolName = (callId && this._toolCallNames.get(callId)) || '';
+      const parentToolCallId = callId ? this._callIdToParent.get(callId) : undefined;
 
       if (toolName) {
-        this.emit('tool_output', toolName, partial);
+        this.emit('tool_output', toolName, partial, parentToolCallId);
       } else if (callId) {
         const buf = this._pendingPartials.get(callId) ?? [];
         buf.push(partial);
@@ -522,14 +547,17 @@ class SdkSession implements CopilotSession {
       this.emitError(new Error(msg));
     });
 
-    // --- Subagent lifecycle (mapped to tool events for SubprocessBackend parity) ---
+    // --- Subagent lifecycle ---
+    // Sub-agents use their own event path (subagent_start/subagent_end).
+    // The synthetic tool_start/tool_complete dual-emit is removed — sub-agent
+    // grouping is handled by SubagentSectionPart in the UI layer.
     sdkSession.on('subagent.started', (e: SdkEvent) => {
       if (this.aborted) return;
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
-      this.emit('tool_start', `subagent:${name}`, '', {});
-      this.emit('subagent_start', name, data ?? {});
+      const toolCallId = typeof data?.toolCallId === 'string' ? data.toolCallId : '';
+      this.emit('subagent_start', name, { ...data, toolCallId });
     });
 
     sdkSession.on('subagent.completed', (e: SdkEvent) => {
@@ -537,8 +565,8 @@ class SdkSession implements CopilotSession {
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
-      this.emit('tool_complete', `subagent:${name}`, '');
-      this.emit('subagent_end', name, data ?? {});
+      const toolCallId = typeof data?.toolCallId === 'string' ? data.toolCallId : '';
+      this.emit('subagent_end', name, { ...data, toolCallId });
     });
 
     sdkSession.on('subagent.failed', (e: SdkEvent) => {
@@ -546,9 +574,9 @@ class SdkSession implements CopilotSession {
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
+      const toolCallId = typeof data?.toolCallId === 'string' ? data.toolCallId : '';
       const error = typeof data?.error === 'string' ? data.error : '';
-      this.emit('tool_complete', `subagent:${name}`, error);
-      this.emit('subagent_end', name, data ?? {});
+      this.emit('subagent_end', name, { ...data, toolCallId, error });
     });
 
     // --- Rich events (optional; consumers can subscribe or ignore) ---
@@ -584,10 +612,10 @@ class SdkSession implements CopilotSession {
   // ── CopilotSession event subscription ────────────────────────────────────
   // Overloads match CopilotSession interface exactly.
 
-  on(event: 'text', handler: (text: string) => void): void;
-  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string) => void): void;
-  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string) => void): void;
-  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
+  on(event: 'text', handler: (text: string, parentToolCallId?: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string, parentToolCallId?: string) => void): void;
+  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string, parentToolCallId?: string) => void): void;
+  on(event: 'tool_output', handler: (tool: string, output: string, parentToolCallId?: string) => void): void;
   on(event: 'idle', handler: () => void): void;
   on(event: 'error', handler: (err: Error) => void): void;
   on(event: 'reasoning', handler: (text: string) => void): void;

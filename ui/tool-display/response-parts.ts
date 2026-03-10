@@ -9,7 +9,7 @@
  * - Tool output goes to onToolOutput() and is invisible in thinking blocks.
  */
 
-import type { ToolInvocation, ToolCategory, ToolSpecificData } from './types';
+import type { ToolInvocation, ToolCategory, ToolSpecificData, SubagentSectionPart, SubagentSectionItem } from './types';
 import type { ToolFormatterRegistry } from './formatter';
 import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable, computeVerb } from './formatter';
 import { shortenToolMessage } from './format-utils';
@@ -58,7 +58,7 @@ export interface StatusPart {
   text: string;
 }
 
-export type ResponsePart = MarkdownPart | ToolProgressPart | ThinkingSectionPart | StatusPart;
+export type ResponsePart = MarkdownPart | ToolProgressPart | ThinkingSectionPart | StatusPart | SubagentSectionPart;
 
 // ── Metadata tools that render as status lines ───────────────────────────────
 
@@ -97,6 +97,13 @@ export class ResponsePartBuilder {
   private _formatters: ToolFormatterRegistry;
   private _metadataTools: Set<string>;
 
+  /** Active sub-agent sections keyed by their toolCallId (grouping key). */
+  private _activeSubagents = new Map<string, SubagentSectionPart>();
+  /** Maps child tool callId -> parentToolCallId for routing tool_complete to sub-agent sections. */
+  private _subagentTools = new Map<string, string>();
+  /** Buffers child events that arrive before their subagent.started event. */
+  private _pendingSubagentEvents = new Map<string, Array<() => void>>();
+
   constructor(opts?: ResponsePartBuilderOptions) {
     this._formatters = opts?.formatters ?? {};
     this._metadataTools = opts?.metadataTools ?? METADATA_TOOLS;
@@ -112,10 +119,34 @@ export class ResponsePartBuilder {
 
   /**
    * Append agent speech / markdown content.
-   * ALWAYS finalizes any active thinking section and renders standalone.
-   * VS Code rule: output text is never absorbed into thinking blocks.
+   *
+   * When `parentToolCallId` is provided and matches an active sub-agent
+   * section, the content is routed into that section as `agent-text`.
+   * Otherwise, ALWAYS finalizes any active thinking section and renders
+   * standalone (VS Code rule: output text is never absorbed into thinking blocks).
    */
-  onOutput(content: string): void {
+  onOutput(content: string, parentToolCallId?: string): void {
+    // Route to sub-agent section if parentToolCallId matches
+    if (parentToolCallId) {
+      const section = this._activeSubagents.get(parentToolCallId);
+      if (section) {
+        // Merge with last agent-text item in the section if possible
+        const items = section.items;
+        const last = items[items.length - 1];
+        if (last?.kind === 'agent-text') {
+          last.content += content;
+        } else {
+          items.push({ kind: 'agent-text', content });
+        }
+        return;
+      }
+      // Buffer: subagent.started hasn't arrived yet (out-of-order events)
+      const buf = this._pendingSubagentEvents.get(parentToolCallId) ?? [];
+      buf.push(() => this.onOutput(content, parentToolCallId));
+      this._pendingSubagentEvents.set(parentToolCallId, buf);
+      return;
+    }
+
     this._finalizeThinking();
 
     const last = this._parts[this._parts.length - 1];
@@ -131,12 +162,36 @@ export class ResponsePartBuilder {
 
   /**
    * Called when a tool invocation starts.
-   * Routes to: silently ignored (metadata), thinking section (pinnable), or progress line (standalone).
+   *
+   * When `parentToolCallId` is provided and matches an active sub-agent
+   * section, the tool is routed into that section as a `pinned-tool` item.
+   * Otherwise routes to: silently ignored (metadata), thinking section
+   * (pinnable), or progress line (standalone).
    */
-  onToolStart(toolName: string, toolCallId: string, args: Record<string, unknown>): void {
+  onToolStart(toolName: string, toolCallId: string, args: Record<string, unknown>, parentToolCallId?: string): void {
     // Metadata tools → silently ignored (ephemeral progress, VS Code hides them)
     if (this._metadataTools.has(toolName)) {
       return;
+    }
+
+    // Route to sub-agent section if parentToolCallId matches
+    if (parentToolCallId) {
+      const section = this._activeSubagents.get(parentToolCallId);
+      if (section) {
+        const invocation = createToolInvocation(this._formatters, toolName, toolCallId, args);
+        this._pendingTools.set(toolCallId, invocation);
+        this._pendingArgs.set(toolCallId, args);
+        this._subagentTools.set(toolCallId, parentToolCallId);
+        section.items.push({ kind: 'pinned-tool', tool: invocation });
+        return;
+      }
+      // Buffer if subagent.started hasn't arrived yet
+      if (!this._activeSubagents.has(parentToolCallId)) {
+        const buf = this._pendingSubagentEvents.get(parentToolCallId) ?? [];
+        buf.push(() => this.onToolStart(toolName, toolCallId, args, parentToolCallId));
+        this._pendingSubagentEvents.set(parentToolCallId, buf);
+        return;
+      }
     }
 
     const invocation = createToolInvocation(this._formatters, toolName, toolCallId, args);
@@ -182,6 +237,9 @@ export class ResponsePartBuilder {
   /**
    * Called when a tool invocation completes.
    *
+   * Checks `_subagentTools` to see if this tool belongs to a sub-agent
+   * section. If so, completes the invocation in-place within that section.
+   *
    * When toolSpecificData is provided (e.g. from SDK rich events), it takes
    * precedence over the formatter's formatComplete() output. This preserves
    * backward compatibility -- SubprocessBackend still uses string-based formatters.
@@ -201,6 +259,13 @@ export class ResponsePartBuilder {
     this._pendingTools.delete(toolCallId);
     this._pendingArgs.delete(toolCallId);
 
+    // If this tool belongs to a sub-agent section, just clean up the mapping
+    const parentId = this._subagentTools.get(toolCallId);
+    if (parentId) {
+      this._subagentTools.delete(toolCallId);
+      return;
+    }
+
     // If this was a pinned tool, check if all pinned tools in the section are done
     if (this._activeThinking && invocation.isPinnable) {
       const allPinnedDone = this._activeThinking.items.every(
@@ -216,12 +281,63 @@ export class ResponsePartBuilder {
    * Append streaming output to a pending tool invocation.
    * This output is NOT visible in thinking blocks — it's stored on the
    * tool's output[] array for tools that want to display it elsewhere.
+   *
+   * When `parentToolCallId` is provided (or looked up via `_subagentTools`),
+   * routes to the tool within the sub-agent section.
    */
-  onToolOutput(toolCallId: string, line: string): void {
+  onToolOutput(toolCallId: string, line: string, parentToolCallId?: string): void {
     const invocation = this._pendingTools.get(toolCallId);
     if (invocation) {
       invocation.output.push(line);
     }
+  }
+
+  // ── Sub-agent lifecycle ──────────────────────────────────────────────────
+
+  /**
+   * Called when a sub-agent starts. Creates a new SubagentSectionPart and
+   * registers it in the active sub-agents map. Flushes any buffered child
+   * events that arrived before this start event.
+   */
+  onSubagentStart(toolCallId: string, name: string, displayName: string, description?: string): void {
+    const section: SubagentSectionPart = {
+      kind: 'subagent-section',
+      id: uid(),
+      toolCallId,
+      agentName: name,
+      agentDisplayName: displayName,
+      description,
+      status: 'running',
+      items: [],
+      collapsed: false,
+    };
+
+    this._activeSubagents.set(toolCallId, section);
+    this._parts.push(section);
+
+    // Flush any buffered child events that arrived before subagent.started
+    const buffered = this._pendingSubagentEvents.get(toolCallId);
+    if (buffered) {
+      this._pendingSubagentEvents.delete(toolCallId);
+      for (const replay of buffered) {
+        replay();
+      }
+    }
+  }
+
+  /**
+   * Called when a sub-agent ends (completed or failed). Finalizes the
+   * section status and removes it from the active map.
+   */
+  onSubagentEnd(toolCallId: string, error?: string): void {
+    const section = this._activeSubagents.get(toolCallId);
+    if (!section) { return; }
+
+    section.status = error ? 'failed' : 'completed';
+    if (error) {
+      section.error = error;
+    }
+    this._activeSubagents.delete(toolCallId);
   }
 
   // ── Reasoning / thinking ─────────────────────────────────────────────────
@@ -265,6 +381,9 @@ export class ResponsePartBuilder {
     this._pendingTools.clear();
     this._pendingArgs.clear();
     this._activeThinking = null;
+    this._activeSubagents.clear();
+    this._subagentTools.clear();
+    this._pendingSubagentEvents.clear();
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────

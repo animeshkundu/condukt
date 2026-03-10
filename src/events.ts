@@ -198,6 +198,8 @@ export interface NodeOutputEvent {
   readonly content: string;
   /** Tool name when output is from a specific tool execution (tool.execution_partial_result). */
   readonly tool?: string;
+  /** Parent tool call ID when this output originates from a sub-agent. */
+  readonly parentToolCallId?: string;
   readonly ts: number;
 }
 
@@ -212,6 +214,8 @@ export interface NodeToolEvent {
   readonly args?: Readonly<Record<string, unknown>>;
   /** Real tool call ID from the backend (when available). */
   readonly toolCallId?: string;
+  /** Parent tool call ID when this tool belongs to a sub-agent. */
+  readonly parentToolCallId?: string;
   /** Structured completion data from the SDK (images, resources, terminal state). */
   readonly toolSpecificData?: ToolSpecificData;
   readonly ts: number;
@@ -250,6 +254,8 @@ export interface NodeSubagentEvent {
   readonly nodeId: string;
   readonly agentName: string;
   readonly phase: 'start' | 'end';
+  /** The tool call ID that identifies this sub-agent (grouping key for child events). */
+  readonly toolCallId?: string;
   readonly info?: Record<string, unknown>;
   readonly error?: string;
   readonly ts: number;

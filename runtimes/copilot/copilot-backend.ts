@@ -78,13 +78,13 @@ export interface CopilotSession {
 
   // Core events (7 — emitted by all backends)
   /** Subscribe to streaming text output from the agent */
-  on(event: 'text', handler: (text: string) => void): void;
+  on(event: 'text', handler: (text: string, parentToolCallId?: string) => void): void;
   /** Subscribe to tool execution start (file read, bash, Kusto, etc.) */
-  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string) => void): void;
+  on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string, parentToolCallId?: string) => void): void;
   /** Subscribe to tool execution completion */
-  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string) => void): void;
+  on(event: 'tool_complete', handler: (tool: string, output: string, callId?: string, parentToolCallId?: string) => void): void;
   /** Subscribe to tool execution output (partial results with tool attribution) */
-  on(event: 'tool_output', handler: (tool: string, output: string) => void): void;
+  on(event: 'tool_output', handler: (tool: string, output: string, parentToolCallId?: string) => void): void;
   /** Agent finished all work */
   on(event: 'idle', handler: () => void): void;
   /** Agent encountered an error */

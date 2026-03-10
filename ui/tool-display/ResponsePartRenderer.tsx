@@ -6,6 +6,7 @@ import type { ToolInvocation } from './types';
 import { ToolProgressLine } from './ToolProgressLine';
 import { ThinkingSection } from './ThinkingSection';
 import { StatusLine } from './StatusLine';
+import { SubagentSection } from './SubagentSection';
 
 // -- Markdown content (inline, lightweight fallback) --------------------------
 
@@ -88,6 +89,16 @@ export function ResponsePartRenderer({
                 collapsed={part.collapsed}
                 active={part.active}
                 onToggle={onToggleThinking ? () => onToggleThinking(part.id) : undefined}
+                renderMarkdown={renderMarkdown}
+              />
+            );
+
+          case 'subagent-section':
+            return (
+              <SubagentSection
+                key={part.id}
+                section={part}
+                renderToolExpanded={renderToolExpanded}
                 renderMarkdown={renderMarkdown}
               />
             );
