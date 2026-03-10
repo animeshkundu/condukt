@@ -5,8 +5,7 @@ import type { ToolInvocation } from './types';
 import { isSimpleData, isTerminalData } from './types';
 import { ensureAnimations } from './ThinkingSection';
 import { ansiToHtml, hasAnsi } from '../ansi';
-
-const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
+import { SANS, MONO } from './constants';
 
 // -- Status icon --------------------------------------------------------------
 
@@ -96,6 +95,7 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
 
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [pathCopied, setPathCopied] = useState(false);
   const hasDetails = tool.isComplete && !!tool.toolSpecificData;
 
   // Running verb: when not complete, show active verb
@@ -136,7 +136,7 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
     <div
       className={className}
       style={{
-        fontFamily: MONO,
+        fontFamily: SANS,
         margin: '0 0 6px',
         ...style,
       }}
@@ -157,7 +157,7 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
         }}
       >
         <ProgressIcon tool={tool} />
-        <span style={{ color: '#8a8578', fontSize: 12, flex: 1 }}>
+        <span style={{ color: '#8a8578', fontSize: 13, flex: 1 }}>
           {isMcp && tool.isComplete ? (
             <>
               {tool.verb}{' '}
@@ -256,7 +256,29 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word',
               }}>
-                {tool.invocationMessage}
+                {tool.category === 'file' ? (
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const path = tool.toolSpecificData && isSimpleData(tool.toolSpecificData)
+                        ? tool.toolSpecificData.input
+                        : tool.invocationMessage;
+                      navigator.clipboard.writeText(path).then(() => {
+                        setPathCopied(true);
+                        setTimeout(() => setPathCopied(false), 1500);
+                      }).catch(() => {});
+                    }}
+                    style={{
+                      color: pathCopied ? '#4ade80' : '#D97757',
+                      cursor: 'pointer',
+                      fontFamily: MONO,
+                    }}
+                  >
+                    {pathCopied ? 'Copied!' : tool.invocationMessage}
+                  </span>
+                ) : (
+                  tool.invocationMessage
+                )}
               </pre>
             </div>
 

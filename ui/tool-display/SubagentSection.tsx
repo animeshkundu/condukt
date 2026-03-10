@@ -4,9 +4,7 @@ import React, { useState, useCallback } from 'react';
 import type { SubagentSectionPart, SubagentSectionItem, ToolInvocation } from './types';
 import { ToolProgressLine } from './ToolProgressLine';
 import { ensureAnimations } from './ThinkingSection';
-
-const SANS = 'Inter, system-ui, -apple-system, sans-serif';
-const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
+import { SANS, MONO } from './constants';
 
 // -- Status colors from design language ----------------------------------------
 
@@ -131,7 +129,7 @@ export function SubagentSection({
         </span>
         {toolItems.length > 0 && (
           <span style={{
-            fontFamily: MONO,
+            fontFamily: SANS,
             fontSize: 11,
             color: '#8a8578',
             flexShrink: 0,
@@ -168,7 +166,7 @@ export function SubagentSection({
           {/* Error message */}
           {section.error && (
             <div style={{
-              fontFamily: MONO,
+              fontFamily: SANS,
               fontSize: 12,
               color: '#f87171',
               background: '#3a1a1a',
@@ -184,7 +182,7 @@ export function SubagentSection({
 
           {/* Agent text segments + tools rendered in document order */}
           {section.items.length > 0 && (
-            <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            <div>
               {/* Render items in order: agent text inline, tools with progressive disclosure */}
               {section.items.map((item, idx) => {
                 if (item.kind === 'agent-text') {
@@ -242,7 +240,7 @@ export function SubagentSection({
                     border: '1px solid #3d3a36',
                     borderRadius: 6,
                     cursor: 'pointer',
-                    fontFamily: MONO,
+                    fontFamily: SANS,
                     fontSize: 11,
                     color: '#8a8578',
                     textAlign: 'center',

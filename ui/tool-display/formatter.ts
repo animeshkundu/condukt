@@ -128,7 +128,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   Read: {
     friendlyName: 'Read',
     category: 'file',
-    formatStart: (_name, args) => `Read ${args.file_path ?? args.path ?? ''}`,
+    formatStart: (_name, args) => `Reading ${args.file_path ?? args.path ?? ''}`,
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.file_path ?? args.path ?? ''),
       output: result,
@@ -143,10 +143,10 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
       const range = args.view_range as [number, number] | undefined;
       if (range && range[1] >= range[0] && range[0] >= 0) {
         return range[0] === range[1]
-          ? `Read ${path}, line ${range[0]}`
-          : `Read ${path}, lines ${range[0]}–${range[1]}`;
+          ? `Reading ${path}, line ${range[0]}`
+          : `Reading ${path}, lines ${range[0]}–${range[1]}`;
       }
-      return `Read ${path}`;
+      return `Reading ${path}`;
     },
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.path ?? ''),
@@ -157,7 +157,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   show_file: {
     friendlyName: 'Show File',
     category: 'file',
-    formatStart: (_name, args) => `Show ${args.path ?? ''}`,
+    formatStart: (_name, args) => `Showing ${args.path ?? ''}`,
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.path ?? ''),
       output: result,
@@ -168,7 +168,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   Grep: {
     friendlyName: 'Search',
     category: 'search',
-    formatStart: (_name, args) => `Searched for regex \`${args.pattern ?? ''}\``,
+    formatStart: (_name, args) => `Searching for \`${args.pattern ?? ''}\``,
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.pattern ?? ''),
       output: result,
@@ -181,7 +181,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   Glob: {
     friendlyName: 'Search',
     category: 'search',
-    formatStart: (_name, args) => `Searched for files matching \`${args.pattern ?? ''}\``,
+    formatStart: (_name, args) => `Searching for files matching \`${args.pattern ?? ''}\``,
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.pattern ?? ''),
       output: result,
@@ -193,7 +193,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   search: {
     friendlyName: 'Search',
     category: 'search',
-    formatStart: (_name, args) => `Search: ${args.query ?? args.pattern ?? ''}`,
+    formatStart: (_name, args) => `Searching: ${args.query ?? args.pattern ?? ''}`,
     formatComplete: (_name, result, args): SimpleToolData => ({
       input: String(args.query ?? args.pattern ?? ''),
       output: result,
@@ -203,22 +203,22 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
   semantic_code_search: { friendlyName: 'Search', category: 'search', formatStart: (...a) => BUILTIN_FORMATTERS.search.formatStart(...a), formatComplete: (...a) => BUILTIN_FORMATTERS.search.formatComplete(...a) },
 
   // Edit tools — typically suppressed in the tool group (they have own UI)
-  Edit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.file_path ?? args.path ?? 'file'}`, formatComplete: () => undefined },
-  MultiEdit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.file_path ?? args.path ?? 'file'}`, formatComplete: () => undefined },
+  Edit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.file_path ?? args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.file_path ?? args.path ?? ''), output: result } : undefined },
+  MultiEdit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.file_path ?? args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.file_path ?? args.path ?? ''), output: result } : undefined },
   Write: { friendlyName: 'Write', category: 'edit', formatStart: (_n, args) => `Writing ${args.file_path ?? args.path ?? 'file'}`, formatComplete: () => undefined },
   NotebookEdit: { friendlyName: 'Edit Notebook', category: 'edit', formatStart: (_n, args) => `Editing ${args.notebook_path ?? 'notebook'}`, formatComplete: () => undefined },
 
-  edit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.path ?? 'file'}`, formatComplete: () => undefined },
-  str_replace: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.path ?? 'file'}`, formatComplete: () => undefined },
-  create: { friendlyName: 'Create', category: 'edit', formatStart: (_n, args) => `Creating ${args.path ?? 'file'}`, formatComplete: () => undefined },
-  insert: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Inserting in ${args.path ?? 'file'}`, formatComplete: () => undefined },
-  undo_edit: { friendlyName: 'Undo Edit', category: 'edit', formatStart: (_n, args) => `Undoing edit in ${args.path ?? 'file'}`, formatComplete: () => undefined },
+  edit: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.path ?? ''), output: result } : undefined },
+  str_replace: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Editing ${args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.path ?? ''), output: result } : undefined },
+  create: { friendlyName: 'Create', category: 'edit', formatStart: (_n, args) => `Creating ${args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.path ?? ''), output: result } : undefined },
+  insert: { friendlyName: 'Edit', category: 'edit', formatStart: (_n, args) => `Inserting in ${args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.path ?? ''), output: result } : undefined },
+  undo_edit: { friendlyName: 'Undo Edit', category: 'edit', formatStart: (_n, args) => `Undoing edit in ${args.path ?? 'file'}`, formatComplete: (_n, result, args): SimpleToolData | undefined => result ? { input: String(args.path ?? ''), output: result } : undefined },
 
   // Subagent/task tools
   Task: {
     friendlyName: 'Delegate Task',
     category: 'subagent',
-    formatStart: (_name, args) => String(args.description ?? 'Delegated task'),
+    formatStart: (_name, args) => `Delegating: ${args.description ?? 'task'}`,
     formatComplete: (_name, result, args): SubagentToolData => ({
       description: String(args.description ?? ''),
       agentName: String(args.subagent_type ?? args.name ?? ''),
@@ -315,17 +315,22 @@ const PINNABLE_TOOLS = new Set([
   'Grep', 'grep', 'rg', 'Glob', 'glob', 'search', 'semantic_code_search',
   // Edit
   'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'str_replace', 'create', 'insert', 'undo_edit', 'apply_patch',
+  // MCP tools (pin inside thinking sections)
+  'WebFetch', 'WebSearch', 'web_fetch', 'web_search', 'sql', 'lsp',
 ]);
 
 /**
  * Returns true if a tool should be absorbed into the active thinking section
  * (pinned), matching VS Code's `shouldPinPart()` logic.
  *
- * Pinnable: file, search, edit, shell tools.
- * NOT pinnable: MCP tools, subagent/task tools, ask_user, Skill, meta tools.
+ * Pinnable: file, search, edit, shell, MCP tools.
+ * NOT pinnable: subagent/task tools, ask_user, Skill, meta tools.
  */
 export function isPinnable(toolName: string): boolean {
-  return PINNABLE_TOOLS.has(toolName);
+  if (PINNABLE_TOOLS.has(toolName)) return true;
+  // MCP-prefixed tools are pinnable (e.g. kusto-mcp-server-executeQuery, mcp__server__tool)
+  if (toolName.includes('-mcp-') || toolName.startsWith('mcp__')) return true;
+  return false;
 }
 
 // ── Verb computation ─────────────────────────────────────────────────────────
@@ -431,8 +436,8 @@ export function createToolInvocation(
   const category = fmt.category;
   let msg = fmt.formatStart(toolName, args);
   // If message is essentially empty after the verb, fall back to friendlyName + toolName
-  const stripped = msg.replace(/^(Read|Searched|Search|Editing|Writing|Creating|Show|Inserting|Undoing)\s*/i, '').trim();
-  if (!stripped || stripped === '``' || stripped === "for regex ``" || stripped === "for files matching ``") {
+  const stripped = msg.replace(/^(Reading|Searching|Editing|Writing|Creating|Showing|Inserting|Undoing|Delegating)\s*/i, '').trim();
+  if (!stripped || stripped === '``' || stripped === "for ``" || stripped === "for files matching ``") {
     msg = fmt.friendlyName !== 'Tool' ? fmt.friendlyName : toolName;
   }
   return {

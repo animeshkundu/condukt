@@ -3,8 +3,7 @@
 import React, { useState, useCallback } from 'react';
 import type { ThinkingSectionItem } from './response-parts';
 import type { ToolInvocation } from './types';
-
-const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
+import { SANS, MONO } from './constants';
 
 /** Render simple inline markdown: convert `backtick` patterns to <code> elements. */
 function renderInlineCode(text: string): React.ReactNode {
@@ -19,6 +18,7 @@ function renderInlineCode(text: string): React.ReactNode {
           borderRadius: 4,
           background: '#2b2a27',
           color: '#d4d0c8',
+          fontFamily: MONO,
         }}>{part.slice(1, -1)}</code>
       );
     }
@@ -26,15 +26,30 @@ function renderInlineCode(text: string): React.ReactNode {
   });
 }
 
-// ── Tool icon mapping (from VS Code getToolInvocationIcon) ───────────────────
+// ── Tool icon mapping (SVG line icons) ───────────────────────────────────────
 
-function getToolIcon(toolName: string): string {
+function getToolIcon(toolName: string): React.ReactNode {
   const lower = toolName.toLowerCase();
-  if (/search|grep|find|glob|list/.test(lower)) return '\uD83D\uDD0D'; // 🔍
-  if (/read|get_file|view|show/.test(lower)) return '\uD83D\uDCD6';    // 📖
-  if (/edit|create|replace|write|insert|str_replace/.test(lower)) return '\u270F\uFE0F'; // ✏️
-  if (/bash|powershell|terminal|shell/.test(lower)) return '\uD83D\uDCBB'; // 💻
-  return '\uD83D\uDD27'; // 🔧
+  const props = { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+
+  if (/search|grep|find|glob|list/.test(lower)) {
+    // Magnifying glass
+    return <svg {...props}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>;
+  }
+  if (/read|get_file|view|show/.test(lower)) {
+    // Document
+    return <svg {...props}><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>;
+  }
+  if (/edit|create|replace|write|insert|str_replace/.test(lower)) {
+    // Pencil
+    return <svg {...props}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>;
+  }
+  if (/bash|powershell|terminal|shell/.test(lower)) {
+    // Terminal
+    return <svg {...props}><polyline points="4 17 10 11 4 5" /><line x1="12" x2="20" y1="19" y2="19" /></svg>;
+  }
+  // Wrench (default)
+  return <svg {...props}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg>;
 }
 
 // ── Shared animation keyframes (HMR-safe via globalThis) ─────────────────────
@@ -76,7 +91,7 @@ function ThinkingTextItemView({ content, renderMarkdown }: { content: string; re
       position: 'relative',
       color: '#8a8578',
       fontSize: 12,
-      fontFamily: MONO,
+      fontFamily: SANS,
       lineHeight: 1.5,
       whiteSpace: renderMarkdown ? undefined : 'pre-wrap',
       wordBreak: 'break-word',
@@ -106,7 +121,7 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
       position: 'relative',
       color: '#8a8578',
       fontSize: 12,
-      fontFamily: MONO,
+      fontFamily: SANS,
       lineHeight: 1.5,
       display: 'flex',
       alignItems: 'center',
@@ -115,7 +130,9 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
       <span style={{
         position: 'absolute',
         left: 3,
-        fontSize: 11,
+        top: 6,
+        display: 'flex',
+        alignItems: 'center',
       }}>{icon}</span>
       <span style={{ color: '#b1ada1' }}>{renderInlineCode(message)}</span>
       {!tool.isComplete && (
@@ -181,7 +198,6 @@ export function ThinkingSection({
         margin: '4px 8px',
         marginBottom: 16,
         position: 'relative',
-        fontFamily: MONO,
         ...style,
       }}
       onMouseEnter={() => setHovered(true)}
@@ -201,7 +217,7 @@ export function ThinkingSection({
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',
-          fontFamily: MONO,
+          fontFamily: SANS,
           fontSize: 13,
           lineHeight: '1.5em',
           textAlign: 'left',
@@ -229,10 +245,15 @@ export function ThinkingSection({
             </span>
           </>
         ) : (
-          // Finalized: summary title (no verb prefix — title is self-descriptive)
-          <span style={{ color: '#8a8578', opacity: 0.7, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {title}
-          </span>
+          // Finalized: check icon + summary title
+          <>
+            <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            <span style={{ color: '#8a8578', opacity: 0.7, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {title}
+            </span>
+          </>
         )}
         <span style={{
           color: '#6b6660',

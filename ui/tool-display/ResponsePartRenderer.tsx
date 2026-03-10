@@ -7,17 +7,16 @@ import { ToolProgressLine } from './ToolProgressLine';
 import { ThinkingSection } from './ThinkingSection';
 import { StatusLine } from './StatusLine';
 import { SubagentSection } from './SubagentSection';
+import { SANS, MONO } from './constants';
 
 // -- Markdown content (inline, lightweight fallback) --------------------------
-
-const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
 
 function InlineMarkdown({ content }: { content: string }) {
   return (
     <div
       style={{
-        fontFamily: MONO,
-        fontSize: 12,
+        fontFamily: SANS,
+        fontSize: 13,
         lineHeight: 1.6,
         color: '#e8e6e3',
         padding: '2px 8px',
@@ -62,27 +61,28 @@ export function ResponsePartRenderer({
   style,
 }: ResponsePartRendererProps) {
   return (
-    <div className={className} style={style}>
+    <div className={className} style={style} role="list">
       {parts.map(part => {
+        let child: React.ReactNode;
         switch (part.kind) {
           case 'markdown':
-            return renderMarkdown
-              ? <React.Fragment key={part.id}>{renderMarkdown(part.content, part.id)}</React.Fragment>
-              : <InlineMarkdown key={part.id} content={part.content} />;
+            child = renderMarkdown
+              ? <React.Fragment>{renderMarkdown(part.content, part.id)}</React.Fragment>
+              : <InlineMarkdown content={part.content} />;
+            break;
 
           case 'tool-progress':
-            return (
+            child = (
               <ToolProgressLine
-                key={part.id}
                 tool={part.tool}
                 renderToolExpanded={renderToolExpanded}
               />
             );
+            break;
 
           case 'thinking-section':
-            return (
+            child = (
               <ThinkingSection
-                key={part.id}
                 items={part.items}
                 title={part.title}
                 verb={part.verb}
@@ -92,23 +92,26 @@ export function ResponsePartRenderer({
                 renderMarkdown={renderMarkdown}
               />
             );
+            break;
 
           case 'subagent-section':
-            return (
+            child = (
               <SubagentSection
-                key={part.id}
                 section={part}
                 renderToolExpanded={renderToolExpanded}
                 renderMarkdown={renderMarkdown}
               />
             );
+            break;
 
           case 'status':
-            return <StatusLine key={part.id} text={part.text} />;
+            child = <StatusLine text={part.text} />;
+            break;
 
           default:
             return null;
         }
+        return <div key={part.id} role="listitem" tabIndex={0}>{child}</div>;
       })}
     </div>
   );

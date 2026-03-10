@@ -336,6 +336,8 @@ export class ResponsePartBuilder {
     section.status = error ? 'failed' : 'completed';
     if (error) {
       section.error = error;
+    } else {
+      section.collapsed = true;
     }
     this._activeSubagents.delete(toolCallId);
   }

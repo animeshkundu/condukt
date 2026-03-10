@@ -1,8 +1,7 @@
 'use client';
 
 import React from 'react';
-
-const MONO = '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace';
+import { SANS } from './constants';
 
 // ── StatusLine ───────────────────────────────────────────────────────────────
 
@@ -22,8 +21,8 @@ export function StatusLine({ text, className, style }: StatusLineProps) {
     <div
       className={className}
       style={{
-        fontFamily: MONO,
-        fontSize: 11,
+        fontFamily: SANS,
+        fontSize: 12,
         color: '#6b6660',
         padding: '1px 8px',
         lineHeight: 1.5,

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ansiToHtml, stripAnsi, hasAnsi } from '../../ansi';
+import { SANS, MONO } from '../../tool-display/constants';
 
 export type OutputRenderer = 'plain' | 'ansi' | ((line: string, index: number) => React.ReactNode);
 
@@ -110,7 +111,7 @@ export function Output({
         ref={scrollRef}
         style={{
           flex: 1, overflowY: 'auto', padding: '12px 24px',
-          fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace',
+          fontFamily: MONO,
           fontSize: 12, lineHeight: 1.5, background: '#161411',
         }}
       >

@@ -120,3 +120,6 @@ export type { SubagentSectionProps } from './SubagentSection';
 
 export { ResponsePartRenderer } from './ResponsePartRenderer';
 export type { ResponsePartRendererProps } from './ResponsePartRenderer';
+
+export { DiffBlock } from './DiffBlock';
+export type { DiffBlockProps } from './DiffBlock';

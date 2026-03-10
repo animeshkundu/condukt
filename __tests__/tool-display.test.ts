@@ -307,14 +307,19 @@ describe('isPinnable', () => {
     expect(isPinnable('str_replace')).toBe(true);
   });
 
-  it('marks MCP/subagent/meta tools as not pinnable', () => {
-    expect(isPinnable('kusto-mcp-server-executeQuery')).toBe(false);
+  it('marks subagent/meta tools as not pinnable', () => {
     expect(isPinnable('Task')).toBe(false);
     expect(isPinnable('Agent')).toBe(false);
     expect(isPinnable('AskUserQuestion')).toBe(false);
     expect(isPinnable('Skill')).toBe(false);
-    expect(isPinnable('WebFetch')).toBe(false);
-    expect(isPinnable('WebSearch')).toBe(false);
+  });
+
+  it('marks MCP tools as pinnable (Phase 8)', () => {
+    expect(isPinnable('kusto-mcp-server-executeQuery')).toBe(true);
+    expect(isPinnable('WebFetch')).toBe(true);
+    expect(isPinnable('WebSearch')).toBe(true);
+    expect(isPinnable('sql')).toBe(true);
+    expect(isPinnable('mcp__slack__post_message')).toBe(true);
   });
 });
 
@@ -373,7 +378,7 @@ describe('createToolInvocation + completeToolInvocation', () => {
     expect(inv.category).toBe('mcp');
     expect(inv.friendlyName).toBe('Kusto');
     expect(inv.verb).toBe('Ran');
-    expect(inv.isPinnable).toBe(false);
+    expect(inv.isPinnable).toBe(true);
     expect(inv.serverName).toBe('kusto-mcp-server');
   });
 });
@@ -686,11 +691,11 @@ describe('ResponsePartBuilder', () => {
     expect(tool.isPinnable).toBe(true);
   });
 
-  it('onToolStartRaw routes MCP tools to standalone progress line', () => {
+  it('onToolStartRaw routes MCP tools to thinking section (Phase 8: MCP pinnable)', () => {
     const builder = new ResponsePartBuilder({ formatters: createToolFormatterRegistry() });
     builder.onToolStartRaw('sql', 'tc-1', 'Execute SQL query');
     expect(builder.parts).toHaveLength(1);
-    expect(builder.parts[0].kind).toBe('tool-progress');
+    expect(builder.parts[0].kind).toBe('thinking-section');
   });
 
   it('onToolStartRaw silently ignores metadata tools', () => {
