@@ -187,3 +187,5 @@ For local iteration without publishing: `npm run build && npm pack` in condukt, 
 | Optional peer deps | `@github/copilot-sdk`, `react`, `@xyflow/react` are optional peers | All three have `"optional": true` in `peerDependenciesMeta` — consumers only install what they use |
 | Build output structure | Sub-path exports must map to `dist/` paths exactly | `tsconfig.build.json` mirrors source layout; verify `exports` in `package.json` after adding new entry points |
 | Consumer webpack compat | condukt sub-path exports don't resolve in Turbopack | Consumers must use webpack mode + `transpilePackages: ['condukt']` |
+| Reasoning delta `\n` joiner | Thinking text shows spaces between tokens ("ic m" instead of "icm") | `onReasoning` must concatenate deltas directly — no `\n` or ` ` separator. Markdown collapses single newlines to spaces. |
+| `wordBreak: 'break-word'` | Unpredictable mid-word breaks near `_` and `-` | Use `overflowWrap: 'break-word'` (CSS standard). Never use `wordBreak: 'break-word'` (non-standard). |

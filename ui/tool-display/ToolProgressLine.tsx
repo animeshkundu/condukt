@@ -254,7 +254,7 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                 overflowY: 'auto' as const,
                 margin: 0,
                 whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
+                overflowWrap: 'break-word',
               }}>
                 {tool.category === 'file' ? (
                   <span
@@ -315,7 +315,7 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                 overflowY: 'auto' as const,
                 margin: 0,
                 whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
+                overflowWrap: 'break-word',
               }}>
                 {isTerminal ? <TerminalOutput text={resultText} /> : resultText}
               </pre>

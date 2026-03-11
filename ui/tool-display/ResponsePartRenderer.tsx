@@ -21,7 +21,7 @@ function InlineMarkdown({ content }: { content: string }) {
         color: '#e8e6e3',
         padding: '2px 8px',
         whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
+        overflowWrap: 'break-word',
       }}
     >
       {content}

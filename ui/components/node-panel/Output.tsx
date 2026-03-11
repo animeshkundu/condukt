@@ -66,12 +66,12 @@ export function Output({
   // Render a single line based on renderer mode
   const renderLine = (line: string, i: number) => {
     if (typeof renderer === 'function') {
-      return <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 18 }}>{renderer(line, i)}</div>;
+      return <div key={i} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', minHeight: 18 }}>{renderer(line, i)}</div>;
     }
     if (renderer === 'ansi' && hasAnsi(line)) {
-      return <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 18 }} dangerouslySetInnerHTML={{ __html: ansiToHtml(line) || '\u00A0' }} />;
+      return <div key={i} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', minHeight: 18 }} dangerouslySetInnerHTML={{ __html: ansiToHtml(line) || '\u00A0' }} />;
     }
-    return <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 18 }}>{line || '\u00A0'}</div>;
+    return <div key={i} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', minHeight: 18 }}>{line || '\u00A0'}</div>;
   };
 
   return (

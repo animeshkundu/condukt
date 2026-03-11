@@ -347,6 +347,11 @@ export class ResponsePartBuilder {
   /**
    * Append reasoning / thinking content.
    * Always pins to the active thinking section (creating one if needed).
+   *
+   * IMPORTANT: Reasoning deltas are individual tokens from the LLM stream.
+   * They MUST be concatenated directly (no separator). Adding '\n' or ' '
+   * between deltas corrupts the text because Markdown rendering collapses
+   * single newlines to spaces (e.g., "ic\nm" → "ic m").
    */
   onReasoning(content: string): void {
     if (!content) return;
@@ -357,7 +362,7 @@ export class ResponsePartBuilder {
     const items = this._activeThinking!.items;
     const last = items[items.length - 1];
     if (last?.kind === 'thinking-text') {
-      last.content += '\n' + content;
+      last.content += content;
     } else {
       items.push({ kind: 'thinking-text', content });
     }

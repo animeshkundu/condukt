@@ -200,7 +200,7 @@ export function SubagentSection({
                       color: '#e8e6e3',
                       padding: '4px 0',
                       whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
+                      overflowWrap: 'break-word',
                     }}>
                       {renderMarkdown
                         ? renderMarkdown(item.content, `subagent-text-${section.id}-${idx}`)

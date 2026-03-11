@@ -48,7 +48,7 @@ export function DiffBlock({ content, filePath, className, style }: DiffBlockProp
         margin: 0,
         overflowX: 'auto',
         whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
+        overflowWrap: 'break-word',
       }}>
         {lines.map((line, i) => {
           const type = classifyLine(line);

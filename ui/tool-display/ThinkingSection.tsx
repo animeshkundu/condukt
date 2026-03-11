@@ -94,7 +94,7 @@ function ThinkingTextItemView({ content, renderMarkdown }: { content: string; re
       fontFamily: SANS,
       lineHeight: 1.5,
       whiteSpace: renderMarkdown ? undefined : 'pre-wrap',
-      wordBreak: 'break-word',
+      overflowWrap: 'break-word',
     }}>
       <span style={{
         position: 'absolute',

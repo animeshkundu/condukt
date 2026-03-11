@@ -423,7 +423,9 @@ describe('ResponsePartBuilder', () => {
 
   it('pins reasoning into thinking section', () => {
     const builder = new ResponsePartBuilder();
-    builder.onReasoning('Step 1');
+    // Reasoning deltas are individual tokens — concatenated directly (no separator).
+    // The LLM stream includes its own newlines when needed.
+    builder.onReasoning('Step 1\n');
     builder.onReasoning('Step 2');
     expect(builder.parts).toHaveLength(1);
     expect(builder.parts[0].kind).toBe('thinking-section');
