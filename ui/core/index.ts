@@ -37,4 +37,4 @@ export type { ResponsePart, ToolInvocation, ToolFormatter, ToolFormatterRegistry
 
 // Utilities
 export { cn } from '../utils';
-export { formatElapsed, formatDuration } from './utils';
+export { formatElapsed, formatDuration, formatTokens } from './utils';

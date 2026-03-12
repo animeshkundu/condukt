@@ -130,3 +130,9 @@ export { getToolIcon, renderInlineCode } from './tool-icons';
 
 export { DiffBlock, classifyLine } from './DiffBlock';
 export type { DiffBlockProps } from './DiffBlock';
+
+export { ImageBlock } from './ImageBlock';
+export type { ImageBlockProps } from './ImageBlock';
+
+export { ResourceLink } from './ResourceLink';
+export type { ResourceLinkProps } from './ResourceLink';

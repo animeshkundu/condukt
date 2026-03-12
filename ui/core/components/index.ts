@@ -27,3 +27,9 @@ export type { StatProps } from './Stat';
 
 export { ExecutionCard } from './ExecutionCard';
 export type { ExecutionCardProps } from './ExecutionCard';
+
+export { CostBadge } from './CostBadge';
+export type { CostBadgeProps } from './CostBadge';
+
+export { ElapsedTime } from './ElapsedTime';
+export type { ElapsedTimeProps } from './ElapsedTime';
