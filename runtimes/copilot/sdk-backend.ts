@@ -359,6 +359,15 @@ class SdkSession implements CopilotSession {
       sessionConfig.mcpServers = mcpServers;
     }
 
+    // Enable infinite sessions with automatic context compaction.
+    // Without this, GPT models silently stop responding after ~140 tool calls
+    // when the context window fills up (no error, no idle — just silence).
+    sessionConfig.infiniteSessions = {
+      enabled: true,
+      backgroundCompactionThreshold: 0.80,
+      bufferExhaustionThreshold: 0.95,
+    };
+
     const sdkSession = await client.createSession(sessionConfig);
     this._sdkSession = sdkSession;
 

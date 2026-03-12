@@ -644,8 +644,8 @@ export async function run(
 
       const targets = normalizeTargets(edgeTarget).filter(t => t !== 'end');
 
-      // Check if this is a loop-back: any target is already in the completed set
-      const loopBackTargets = targets.filter(t => completed.has(t));
+      // Check if this is a loop-back: any target is already completed or failed
+      const loopBackTargets = targets.filter(t => completed.has(t) || failedNodes.has(t));
 
       if (loopBackTargets.length > 0) {
         // Loop-back detected
