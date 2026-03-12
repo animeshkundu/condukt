@@ -5,6 +5,7 @@ import type { ToolInvocation } from './types';
 import { isSimpleData, isTerminalData } from './types';
 import { ensureAnimations } from './ThinkingSection';
 import { ansiToHtml, hasAnsi } from '../ansi';
+import { getToolIcon } from './tool-icons';
 import { SANS, MONO } from './constants';
 
 // -- Status icon --------------------------------------------------------------
@@ -96,6 +97,8 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [pathCopied, setPathCopied] = useState(false);
+  const [outputCopied, setOutputCopied] = useState(false);
+  const [outputExpanded, setOutputExpanded] = useState(false);
   const hasDetails = tool.isComplete && !!tool.toolSpecificData;
 
   // Running verb: when not complete, show active verb
@@ -158,6 +161,9 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
         }}
       >
         <ProgressIcon tool={tool} />
+        <span style={{ display: 'inline-flex', color: '#8a8578', flexShrink: 0 }}>
+          {getToolIcon(tool.category)}
+        </span>
         <span style={{ color: '#8a8578', fontSize: 13, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {isMcp && tool.isComplete ? (
             <>
@@ -251,8 +257,6 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                 padding: '8px 12px',
                 fontSize: 11,
                 color: '#b1ada1',
-                maxHeight: 300,
-                overflowY: 'auto' as const,
                 margin: 0,
                 whiteSpace: 'pre-wrap',
                 overflowWrap: 'break-word',
@@ -269,6 +273,21 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                         setTimeout(() => setPathCopied(false), 1500);
                       }).catch(() => {});
                     }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        const path = tool.toolSpecificData && isSimpleData(tool.toolSpecificData)
+                          ? tool.toolSpecificData.input
+                          : tool.invocationMessage;
+                        navigator.clipboard.writeText(path).then(() => {
+                          setPathCopied(true);
+                          setTimeout(() => setPathCopied(false), 1500);
+                        }).catch(() => {});
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    aria-label="Copy file path"
                     style={{
                       color: pathCopied ? '#4ade80' : '#D97757',
                       cursor: 'pointer',
@@ -303,23 +322,71 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
                 {terminalState?.exitCode !== undefined && (
                   <ExitCodeBadge exitCode={terminalState.exitCode} />
                 )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(resultText).then(() => {
+                      setOutputCopied(true);
+                      setTimeout(() => setOutputCopied(false), 1500);
+                    }).catch(() => {});
+                  }}
+                  style={{
+                    marginLeft: 'auto',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: SANS,
+                    fontSize: 10,
+                    color: outputCopied ? '#4ade80' : '#8a8578',
+                    padding: '0 4px',
+                    transition: 'color 150ms',
+                  }}
+                >
+                  {outputCopied ? 'Copied!' : 'Copy'}
+                </button>
               </div>
-              <pre style={{
-                fontFamily: MONO,
-                background: '#161411',
-                border: '1px solid #302e2b',
-                borderRadius: 6,
-                padding: '8px 12px',
-                fontSize: 11,
-                color: '#b1ada1',
-                maxHeight: 300,
-                overflowY: 'auto' as const,
-                margin: 0,
-                whiteSpace: 'pre-wrap',
-                overflowWrap: 'break-word',
-              }}>
-                {isTerminal ? <TerminalOutput text={resultText} /> : resultText}
-              </pre>
+              <div style={{ position: 'relative' }}>
+                <pre style={{
+                  fontFamily: MONO,
+                  background: '#161411',
+                  border: '1px solid #302e2b',
+                  borderRadius: 6,
+                  padding: '8px 12px',
+                  fontSize: 11,
+                  color: '#b1ada1',
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'break-word',
+                  ...(outputExpanded ? {} : { maxHeight: 500, overflow: 'hidden' }),
+                }}>
+                  {isTerminal ? <TerminalOutput text={resultText} /> : resultText}
+                </pre>
+                {!outputExpanded && resultText.split('\n').length > 30 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOutputExpanded(true);
+                    }}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      padding: '6px 8px',
+                      marginTop: 4,
+                      background: 'transparent',
+                      border: '1px solid #3d3a36',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      fontFamily: SANS,
+                      fontSize: 11,
+                      color: '#8a8578',
+                      textAlign: 'center',
+                      transition: 'all 150ms',
+                    }}
+                  >
+                    Show full output ({resultText.split('\n').length} lines)
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         );

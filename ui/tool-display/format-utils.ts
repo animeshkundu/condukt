@@ -179,10 +179,7 @@ export function parseTodoMarkdown(markdown: string): ParsedTodo {
  * → `icm/projection.json`
  */
 export function shortenPath(p: string): string {
-  const normalized = p.replace(/\\/g, '/');
-  const segments = normalized.split('/').filter(Boolean);
-  if (segments.length <= 2) return p;
-  return segments.slice(-2).join('/');
+  return p;
 }
 
 /**
@@ -191,13 +188,5 @@ export function shortenPath(p: string): string {
  * Non-path segments pass through unchanged.
  */
 export function shortenToolMessage(msg: string): string {
-  if (!msg) return msg;
-  return msg.split(/,\s*/).map(part => {
-    const trimmed = part.trim();
-    // Detect absolute paths: Windows drive letter or Unix root
-    if (/^[A-Z]:[\\\/]/i.test(trimmed) || /^\/[a-z]/i.test(trimmed)) {
-      return shortenPath(trimmed);
-    }
-    return trimmed;
-  }).join(', ');
+  return msg;
 }

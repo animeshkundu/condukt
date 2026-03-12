@@ -21,6 +21,9 @@ export function StatusLine({ text, className, style }: StatusLineProps) {
     <div
       className={className}
       style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
         fontFamily: SANS,
         fontSize: 12,
         color: '#6b6660',
@@ -29,6 +32,13 @@ export function StatusLine({ text, className, style }: StatusLineProps) {
         ...style,
       }}
     >
+      <div style={{
+        width: 2,
+        height: 12,
+        background: '#3d3a36',
+        borderRadius: 1,
+        flexShrink: 0,
+      }} />
       {text}
     </div>
   );

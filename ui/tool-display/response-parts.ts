@@ -12,7 +12,6 @@
 import type { ToolInvocation, ToolCategory, ToolSpecificData, SubagentSectionPart, SubagentSectionItem } from './types';
 import type { ToolFormatterRegistry } from './formatter';
 import { resolveFormatter, createToolInvocation, completeToolInvocation, isPinnable, computeVerb } from './formatter';
-import { shortenToolMessage } from './format-utils';
 
 // ── Thinking section item types ──────────────────────────────────────────────
 
@@ -58,7 +57,16 @@ export interface StatusPart {
   text: string;
 }
 
-export type ResponsePart = MarkdownPart | ToolProgressPart | ThinkingSectionPart | StatusPart | SubagentSectionPart;
+export interface ToolGroupPart {
+  readonly kind: 'tool-group';
+  readonly id: string;
+  tools: ToolInvocation[];
+  collapsed: boolean;
+  /** Unique category slugs for badge display. */
+  categories: string[];
+}
+
+export type ResponsePart = MarkdownPart | ToolProgressPart | ThinkingSectionPart | StatusPart | SubagentSectionPart | ToolGroupPart;
 
 // ── Metadata tools that render as status lines ───────────────────────────────
 
@@ -222,7 +230,7 @@ export class ResponsePartBuilder {
       verb: computeVerb(category),
       serverName: undefined,
       isPinnable: isPinnable(toolName),
-      invocationMessage: shortenToolMessage(message) || fmt.friendlyName,
+      invocationMessage: message || fmt.friendlyName,
       isComplete: false,
       isError: false,
       output: [],
@@ -395,17 +403,34 @@ export class ResponsePartBuilder {
 
   // ── Internal ─────────────────────────────────────────────────────────────
 
-  /** Route a tool invocation to thinking section (pinnable) or progress line (standalone). */
+  /** Route a tool invocation to thinking section (pinnable), tool group, or progress line. */
   private _routeInvocation(invocation: ToolInvocation): void {
     if (invocation.isPinnable) {
-      // Pin to active thinking section (create one if needed)
       this._ensureThinkingSection();
       this._activeThinking!.items.push({ kind: 'pinned-tool', tool: invocation });
     } else {
-      // Standalone tool → flat progress line (does NOT finalize thinking)
-      // VS Code: standalone tools render alongside thinking section, don't interrupt it.
-      // Thinking is only finalized by agent speech (onOutput) or stream end (flush).
-      this._parts.push({ kind: 'tool-progress', id: uid(), tool: invocation });
+      // Group consecutive standalone tools
+      const last = this._parts[this._parts.length - 1];
+      if (last?.kind === 'tool-group') {
+        (last as ToolGroupPart).tools.push(invocation);
+        if (!(last as ToolGroupPart).categories.includes(invocation.category)) {
+          (last as ToolGroupPart).categories.push(invocation.category);
+        }
+      } else if (last?.kind === 'tool-progress') {
+        // Convert single tool-progress → tool-group
+        const prev = (last as ToolProgressPart).tool;
+        const cats = [prev.category];
+        if (!cats.includes(invocation.category)) cats.push(invocation.category);
+        this._parts[this._parts.length - 1] = {
+          kind: 'tool-group',
+          id: last.id,
+          tools: [prev, invocation],
+          collapsed: false,
+          categories: cats,
+        } as ToolGroupPart;
+      } else {
+        this._parts.push({ kind: 'tool-progress', id: uid(), tool: invocation });
+      }
     }
   }
 
@@ -462,7 +487,7 @@ export class ResponsePartBuilder {
       const thinkingItems = section.items.filter(item => item.kind === 'thinking-text');
       if (thinkingItems.length > 0) {
         const firstLine = thinkingItems[0].content.split('\n')[0];
-        section.title = firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine;
+        section.title = firstLine;
         section.verb = 'Thought about';
       }
     }

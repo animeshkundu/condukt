@@ -7,6 +7,7 @@ import { ToolProgressLine } from './ToolProgressLine';
 import { ThinkingSection } from './ThinkingSection';
 import { StatusLine } from './StatusLine';
 import { SubagentSection } from './SubagentSection';
+import { ToolGroupSection } from './ToolGroupSection';
 import { SANS, MONO } from './constants';
 
 // -- Markdown content (inline, lightweight fallback) --------------------------
@@ -19,7 +20,7 @@ function InlineMarkdown({ content }: { content: string }) {
         fontSize: 13,
         lineHeight: 1.6,
         color: '#e8e6e3',
-        padding: '2px 8px',
+        padding: '6px 8px',
         whiteSpace: 'pre-wrap',
         overflowWrap: 'break-word',
       }}
@@ -104,6 +105,17 @@ export function ResponsePartRenderer({
             );
             break;
 
+          case 'tool-group':
+            child = (
+              <ToolGroupSection
+                tools={part.tools}
+                collapsed={part.collapsed}
+                categories={part.categories}
+                renderToolExpanded={renderToolExpanded}
+              />
+            );
+            break;
+
           case 'status':
             child = <StatusLine text={part.text} />;
             break;
@@ -111,7 +123,7 @@ export function ResponsePartRenderer({
           default:
             return null;
         }
-        return <div key={part.id} role="listitem" tabIndex={-1}>{child}</div>;
+        return <div key={part.id} role="listitem">{child}</div>;
       })}
     </div>
   );

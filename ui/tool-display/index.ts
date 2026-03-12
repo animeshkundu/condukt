@@ -98,6 +98,7 @@ export type {
   ToolProgressPart,
   ThinkingSectionPart,
   StatusPart,
+  ToolGroupPart,
   ThinkingSectionItem,
   ThinkingTextItem,
   PinnedToolItem,
@@ -118,8 +119,14 @@ export type { StatusLineProps } from './StatusLine';
 export { SubagentSection } from './SubagentSection';
 export type { SubagentSectionProps } from './SubagentSection';
 
+export { ToolGroupSection } from './ToolGroupSection';
+export type { ToolGroupSectionProps } from './ToolGroupSection';
+
 export { ResponsePartRenderer } from './ResponsePartRenderer';
 export type { ResponsePartRendererProps } from './ResponsePartRenderer';
+
+// Shared utilities
+export { getToolIcon, renderInlineCode } from './tool-icons';
 
 export { DiffBlock, classifyLine } from './DiffBlock';
 export type { DiffBlockProps } from './DiffBlock';

@@ -3,54 +3,8 @@
 import React, { useState, useCallback } from 'react';
 import type { ThinkingSectionItem } from './response-parts';
 import type { ToolInvocation } from './types';
+import { getToolIcon, renderInlineCode } from './tool-icons';
 import { SANS, MONO } from './constants';
-
-/** Render simple inline markdown: convert `backtick` patterns to <code> elements. */
-function renderInlineCode(text: string): React.ReactNode {
-  const parts = text.split(/(`[^`]+`)/g);
-  if (parts.length === 1) return text;
-  return parts.map((part, i) => {
-    if (part.startsWith('`') && part.endsWith('`')) {
-      return (
-        <code key={i} style={{
-          fontSize: '0.846em',
-          padding: '1px 3px',
-          borderRadius: 4,
-          background: '#2b2a27',
-          color: '#d4d0c8',
-          fontFamily: MONO,
-        }}>{part.slice(1, -1)}</code>
-      );
-    }
-    return part;
-  });
-}
-
-// ── Tool icon mapping (SVG line icons) ───────────────────────────────────────
-
-function getToolIcon(toolName: string): React.ReactNode {
-  const lower = toolName.toLowerCase();
-  const props = { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-
-  if (/search|grep|find|glob|list/.test(lower)) {
-    // Magnifying glass
-    return <svg {...props}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>;
-  }
-  if (/read|get_file|view|show/.test(lower)) {
-    // Document
-    return <svg {...props}><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>;
-  }
-  if (/edit|create|replace|write|insert|str_replace/.test(lower)) {
-    // Pencil
-    return <svg {...props}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>;
-  }
-  if (/bash|powershell|terminal|shell/.test(lower)) {
-    // Terminal
-    return <svg {...props}><polyline points="4 17 10 11 4 5" /><line x1="12" x2="20" y1="19" y2="19" /></svg>;
-  }
-  // Wrench (default)
-  return <svg {...props}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg>;
-}
 
 // ── Shared animation keyframes (HMR-safe via globalThis) ─────────────────────
 
@@ -82,43 +36,55 @@ export function ensureAnimations(): void {
   globalThis.__conduktAnimationsInjected = true;
 }
 
+// ── Progressive disclosure threshold ─────────────────────────────────────────
+
+const VISIBLE_TOOLS = 5;
+
+// ── Category friendly names for progressive disclosure summary ───────────────
+
+const CATEGORY_NAMES: Record<string, [string, string]> = {
+  file: ['file read', 'file reads'],
+  search: ['search', 'searches'],
+  edit: ['edit', 'edits'],
+  shell: ['shell command', 'shell commands'],
+  mcp: ['MCP call', 'MCP calls'],
+  subagent: ['sub-agent', 'sub-agents'],
+  task: ['task', 'tasks'],
+  default: ['tool', 'tools'],
+};
+
+function pluralize(count: number, category: string): string {
+  const [singular, plural] = CATEGORY_NAMES[category] ?? CATEGORY_NAMES.default;
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 // ── Thinking section item renderers ──────────────────────────────────────────
 
 function ThinkingTextItemView({ content, renderMarkdown }: { content: string; renderMarkdown?: (content: string, key: string) => React.ReactNode }) {
   return (
     <div style={{
-      padding: '6px 12px 6px 20px',
-      position: 'relative',
-      color: '#8a8578',
-      fontSize: 12,
+      padding: '4px 0',
+      color: '#b1ada1',
+      fontSize: 13,
       fontFamily: SANS,
       lineHeight: 1.5,
       whiteSpace: renderMarkdown ? undefined : 'pre-wrap',
       overflowWrap: 'break-word',
     }}>
-      <span style={{
-        position: 'absolute',
-        left: 5,
-        top: 9,
-        color: '#6b6660',
-        fontSize: 8,
-        lineHeight: 1,
-      }}>&#9679;</span>
       {renderMarkdown ? renderMarkdown(content, `thinking-text-${content.slice(0, 20)}`) : content}
     </div>
   );
 }
 
 function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
-  const icon = getToolIcon(tool.toolName);
+  const icon = getToolIcon(tool.category);
   const message = tool.isComplete
     ? (tool.pastTenseMessage ?? tool.invocationMessage)
     : tool.invocationMessage;
 
   return (
     <div style={{
-      padding: '4px 12px 4px 20px',
-      position: 'relative',
+      padding: '3px 0',
       color: '#8a8578',
       fontSize: 12,
       fontFamily: SANS,
@@ -127,21 +93,28 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
       alignItems: 'center',
       gap: 6,
     }}>
-      <span style={{
-        position: 'absolute',
-        left: 3,
-        top: 6,
-        display: 'flex',
-        alignItems: 'center',
-      }}>{icon}</span>
-      <span style={{ color: '#b1ada1' }}>{renderInlineCode(message)}</span>
-      {!tool.isComplete && (
-        <span style={{ display: 'inline-flex', width: 10, height: 10, flexShrink: 0, marginLeft: 2 }}>
-          <svg width="10" height="10" viewBox="0 0 10 10" style={{ animation: 'spin 1s linear infinite' }}>
-            <circle cx="5" cy="5" r="3.5" fill="none" stroke="#60a5fa" strokeWidth="1.2" strokeDasharray="16 6" />
+      {/* Status icon */}
+      {tool.isComplete ? (
+        tool.isError ? (
+          <span style={{ color: '#f87171', fontSize: 12, lineHeight: 1, flexShrink: 0 }}>&#10007;</span>
+        ) : (
+          <span style={{ color: '#4ade80', fontSize: 12, lineHeight: 1, flexShrink: 0 }}>&#10003;</span>
+        )
+      ) : (
+        <span style={{ display: 'inline-flex', width: 12, height: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <svg width="12" height="12" viewBox="0 0 12 12" style={{ animation: 'spin 1s linear infinite' }}>
+            <circle cx="6" cy="6" r="4.5" fill="none" stroke="#60a5fa" strokeWidth="1.5" strokeDasharray="20 8" />
           </svg>
         </span>
       )}
+      {/* Category icon */}
+      <span style={{ display: 'inline-flex', color: '#8a8578', flexShrink: 0 }}>
+        {icon}
+      </span>
+      {/* Message */}
+      <span style={{ color: '#b1ada1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {renderInlineCode(message)}
+      </span>
     </div>
   );
 }
@@ -161,8 +134,8 @@ export interface ThinkingSectionProps {
 }
 
 /**
- * Collapsible thinking section that groups reasoning + pinned tool invocations.
- * Pattern 2 from VS Code: chain-of-thought vertical lines, tool icons, shimmer title.
+ * Collapsible thinking section with contained card design.
+ * Groups reasoning + pinned tool invocations with a status-colored left border.
  */
 export function ThinkingSection({
   items,
@@ -179,7 +152,7 @@ export function ThinkingSection({
 
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const collapsed = controlledCollapsed ?? internalCollapsed;
-  const [hovered, setHovered] = useState(false);
+  const [showAllTools, setShowAllTools] = useState(false);
 
   const handleToggle = useCallback(() => {
     if (onToggle) {
@@ -189,31 +162,72 @@ export function ThinkingSection({
     }
   }, [onToggle]);
 
-  const chevronChar = collapsed ? '\u25B8' : '\u25BE'; // ▸ / ▾
+  const chevronChar = collapsed ? '\u25B8' : '\u25BE'; // right / down
+
+  // Count pinned tools for badge
+  const pinnedTools = items.filter(item => item.kind === 'pinned-tool');
+  const toolCount = pinnedTools.length;
+
+  // Border color: active vs finalized
+  const borderColor = active ? '#8a8578' : '#6b6660';
+
+  // Build active title from latest tool invocation message
+  const latestToolMessage = active && pinnedTools.length > 0
+    ? pinnedTools[pinnedTools.length - 1].tool.invocationMessage
+    : '';
+
+  // Progressive disclosure: separate visible vs hidden pinned tools
+  const visibleItems: ThinkingSectionItem[] = [];
+  const hiddenTools: ToolInvocation[] = [];
+  let toolIdx = 0;
+
+  for (const item of items) {
+    if (item.kind === 'thinking-text') {
+      visibleItems.push(item);
+    } else if (item.kind === 'pinned-tool') {
+      if (showAllTools || toolIdx < VISIBLE_TOOLS) {
+        visibleItems.push(item);
+      } else {
+        hiddenTools.push(item.tool);
+      }
+      toolIdx++;
+    }
+  }
+
+  // Build category summary for hidden tools
+  let hiddenSummary = '';
+  if (hiddenTools.length > 0) {
+    const catCounts = new Map<string, number>();
+    for (const t of hiddenTools) {
+      catCounts.set(t.category, (catCounts.get(t.category) ?? 0) + 1);
+    }
+    const parts: string[] = [];
+    for (const [cat, count] of catCounts) {
+      parts.push(pluralize(count, cat));
+    }
+    hiddenSummary = parts.join(', ');
+  }
 
   return (
     <div
       className={className}
       style={{
-        margin: '4px 8px',
-        marginBottom: 16,
-        position: 'relative',
+        margin: '8px 0',
+        borderLeft: `3px solid ${borderColor}`,
+        background: '#2b2a27',
+        borderRadius: 8,
+        overflow: 'hidden',
         ...style,
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
-      {/* Title button */}
+      {/* Header button */}
       <button
         onClick={handleToggle}
-        onFocus={() => setHovered(true)}
-        onBlur={() => setHovered(false)}
         style={{
-          display: collapsed ? 'inline-flex' : 'flex',
+          display: 'flex',
           alignItems: 'center',
-          width: collapsed ? 'fit-content' : '100%',
-          padding: collapsed ? '2px 6px 2px 2px' : '8px 12px',
-          borderRadius: collapsed ? 4 : 0,
+          width: '100%',
+          padding: '10px 16px',
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',
@@ -221,15 +235,20 @@ export function ThinkingSection({
           fontSize: 13,
           lineHeight: '1.5em',
           textAlign: 'left',
-          gap: 6,
-          color: '#b1ada1',
+          gap: 8,
         }}
         aria-expanded={!collapsed}
         aria-label={`Thinking section: ${title}`}
       >
         {active ? (
-          // Active: "Working:" with shimmer animation
           <>
+            {/* Spinner */}
+            <span style={{ display: 'inline-flex', width: 12, height: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <svg width="12" height="12" viewBox="0 0 12 12" style={{ animation: 'spin 1s linear infinite' }}>
+                <circle cx="6" cy="6" r="4.5" fill="none" stroke="#60a5fa" strokeWidth="1.5" strokeDasharray="20 8" />
+              </svg>
+            </span>
+            {/* "Working:" shimmer */}
             <span style={{
               fontWeight: 500,
               background: 'linear-gradient(90deg, #6b6660 0%, #6b6660 30%, #8a8578 50%, #6b6660 70%, #6b6660 100%)',
@@ -237,30 +256,43 @@ export function ThinkingSection({
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
               animation: 'thinkingShimmer 2s linear infinite',
+              flexShrink: 0,
             }}>
               Working:
             </span>
+            {/* Latest tool message */}
             <span style={{ color: '#8a8578', opacity: 0.7, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {title}
+              {latestToolMessage || title}
             </span>
           </>
         ) : (
-          // Finalized: check icon + summary title
           <>
+            {/* Check icon */}
             <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <polyline points="20 6 9 17 4 12" />
             </svg>
-            <span style={{ color: '#8a8578', opacity: 0.7, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {/* Generated title */}
+            <span style={{ color: '#8a8578', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {title}
             </span>
           </>
         )}
+        {/* Tool count badge */}
+        {toolCount > 0 && (
+          <span style={{
+            color: '#8a8578',
+            fontSize: 11,
+            flexShrink: 0,
+          }}>
+            {toolCount} tool{toolCount !== 1 ? 's' : ''}
+          </span>
+        )}
+        {/* Chevron */}
         <span style={{
           color: '#6b6660',
           fontSize: 11,
-          opacity: hovered || !collapsed ? 1 : 0,
-          transition: 'opacity 150ms',
           flexShrink: 0,
+          transition: 'opacity 150ms',
         }}>
           {chevronChar}
         </span>
@@ -268,42 +300,54 @@ export function ThinkingSection({
 
       {/* Content area */}
       {!collapsed && items.length > 0 && (
-        <div style={{ border: '1px solid #3d3a36', borderRadius: 8, marginTop: 4, overflow: 'hidden', minWidth: 0 }}>
-          {items.map((item, idx) => {
-            const isFirst = idx === 0;
-            const isLast = idx === items.length - 1;
-            const isOnly = items.length === 1;
-
-            // Chain-of-thought vertical line via wrapper
-            return (
-              <div key={idx} style={{ position: 'relative' }}>
-                {/* Vertical chain line */}
-                {!isOnly && (
-                  <div style={{
-                    position: 'absolute',
-                    left: 10.5,
-                    top: isFirst ? 25 : 0,
-                    height: isLast ? 14 : undefined,
-                    bottom: isLast ? undefined : 0,
-                    width: 1,
-                    background: '#3d3a36',
-                    maskImage: isFirst
-                      ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)'
-                      : isLast
-                        ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 100%)'
-                        : 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)',
-                    WebkitMaskImage: isFirst
-                      ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)'
-                      : isLast
-                        ? 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 100%)'
-                        : 'linear-gradient(to bottom, transparent 0px, #000 4px, #000 calc(100% - 4px), transparent 100%)',
-                  }} />
-                )}
-                {item.kind === 'thinking-text' && <ThinkingTextItemView content={item.content} renderMarkdown={renderMarkdown} />}
-                {item.kind === 'pinned-tool' && <PinnedToolItemView tool={item.tool} />}
-              </div>
-            );
+        <div style={{
+          padding: '0 12px 12px',
+          transition: 'max-height 200ms ease, opacity 150ms ease',
+        }}>
+          {visibleItems.map((item, idx) => {
+            if (item.kind === 'thinking-text') {
+              return <ThinkingTextItemView key={`text-${idx}`} content={item.content} renderMarkdown={renderMarkdown} />;
+            }
+            if (item.kind === 'pinned-tool') {
+              return <PinnedToolItemView key={`tool-${item.tool.toolCallId}`} tool={item.tool} />;
+            }
+            return null;
           })}
+
+          {/* Progressive disclosure */}
+          {!showAllTools && hiddenTools.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowAllTools(true);
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '6px 8px',
+                marginTop: 4,
+                background: 'transparent',
+                border: '1px solid #3d3a36',
+                borderRadius: 6,
+                cursor: 'pointer',
+                fontFamily: SANS,
+                fontSize: 11,
+                color: '#8a8578',
+                textAlign: 'center',
+                transition: 'all 150ms',
+              }}
+              onMouseEnter={(e) => {
+                (e.target as HTMLElement).style.borderColor = '#4a4742';
+                (e.target as HTMLElement).style.color = '#b1ada1';
+              }}
+              onMouseLeave={(e) => {
+                (e.target as HTMLElement).style.borderColor = '#3d3a36';
+                (e.target as HTMLElement).style.color = '#8a8578';
+              }}
+            >
+              Show {hiddenTools.length} more ({hiddenSummary})
+            </button>
+          )}
         </div>
       )}
     </div>
