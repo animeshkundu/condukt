@@ -218,14 +218,43 @@ describe('JSONL line parser (subprocess stdout)', () => {
         break;
       }
 
-      // --- Silently consumed (no events emitted) ---
+      // --- Silently consumed (lifecycle events) ---
       case 'user.message':
       case 'assistant.turn_start':
       case 'assistant.turn_end':
         break;
 
-      default:
-        events.push({ event: 'text', args: [line] });
+      default: {
+        // Three-tier: lifecycle → content extraction → stderr log
+        const LIFECYCLE = new Set([
+          'session.start', 'session.resume', 'session.shutdown', 'session.task_complete',
+          'session.info', 'session.warning', 'session.title_changed',
+          'session.context_changed', 'session.usage_info', 'session.model_change',
+          'session.compaction_start', 'session.compaction_complete',
+          'session.mode_changed', 'session.plan_changed',
+          'session.truncation', 'session.snapshot_rewind',
+          'session.workspace_file_changed', 'session.handoff',
+          'session.background_tasks_changed',
+          'pending_messages.modified', 'system.message', 'abort', 'result',
+          'skill.invoked', 'subagent.selected', 'subagent.deselected',
+          'user_input.requested', 'user_input.completed',
+          'elicitation.requested', 'elicitation.completed',
+          'external_tool.requested', 'external_tool.completed',
+          'command.queued', 'command.completed',
+          'exit_plan_mode.requested', 'exit_plan_mode.completed',
+          'tool.user_requested', 'tool.execution_progress',
+          'permission.completed',
+        ]);
+        if (LIFECYCLE.has(parsed.type)) break;
+        const evtData = parsed.data as Record<string, unknown> | undefined;
+        const content = typeof parsed.content === 'string' ? parsed.content
+          : typeof evtData?.content === 'string' ? evtData.content : null;
+        if (content) {
+          events.push({ event: 'text', args: [content] });
+        }
+        // else: unknown event with no content — would log to stderr in production
+        break;
+      }
     }
   }
 
@@ -302,6 +331,31 @@ describe('JSONL line parser (subprocess stdout)', () => {
 
   it('assistant.turn_end is silently consumed', () => {
     processLine('{"type":"assistant.turn_end","data":{"turnId":"0"}}');
+    expect(events).toEqual([]);
+  });
+
+  it('session.background_tasks_changed is silently consumed', () => {
+    processLine('{"type":"session.background_tasks_changed","data":{"tasks":[]}}');
+    expect(events).toEqual([]);
+  });
+
+  it('session.info is silently consumed', () => {
+    processLine('{"type":"session.info","data":{"message":"hello"}}');
+    expect(events).toEqual([]);
+  });
+
+  it('unknown event with data.content extracts it as text', () => {
+    processLine('{"type":"some.new_event","data":{"content":"extracted text"}}');
+    expect(events).toEqual([{ event: 'text', args: ['extracted text'] }]);
+  });
+
+  it('unknown event with top-level content extracts it as text', () => {
+    processLine('{"type":"some.new_event","content":"top level text"}');
+    expect(events).toEqual([{ event: 'text', args: ['top level text'] }]);
+  });
+
+  it('unknown event without content emits nothing', () => {
+    processLine('{"type":"some.new_event","data":{"foo":"bar"}}');
     expect(events).toEqual([]);
   });
 });

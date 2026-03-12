@@ -164,6 +164,8 @@ export function createNodeSSEStream(
             ...(args ? { args } : {}),
             ts: 0,
           })}\n\n`));
+        } else if (/^\{"type":"(session\.|assistant\.turn_|pending_messages)/.test(line)) {
+          // Skip raw CLI JSONL leaked by older SubprocessBackend versions
         } else {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'node:output', executionId, nodeId, content: unescapeFromLog(line), ts: 0,

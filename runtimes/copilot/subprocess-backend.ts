@@ -6,6 +6,7 @@ import { createInterface } from 'readline';
 import type { ChildProcess } from 'child_process';
 import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
 import { killProcessTree } from './process-killer';
+import { LIFECYCLE_EVENT_TYPES } from './lifecycle-events';
 
 type CommandFactory = (config: SessionConfig) => readonly [string, readonly string[]];
 
@@ -364,15 +365,21 @@ class SubprocessSession implements CopilotSession {
             }
 
             // --- Lifecycle events (silently consumed) ---
-            case 'user.message':
-            case 'assistant.turn_start':
-            case 'assistant.turn_end':
-            case 'session.info':
-            case 'result':
-              break;
+            // Handled by LIFECYCLE_EVENT_TYPES shared constant
 
-            default:
-              this.emit('text', line);
+            default: {
+              if (LIFECYCLE_EVENT_TYPES.has(parsed.type)) break;
+              // Try to extract content from unknown data-carrying events
+              const data = parsed.data as Record<string, unknown> | undefined;
+              const content = typeof parsed.content === 'string' ? parsed.content
+                : typeof data?.content === 'string' ? data.content : null;
+              if (content) {
+                this.emit('text', content);
+              } else {
+                process.stderr.write(`[SubprocessBackend] Unknown event: ${parsed.type}\n`);
+              }
+              break;
+            }
           }
         } else {
           // Non-JSON lines: filter internal CLI markers

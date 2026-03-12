@@ -154,10 +154,11 @@ export function ToolProgressLine({ tool, renderToolExpanded, className, style }:
           paddingTop: 2,
           paddingLeft: 8,
           cursor: hasDetails ? 'pointer' : 'default',
+          minWidth: 0,
         }}
       >
         <ProgressIcon tool={tool} />
-        <span style={{ color: '#8a8578', fontSize: 13, flex: 1 }}>
+        <span style={{ color: '#8a8578', fontSize: 13, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {isMcp && tool.isComplete ? (
             <>
               {tool.verb}{' '}

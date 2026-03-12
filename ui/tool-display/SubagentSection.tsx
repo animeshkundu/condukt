@@ -155,7 +155,7 @@ export function SubagentSection({
 
       {/* Content area */}
       {!collapsed && (
-        <div style={{ padding: '0 16px 12px' }}>
+        <div style={{ padding: '0 12px 12px' }}>
           {/* Description */}
           {section.description && (
             <div style={{
@@ -222,7 +222,7 @@ export function SubagentSection({
                       key={`tool-${item.tool.toolCallId}`}
                       tool={item.tool}
                       renderToolExpanded={renderToolExpanded}
-                      style={{ margin: '2px 0' }}
+                      style={{ margin: '2px 0 2px 8px' }}
                     />
                   );
                 }

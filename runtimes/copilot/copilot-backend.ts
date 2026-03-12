@@ -22,6 +22,12 @@ export interface SessionConfig {
   readonly timeout: number;
   /** Heartbeat timeout -- kill if no output for this many seconds */
   readonly heartbeatTimeout: number;
+  /** System message to append to the agent's context (SdkBackend only). */
+  readonly systemMessage?: string;
+  /** Tool allow-list: only these tools are available (SdkBackend only). */
+  readonly availableTools?: readonly string[];
+  /** Tool deny-list: these tools are excluded (SdkBackend only). */
+  readonly excludedTools?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------

@@ -98,7 +98,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
     formatStart: (_name, args) => {
       const id = String(args.shellId ?? args.id ?? '');
       const input = String(args.input ?? args.command ?? '');
-      return id ? `Write to shell ${id}${input ? ': ' + input.slice(0, 60) : ''}` : 'Write to shell';
+      return id ? `Write to shell ${id}${input ? ': ' + input : ''}` : 'Write to shell';
     },
     formatComplete: () => undefined,
   },
@@ -282,7 +282,7 @@ const BUILTIN_FORMATTERS: ToolFormatterRegistry = {
 
   // Memory / misc
   store_memory: { friendlyName: 'Store Memory', category: 'default', formatStart: (_n, args) => `Storing: ${String(args.key ?? args.description ?? '')}`, formatComplete: () => undefined },
-  sql: { friendlyName: 'SQL', category: 'mcp', formatStart: (_n, args) => `Execute SQL: ${String(args.query ?? '').slice(0, 80)}`, formatComplete: (_n, result, args): SimpleToolData => ({ input: String(args.query ?? ''), output: result }) },
+  sql: { friendlyName: 'SQL', category: 'mcp', formatStart: (_n, args) => `Execute SQL: ${String(args.query ?? '')}`, formatComplete: (_n, result, args): SimpleToolData => ({ input: String(args.query ?? ''), output: result }) },
   lsp: { friendlyName: 'Language Server', category: 'mcp', formatStart: (_n, args) => `LSP: ${args.method ?? args.action ?? ''}`, formatComplete: () => undefined },
 };
 

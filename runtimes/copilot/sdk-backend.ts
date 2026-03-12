@@ -15,6 +15,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
+import { LIFECYCLE_EVENT_TYPES } from './lifecycle-events';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,6 +53,11 @@ interface SdkSessionHandle {
   disconnect(): Promise<void>;
   on(event: string, handler: (e: SdkEvent) => void): void;
   on(handler: (e: SdkEvent) => void): void;
+  rpc: {
+    mode: {
+      set(opts: { mode: string }): Promise<void>;
+    };
+  };
 }
 
 interface SdkEvent {
@@ -80,35 +86,6 @@ interface SdkToolResult {
  */
 const GENERIC_PATH_TOOLS = ['cmd', 'pwsh', 'powershell', 'git', 'node', 'npm'];
 
-/** Known SDK event types handled by typed handlers or silently consumed. */
-const KNOWN_EVENT_TYPES = new Set([
-  'assistant.message', 'assistant.message_delta',
-  'assistant.reasoning', 'assistant.reasoning_delta',
-  'assistant.intent', 'assistant.usage',
-  'tool.execution_start', 'tool.execution_complete',
-  'tool.execution_partial_result',
-  'session.idle', 'session.error',
-  'subagent.started', 'subagent.completed', 'subagent.failed',
-  'permission.requested', 'permission.completed',
-  // Lifecycle events silently consumed (matching SubprocessBackend)
-  'session.start', 'session.resume', 'session.shutdown', 'session.task_complete',
-  'session.info', 'session.warning', 'session.title_changed',
-  'session.context_changed', 'session.usage_info', 'session.model_change',
-  'session.compaction_start', 'session.compaction_complete',
-  'session.mode_changed', 'session.plan_changed',
-  'session.truncation', 'session.snapshot_rewind',
-  'session.workspace_file_changed', 'session.handoff',
-  'user.message', 'pending_messages.modified', 'system.message',
-  'assistant.turn_start', 'assistant.turn_end', 'assistant.streaming_delta',
-  'abort', 'skill.invoked',
-  'subagent.selected', 'subagent.deselected',
-  'user_input.requested', 'user_input.completed',
-  'elicitation.requested', 'elicitation.completed',
-  'external_tool.requested', 'external_tool.completed',
-  'command.queued', 'command.completed',
-  'exit_plan_mode.requested', 'exit_plan_mode.completed',
-  'tool.user_requested', 'tool.execution_progress',
-]);
 
 /** Cache for resolved tool directories. */
 let _cachedToolDirs = new Map<string, string[]>();
@@ -363,12 +340,34 @@ class SdkSession implements CopilotSession {
       reasoningEffort: this.config.thinkingBudget,
     };
 
+    if (this.config.systemMessage) {
+      sessionConfig.systemMessage = {
+        type: 'append',
+        content: this.config.systemMessage,
+      };
+    }
+
+    if (this.config.availableTools) {
+      sessionConfig.availableTools = [...this.config.availableTools];
+    }
+
+    if (this.config.excludedTools) {
+      sessionConfig.excludedTools = [...this.config.excludedTools];
+    }
+
     if (mcpServers) {
       sessionConfig.mcpServers = mcpServers;
     }
 
     const sdkSession = await client.createSession(sessionConfig);
     this._sdkSession = sdkSession;
+
+    // Set autopilot mode explicitly (matches SubprocessBackend's --autopilot flag)
+    try {
+      await sdkSession.rpc.mode.set({ mode: 'autopilot' });
+    } catch {
+      // SDK may not support mode.set — continue without it
+    }
 
     // ---------------------------------------------------------------
     // Set up hard timeout
@@ -600,10 +599,23 @@ class SdkSession implements CopilotSession {
       this.emit('permission', e.data ?? {});
     });
 
-    // --- Catch-all for unhandled events ---
+    // Named event types handled by typed handlers above
+    const HANDLED_EVENT_TYPES = new Set([
+      'assistant.message', 'assistant.message_delta',
+      'assistant.reasoning', 'assistant.reasoning_delta',
+      'assistant.intent', 'assistant.usage',
+      'tool.execution_start', 'tool.execution_complete',
+      'tool.execution_partial_result',
+      'session.idle', 'session.error',
+      'subagent.started', 'subagent.completed', 'subagent.failed',
+      'permission.requested',
+    ]);
+
     sdkSession.on((e: SdkEvent) => {
       if (this.aborted) return;
-      if (e && typeof e.type === 'string' && !KNOWN_EVENT_TYPES.has(e.type)) {
+      if (e && typeof e.type === 'string'
+        && !HANDLED_EVENT_TYPES.has(e.type)
+        && !LIFECYCLE_EVENT_TYPES.has(e.type)) {
         process.stderr.write(`[SdkBackend] Unhandled event: ${e.type}\n`);
       }
     });

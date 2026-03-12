@@ -152,6 +152,12 @@ export interface SessionConfig {
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
   readonly heartbeatTimeout: number; // seconds
+  /** System message to append to the agent's context (SdkBackend only). */
+  readonly systemMessage?: string;
+  /** Tool allow-list: only these tools are available (SdkBackend only). */
+  readonly availableTools?: readonly string[];
+  /** Tool deny-list: these tools are excluded (SdkBackend only). */
+  readonly excludedTools?: readonly string[];
 }
 
 export interface AgentSession {
@@ -203,6 +209,12 @@ export interface AgentConfig {
   readonly promptBuilder: (input: NodeInput) => PromptOutput; // REQUIRED — no generic fallback
   readonly actionParser?: (artifactContent: string) => string;
   readonly completionIndicators?: readonly string[]; // GT-3 crash recovery
+  /** System message appended to the agent's context (SdkBackend only). */
+  readonly systemMessage?: string;
+  /** Tool allow-list (SdkBackend only). */
+  readonly availableTools?: readonly string[];
+  /** Tool deny-list (SdkBackend only). */
+  readonly excludedTools?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------

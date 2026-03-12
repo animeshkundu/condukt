@@ -87,7 +87,7 @@ export function ensureAnimations(): void {
 function ThinkingTextItemView({ content, renderMarkdown }: { content: string; renderMarkdown?: (content: string, key: string) => React.ReactNode }) {
   return (
     <div style={{
-      padding: '6px 12px 6px 24px',
+      padding: '6px 12px 6px 20px',
       position: 'relative',
       color: '#8a8578',
       fontSize: 12,
@@ -117,7 +117,7 @@ function PinnedToolItemView({ tool }: { tool: ToolInvocation }) {
 
   return (
     <div style={{
-      padding: '4px 12px 4px 24px',
+      padding: '4px 12px 4px 20px',
       position: 'relative',
       color: '#8a8578',
       fontSize: 12,
@@ -268,7 +268,7 @@ export function ThinkingSection({
 
       {/* Content area */}
       {!collapsed && items.length > 0 && (
-        <div style={{ border: '1px solid #3d3a36', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+        <div style={{ border: '1px solid #3d3a36', borderRadius: 8, marginTop: 4, overflow: 'hidden', minWidth: 0 }}>
           {items.map((item, idx) => {
             const isFirst = idx === 0;
             const isLast = idx === items.length - 1;

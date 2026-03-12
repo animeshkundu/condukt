@@ -177,6 +177,9 @@ export function agent(config: AgentConfig): NodeFn {
         addDirs: config.isolation ? [] : [input.dir],
         timeout: config.timeout ?? 3600,
         heartbeatTimeout: config.heartbeatTimeout ?? 120,
+        systemMessage: config.systemMessage,
+        availableTools: config.availableTools,
+        excludedTools: config.excludedTools,
       });
 
       // Abort check after session creation
