@@ -1,6 +1,6 @@
 {
   "name": "condukt",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Composable AI agent workflow framework — execution, state, orchestration, runtimes, UI",
   "license": "MIT",
   "repository": {
