@@ -19,6 +19,7 @@ export const LIFECYCLE_EVENT_TYPES = new Set([
 
   // Turn lifecycle
   'user.message', 'assistant.turn_start', 'assistant.turn_end',
+  'assistant.streaming_delta',  // ephemeral progress (totalResponseSizeBytes)
 
   // Messaging / system
   'pending_messages.modified', 'system.message', 'abort', 'result',
