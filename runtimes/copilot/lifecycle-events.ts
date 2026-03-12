@@ -8,7 +8,7 @@
 
 export const LIFECYCLE_EVENT_TYPES = new Set([
   // Session lifecycle
-  'session.start', 'session.resume', 'session.shutdown', 'session.task_complete',
+  'session.start', 'session.resume', 'session.shutdown',
   'session.info', 'session.warning', 'session.title_changed',
   'session.context_changed', 'session.usage_info', 'session.model_change',
   'session.compaction_start', 'session.compaction_complete',

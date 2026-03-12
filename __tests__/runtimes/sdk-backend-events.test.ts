@@ -232,6 +232,37 @@ describe('SdkBackend event mapping', () => {
     expect(toolStartHandler).not.toHaveBeenCalled();
   });
 
+  it('session.task_complete emits idle and cleans up', async () => {
+    const { session, mock } = await createTestSession();
+
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+
+    await new Promise(r => setTimeout(r, 50));
+
+    mock._emit('session.task_complete');
+
+    expect(idleHandler).toHaveBeenCalledOnce();
+  });
+
+  it('session.task_complete is safe when session.idle also fires', async () => {
+    const { session, mock } = await createTestSession();
+
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+
+    await new Promise(r => setTimeout(r, 50));
+
+    // Both events fire — _cleanup() no-ops on second call
+    mock._emit('session.task_complete');
+    mock._emit('session.idle');
+
+    // idle emitted at least once (double-fire is safe)
+    expect(idleHandler.mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('content ?? detailedContent ordering matches spec', async () => {
     const { session, mock } = await createTestSession();
 

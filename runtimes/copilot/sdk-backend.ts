@@ -538,6 +538,14 @@ class SdkSession implements CopilotSession {
       this._cleanup();
     });
 
+    // --- task_complete → idle (some models fire this instead of session.idle) ---
+    sdkSession.on('session.task_complete', () => {
+      if (this.aborted) return;
+      this.clearTimers();
+      this.emit('idle');
+      this._cleanup();
+    });
+
     // --- Session error ---
     sdkSession.on('session.error', (e: SdkEvent) => {
       if (this.aborted) return;
@@ -606,7 +614,7 @@ class SdkSession implements CopilotSession {
       'assistant.intent', 'assistant.usage',
       'tool.execution_start', 'tool.execution_complete',
       'tool.execution_partial_result',
-      'session.idle', 'session.error',
+      'session.idle', 'session.task_complete', 'session.error',
       'subagent.started', 'subagent.completed', 'subagent.failed',
       'permission.requested',
     ]);
