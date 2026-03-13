@@ -1,0 +1,105 @@
+name: Publish
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  check:
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.bump }}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            MSG=$(git log -1 --format='%s')
+            # Skip publish for non-functional changes
+            if echo "$MSG" | grep -qiE '^(chore|docs|ci|test|style)(\(.*\))?:'; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "type=none" >> "$GITHUB_OUTPUT"
+            elif echo "$MSG" | grep -qiE '^feat(\(.*\))?!:|BREAKING CHANGE'; then
+              echo "type=major" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            elif echo "$MSG" | grep -qiE '^feat(\(.*\))?:'; then
+              echo "type=minor" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "type=patch" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Bump version
+        if: steps.bump.outputs.skip == 'false'
+        run: npm version ${{ steps.bump.outputs.type }} --no-git-tag-version
+
+      - name: Build
+        if: steps.bump.outputs.skip == 'false'
+        run: npm run build
+
+      - name: Publish
+        if: steps.bump.outputs.skip == 'false'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Push version commit and tag
+        if: steps.bump.outputs.skip == 'false'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin master --follow-tags
