@@ -48,7 +48,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 ## Commands
 
 ```bash
-npm test              # Run all tests (596 across 48 suites)
+npm test              # Run all tests (659 across 50 suites)
 npm run typecheck     # tsc --noEmit
 npm run build         # Build to dist/
 npm run clean         # Remove dist/
@@ -60,11 +60,11 @@ npm run clean         # Remove dist/
 2. **Zero `any` types** — use generic types, branded types, or explicit `unknown`
 3. **Readonly by default** — all interface fields are `readonly`
 4. **Discriminated unions for events** — every event has a `type` field
-5. **Tests must pass** — 596 tests across 48 suites, all must pass before commit
+5. **Tests must pass** — 659 tests across 50 suites, all must pass before commit
 6. **Plain text default** — output renderer defaults to plain text, ANSI is opt-in (ADR-001)
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
-9. **Follow `DESIGN_LANGUAGE.md`** — all visual tokens, spacing, typography, and component patterns are codified there
+9. **Follow `docs/DESIGN_LANGUAGE.md`** — all visual tokens, spacing, typography, and component patterns are codified there
 
 ## Test Suites
 

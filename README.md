@@ -1,52 +1,25 @@
 # condukt
 
-Composable AI agent workflow framework for building, executing, and monitoring multi-step pipelines.
+Composable AI agent workflow framework. Define pipelines as directed graphs, execute them with fan-out parallelism and bounded loops, persist state through event sourcing, and visualize everything with a dark-themed React UI.
 
-[![npm version](https://img.shields.io/npm/v/condukt.svg)](https://www.npmjs.com/package/condukt)
-
-## Overview
-
-condukt provides the building blocks for orchestrating AI agent pipelines — a DAG scheduler, event-sourced state management, runtime adapters, and a complete dark-themed UI component library.
+[![npm](https://img.shields.io/npm/v/condukt.svg)](https://www.npmjs.com/package/condukt)
+[![tests](https://img.shields.io/badge/tests-659%20passing-brightgreen)](#testing)
+[![license](https://img.shields.io/npm/l/condukt.svg)](LICENSE)
 
 ```
 npm install condukt
 ```
 
-## Architecture
+## Why condukt
 
-```
-condukt
-├── Core Engine
-│   ├── DAG Scheduler (topological execution with parallel branches)
-│   ├── Node types: agent, deterministic, gate, verify
-│   └── Event-sourced state (reducer pattern)
-│
-├── State Management
-│   ├── StateRuntime (projection from events)
-│   ├── FileStorage (JSON persistence with crash recovery)
-│   └── MemoryStorage (testing)
-│
-├── Bridge API
-│   ├── launch, stop, resume
-│   ├── retry, skip, approve
-│   └── Real-time event streaming
-│
-├── Runtimes
-│   ├── CopilotAdapter (subprocess CLI integration)
-│   └── MockRuntime (testing & development)
-│
-└── UI Components (React 19 + Tailwind CSS)
-    ├── Graph: FlowGraph, NodeCard, FlowEdge
-    ├── Panel: NodePanel (Header, Info, Error, Gate, Controls, Output)
-    ├── Core: Badge, Button, Stat, Skeleton, Toast, ConfirmDialog,
-    │         SectionLabel, NodeListItem, PageHeader, ExecutionCard
-    ├── Visualization: MiniPipeline, FlowStatusBar
-    ├── Hooks: useFlowExecution, useNodeOutput, useAutoSelectNode,
-    │          useNodeNavigation
-    └── Theme: Tailwind preset with warm charcoal design tokens
-```
+- **Graph-based execution** — DAG scheduler with topological ordering, fan-out/fan-in, and bounded loop-back
+- **Four node types** — `agent` (LLM), `deterministic` (pure function), `gate` (human approval), `verify` (iterative validation)
+- **Event-sourced state** — every execution event is persisted; projections are recomputed from the log
+- **Runtime-agnostic** — plug in any LLM backend via the `AgentRuntime` interface
+- **Modular imports** — 12 sub-path exports; consumers install only what they use
+- **Full React UI** — interactive flow graph, node panels, tool display, status bar — all dark-themed with warm charcoal tokens
 
-## Quick Start
+## Quick start
 
 ### Define a pipeline
 
@@ -56,18 +29,15 @@ import type { FlowGraph } from 'condukt';
 
 const pipeline: FlowGraph = {
   nodes: [
-    agent('investigate', { model: 'claude-opus-4.6', prompt: 'Investigate the issue...' }),
-    agent('verify', { model: 'gpt-5.3-codex', prompt: 'Verify the findings...' }),
-    deterministic('quality-check', async (input) => {
-      // Run deterministic validation
-      return { verdict: 'CONFIRMED', confidence: 0.92 };
+    agent('research', { prompt: 'Research the topic...' }),
+    deterministic('transform', async (input) => {
+      return { summary: extract(input), confidence: 0.94 };
     }),
-    gate('approval', { allowedResolutions: ['approved', 'rejected'] }),
+    gate('review', { allowedResolutions: ['approved', 'rejected'] }),
   ],
   edges: [
-    { source: 'investigate', target: 'verify', action: 'default' },
-    { source: 'verify', target: 'quality-check', action: 'default' },
-    { source: 'quality-check', target: 'approval', action: 'default' },
+    { source: 'research', target: 'transform', action: 'default' },
+    { source: 'transform', target: 'review', action: 'default' },
   ],
 };
 ```
@@ -76,58 +46,118 @@ const pipeline: FlowGraph = {
 
 ```typescript
 import { run, validateGraph } from 'condukt';
-import { StateRuntime, FileStorage } from 'condukt/state';
+import { StateRuntime } from 'condukt/state';
+import { FileStorage } from 'condukt/state/server';
 import { createBridge } from 'condukt/bridge';
-import { adaptCopilotBackend } from 'condukt/runtimes/copilot';
 
-// Validate the graph
 validateGraph(pipeline);
 
-// Set up state
 const storage = new FileStorage('.flow-data');
-const runtime = new StateRuntime(storage);
+const state = new StateRuntime(storage);
+const bridge = createBridge(state, runtime);
 
-// Create bridge and launch
-const bridge = createBridge(runtime, adaptCopilotBackend(backend));
-const execution = await bridge.launch(pipeline, { scenario: 'my-investigation' });
+const execution = await bridge.launch(pipeline, { scenario: 'my-workflow' });
 ```
 
 ### Add the UI
 
 ```tsx
 import { FlowGraph } from 'condukt/ui/graph';
-import { NodePanel, Badge, Button } from 'condukt/ui/core';
-import { useFlowExecution, useNodeOutput } from 'condukt/ui/core';
+import { NodeDetailPanel } from 'condukt/ui/core';
+import { useFlowExecution } from 'condukt/ui';
+import 'condukt/ui/style.css';
 ```
 
-## Sub-path Exports
+## Architecture
 
-| Import | Contents |
-|--------|----------|
-| `condukt` | Core engine: `run`, `validateGraph`, node builders, types |
-| `condukt/state` | `StateRuntime`, `FileStorage`, `MemoryStorage`, reducer |
-| `condukt/bridge` | `createBridge`, `BridgeApi` |
-| `condukt/runtimes/copilot` | `CopilotAdapter`, `SubprocessBackend` |
-| `condukt/runtimes/mock` | `MockRuntime` for testing |
-| `condukt/ui` | All UI (requires `@xyflow/react`) |
-| `condukt/ui/core` | UI without xyflow dependency (safe for Next.js) |
-| `condukt/ui/graph` | FlowGraph, NodeCard, FlowEdge (requires `@xyflow/react`) |
-| `condukt/theme` | Tailwind preset with design tokens |
+```
+┌─────────────────────────────────────────────────────────┐
+│  Your code                                              │
+│  FlowGraph { nodes, edges }                             │
+│  agent() · deterministic() · gate() · verify()          │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  Execution         src/                                 │
+│  DAG scheduler · fan-out · fan-in · bounded loop-back   │
+│  Emits 16 event types as a stream                       │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  State             state/                               │
+│  Pure reducer · JSONL persistence · crash recovery      │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  Bridge            bridge/                              │
+│  launch · stop · resume · retry · skip · approve        │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  Runtimes          runtimes/                            │
+│  AgentRuntime interface → any LLM backend               │
+│  Built-in: CopilotBackend · SdkBackend · MockRuntime    │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  UI                ui/                                  │
+│  FlowGraph · MiniPipeline · NodePanel · FlowStatusBar   │
+│  ResponsePartRenderer · 50+ tool formatters             │
+│  Warm charcoal dark theme · React 19 + React Flow       │
+└─────────────────────────────────────────────────────────┘
+```
 
-## Design System
+## Imports
 
-The UI ships with a warm charcoal dark theme inspired by Claude.ai:
+condukt is split into sub-path exports so you only pull in what you need.
 
-- **Palette**: `#1a1815` base, `#201d18` raised, `#2b2a27` surface
-- **Accent**: `#D97757` (terracotta)
-- **Typography**: 5-tier scale (28/16/15/12/11px), Inter font stack
-- **Spacing**: Consistent 12px/24px padding grid
-- **Border radius**: 16px containers, 12px interactive elements
-- **Status colors**: Green (completed), blue (running), red (failed), amber (gated), purple (crashed)
+| Import | What you get |
+|--------|-------------|
+| `condukt` | Core engine — `run`, `validateGraph`, node factories, types, events |
+| `condukt/state` | `StateRuntime`, `MemoryStorage`, reducer |
+| `condukt/state/server` | `FileStorage` (JSONL persistence, Node.js only) |
+| `condukt/bridge` | `createBridge` → `BridgeApi` |
+| `condukt/runtimes/copilot` | `SubprocessBackend`, `SdkBackend`, `adaptCopilotBackend` |
+| `condukt/runtimes/mock` | `MockRuntime` for deterministic tests |
+| `condukt/ui` | Full UI — hooks, components, graph (requires `react`, `@xyflow/react`) |
+| `condukt/ui/core` | Design-system primitives — no xyflow dependency |
+| `condukt/ui/graph` | `FlowGraph`, `FlowEdge` (requires `@xyflow/react`) |
+| `condukt/ui/tool-display` | `ResponsePartRenderer`, `SubagentSection`, tool formatters |
+| `condukt/theme` | Tailwind preset, `STATUS_COLORS`, design tokens |
+| `condukt/utils` | Shared utilities |
 
-### Tailwind Preset
+## Node types
 
-```javascript
+| Factory | Purpose | Example |
+|---------|---------|---------|
+| `agent(id, config)` | LLM call with crash recovery, setup/teardown hooks | Research, analysis, code generation |
+| `deterministic(id, fn)` | Pure async function, no LLM | Parsing, validation, API calls |
+| `gate(id, options)` | Pauses execution until a human resolves it | Approval workflows, review checkpoints |
+| `verify(id, config)` | Iterative agent + property checks, retries until passing | Output validation, quality gates |
+
+## Graph features
+
+- **Fan-out** — one node fans out to multiple parallel branches
+- **Fan-in** — multiple branches converge into a single node (waits for all)
+- **Loop-back** — edges that point backward with `maxIterations` bounds and `loopFallback` strategy
+- **Per-node timeout** — individual deadline per node
+- **Abort / Resume** — stop mid-execution and pick up where you left off
+
+## UI components
+
+The UI layer is a complete React component library with a warm charcoal dark theme.
+
+**Graph visualization** — `FlowGraph` renders the full interactive DAG via React Flow. `MiniPipeline` provides a compact thumbnail in three modes: graph (≤20 nodes), bar (21–50), and summary (>50).
+
+**Node detail** — `NodeDetailPanel` is a zero-config convenience wrapper. For full control, use the compound `NodePanel.*` components: `Header`, `Info`, `ErrorBar`, `Gate`, `Controls`, `Output`.
+
+**Tool display** — `ResponsePartRenderer` handles tool calls, thinking blocks, text, and sub-agent grouping. Ships with 50+ built-in tool formatters and a `renderToolExpanded` callback for custom rendering.
+
+**Hooks** — `useFlowExecution` (SSE + REST), `useNodeOutput` (streaming per-node), `useAutoSelectNode`, `useNodeNavigation`.
+
+### Tailwind preset
+
+```js
 // tailwind.config.js
 const { flowFrameworkPreset } = require('condukt/theme');
 
@@ -137,21 +167,12 @@ module.exports = {
 };
 ```
 
-## Key Design Decisions
-
-| ADR | Decision |
-|-----|----------|
-| ADR-001 | Plain text default output, ANSI opt-in |
-| ADR-002 | Data-driven gate buttons (N resolutions from gateData) |
-| ADR-003 | Compound components for NodePanel |
-| ADR-004 | MiniPipeline: graph (<=20) / bar (21-50) / summary (>50) |
-| ADR-005 | Server-side GraphRegistry (FlowGraph not serializable) |
-
 ## Testing
 
 ```bash
-npm test        # 290 tests across 23 suites
-npm run build   # TypeScript CJS output to dist/
+npm test              # 659 tests across 50 suites
+npm run typecheck     # tsc --noEmit
+npm run build         # TypeScript → dist/
 ```
 
 ## License
