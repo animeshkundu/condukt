@@ -364,8 +364,8 @@ class SdkSession implements CopilotSession {
     // when the context window fills up (no error, no idle — just silence).
     sessionConfig.infiniteSessions = {
       enabled: true,
-      backgroundCompactionThreshold: 0.80,
-      bufferExhaustionThreshold: 0.95,
+      backgroundCompactionThreshold: 0.75,
+      bufferExhaustionThreshold: 0.90,
     };
 
     const sdkSession = await client.createSession(sessionConfig);
