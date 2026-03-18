@@ -368,7 +368,18 @@ class SdkSession implements CopilotSession {
       bufferExhaustionThreshold: 0.95,
     };
 
-    const sdkSession = await client.createSession(sessionConfig);
+    // Wrap session creation with a guard timeout (2 minutes).
+    // The per-session timeout is only configured AFTER createSession() returns,
+    // so a hang here has no safety net except the scheduler's node timeout (hours).
+    const SESSION_CREATION_TIMEOUT_MS = 120_000;
+    const sdkSession = await Promise.race([
+      client.createSession(sessionConfig),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(
+          `SDK session creation timed out after ${SESSION_CREATION_TIMEOUT_MS / 1000}s`
+        )), SESSION_CREATION_TIMEOUT_MS)
+      ),
+    ]);
     this._sdkSession = sdkSession;
 
     // Set autopilot mode explicitly (matches SubprocessBackend's --autopilot flag)

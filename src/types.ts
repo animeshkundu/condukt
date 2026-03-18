@@ -110,6 +110,7 @@ export interface NodeEntry {
 
 export interface RunOptions {
   readonly executionId: string;
+  readonly flowId?: string;
   readonly dir: string;
   readonly params: Readonly<Record<string, unknown>>;
   readonly runtime: AgentRuntime;

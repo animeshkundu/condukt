@@ -50,9 +50,9 @@ function updateNode(
   const nodes = state.graph.nodes.map((n) =>
     n.id === nodeId ? updater(n) : n,
   );
-  // Recalculate activeNodes: nodes with status 'running' or 'gated'
+  // Recalculate activeNodes: nodes with status 'running', 'gated', or 'retrying'
   const activeNodes = nodes
-    .filter((n) => n.status === 'running' || n.status === 'gated')
+    .filter((n) => n.status === 'running' || n.status === 'gated' || n.status === 'retrying')
     .map((n) => n.id);
   return {
     ...state,
@@ -120,12 +120,29 @@ export function reduce(
       };
     }
 
-    case 'run:completed':
-      return {
+    case 'run:completed': {
+      let updated: ExecutionProjection = {
         ...state,
         status: event.status,
         finishedAt: event.ts,
       };
+      // When execution crashes or stops, mark running nodes accordingly
+      if (event.status === 'crashed' || event.status === 'stopped') {
+        const nodes = updated.graph.nodes.map(n =>
+          n.status === 'running' || n.status === 'retrying'
+            ? { ...n, status: event.status, finishedAt: event.ts }
+            : n
+        );
+        const activeNodes = nodes
+          .filter(n => n.status === 'running' || n.status === 'gated' || n.status === 'retrying')
+          .map(n => n.id);
+        updated = {
+          ...updated,
+          graph: { ...updated.graph, nodes, activeNodes },
+        };
+      }
+      return updated;
+    }
 
     case 'run:resumed':
       return {

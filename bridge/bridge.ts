@@ -85,10 +85,17 @@ export function createBridge(
     const controller = new AbortController();
 
     // C4 fix: persist working directory in params for resume (SWE-6: use __flow namespace)
-    const paramsWithDir = { ...params.params, __flow: { dir } };
+    // Merge with existing __flow to preserve graphName and other metadata from the caller
+    const existingFlow = (params.params?.__flow && typeof params.params.__flow === 'object')
+      ? params.params.__flow as Record<string, unknown>
+      : {};
+    const paramsWithDir = { ...params.params, __flow: { ...existingFlow, dir } };
+
+    const flowId = typeof existingFlow.graphName === 'string' ? existingFlow.graphName : '';
 
     const runOptions: RunOptions = {
       executionId,
+      flowId,
       dir,
       params: paramsWithDir,
       runtime,
@@ -147,6 +154,11 @@ export function createBridge(
     executionId: string,
     graph: FlowGraph,
   ): Promise<{ resumingFrom: string[] } | null> {
+    // Prevent double-clicking Resume from creating two concurrent schedulers
+    if (runningExecutions.has(executionId)) {
+      throw new Error(`Execution '${executionId}' is still running. Stop it before resuming.`);
+    }
+
     const projection = stateRuntime.getProjection(executionId);
     if (!projection) return null;
 
@@ -162,14 +174,16 @@ export function createBridge(
     if (frontier.length === 0) return null;
 
     // C4 fix: use persisted working directory from params (SWE-6: __flow namespace)
-    const flowMeta = projection.params.__flow as { dir: string } | undefined;
-    const dir = flowMeta?.dir ?? '.';
+    const flowMeta = projection.params.__flow as Record<string, unknown> | undefined;
+    const dir = (typeof flowMeta?.dir === 'string' ? flowMeta.dir : '.') as string;
     fs.mkdirSync(dir, { recursive: true });
 
     const controller = new AbortController();
+    const flowId = typeof flowMeta?.graphName === 'string' ? flowMeta.graphName : '';
 
     const runOptions: RunOptions = {
       executionId,
+      flowId,
       dir,
       params: projection.params,
       runtime,
@@ -265,9 +279,13 @@ export function createBridge(
 
     const controller = new AbortController();
 
+    const retryFlowMeta = projection.params.__flow as Record<string, unknown> | undefined;
+    const retryFlowId = typeof retryFlowMeta?.graphName === 'string' ? retryFlowMeta.graphName : '';
+
     const runOptions: RunOptions = {
       executionId,
-      dir: (projection.params.__flow as { dir: string } | undefined)?.dir ?? '.',
+      flowId: retryFlowId,
+      dir: (typeof retryFlowMeta?.dir === 'string' ? retryFlowMeta.dir : '.') as string,
       params: projection.params,
       runtime,
       emitState: async (event) => {

@@ -80,6 +80,78 @@ describe('reducer', () => {
     });
   });
 
+  describe('run:completed', () => {
+    it('crashed — marks running nodes as crashed and removes from activeNodes', () => {
+      let state = withRunStarted();
+      // Start two nodes — A running, B still pending
+      state = reduce(state, { type: 'node:started', executionId: 'exec-1', nodeId: 'A', ts: 2000 });
+      expect(state.graph.activeNodes).toContain('A');
+
+      // Crash the execution
+      state = reduce(state, { type: 'run:completed', executionId: 'exec-1', status: 'crashed', ts: 3000 });
+      expect(state.status).toBe('crashed');
+
+      const nodeA = state.graph.nodes.find(n => n.id === 'A')!;
+      expect(nodeA.status).toBe('crashed');
+      expect(nodeA.finishedAt).toBe(3000);
+      expect(state.graph.activeNodes).not.toContain('A');
+
+      // Pending node B should remain pending
+      const nodeB = state.graph.nodes.find(n => n.id === 'B')!;
+      expect(nodeB.status).toBe('pending');
+    });
+
+    it('stopped — marks running nodes as stopped', () => {
+      let state = withRunStarted();
+      state = reduce(state, { type: 'node:started', executionId: 'exec-1', nodeId: 'A', ts: 2000 });
+      state = reduce(state, { type: 'node:started', executionId: 'exec-1', nodeId: 'B', ts: 2100 });
+      state = reduce(state, { type: 'run:completed', executionId: 'exec-1', status: 'stopped', ts: 3000 });
+
+      expect(state.graph.nodes.find(n => n.id === 'A')!.status).toBe('stopped');
+      expect(state.graph.nodes.find(n => n.id === 'B')!.status).toBe('stopped');
+      expect(state.graph.activeNodes).toEqual([]);
+    });
+
+    it('completed — does not touch node statuses', () => {
+      let state = withRunStarted();
+      state = reduce(state, { type: 'node:started', executionId: 'exec-1', nodeId: 'A', ts: 2000 });
+      state = reduce(state, { type: 'node:completed', executionId: 'exec-1', nodeId: 'A', action: 'default', elapsedMs: 500, ts: 2500 });
+      state = reduce(state, { type: 'run:completed', executionId: 'exec-1', status: 'completed', ts: 3000 });
+
+      expect(state.status).toBe('completed');
+      expect(state.graph.nodes.find(n => n.id === 'A')!.status).toBe('completed');
+    });
+
+    it('crashed — marks retrying nodes as crashed', () => {
+      let state = withRunStarted();
+      state = reduce(state, { type: 'node:failed', executionId: 'exec-1', nodeId: 'A', error: 'boom', ts: 2000 });
+      state = reduce(state, { type: 'node:retrying', executionId: 'exec-1', nodeId: 'A', attempt: 2, ts: 2500 });
+      expect(state.graph.nodes.find(n => n.id === 'A')!.status).toBe('retrying');
+      expect(state.graph.activeNodes).toContain('A');
+
+      state = reduce(state, { type: 'run:completed', executionId: 'exec-1', status: 'crashed', ts: 3000 });
+
+      expect(state.graph.nodes.find(n => n.id === 'A')!.status).toBe('crashed');
+      expect(state.graph.activeNodes).not.toContain('A');
+    });
+
+    it('crashed — preserves gated nodes in activeNodes', () => {
+      let state = withRunStarted();
+      state = reduce(state, { type: 'node:started', executionId: 'exec-1', nodeId: 'A', ts: 2000 });
+      state = reduce(state, { type: 'node:gated', executionId: 'exec-1', nodeId: 'C', gateType: 'quality', ts: 2100 });
+      expect(state.graph.activeNodes).toContain('A');
+      expect(state.graph.activeNodes).toContain('C');
+
+      state = reduce(state, { type: 'run:completed', executionId: 'exec-1', status: 'crashed', ts: 3000 });
+
+      // Running node A → crashed, gated node C stays gated
+      expect(state.graph.nodes.find(n => n.id === 'A')!.status).toBe('crashed');
+      expect(state.graph.nodes.find(n => n.id === 'C')!.status).toBe('gated');
+      expect(state.graph.activeNodes).not.toContain('A');
+      expect(state.graph.activeNodes).toContain('C');
+    });
+  });
+
   describe('node:started', () => {
     it('updates status to running and increments attempt', () => {
       const state = reduce(withRunStarted(), {
@@ -249,6 +321,18 @@ describe('reducer', () => {
       expect(nodeA.error).toBeUndefined();
       expect(nodeA.finishedAt).toBeUndefined();
       expect(nodeA.elapsedMs).toBeUndefined();
+    });
+
+    it('retrying node appears in activeNodes', () => {
+      let state = reduce(withRunStarted(), {
+        type: 'node:failed', executionId: 'exec-1', nodeId: 'A', error: 'boom', ts: 3000,
+      });
+      expect(state.graph.activeNodes).not.toContain('A');
+
+      state = reduce(state, {
+        type: 'node:retrying', executionId: 'exec-1', nodeId: 'A', attempt: 2, ts: 4000,
+      });
+      expect(state.graph.activeNodes).toContain('A');
     });
   });
 

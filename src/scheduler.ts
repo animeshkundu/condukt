@@ -361,7 +361,7 @@ export async function run(
     await emitState({
       type: 'run:started',
       executionId,
-      flowId: '',
+      flowId: options.flowId ?? '',
       params: { ...params },
       graph: skeleton,
       ts: Date.now(),
@@ -396,6 +396,9 @@ export async function run(
     }
     for (const [nodeId, status] of resumeFrom.nodeStatuses) {
       nodeStatuses.set(nodeId, status);
+    }
+    for (const [key, count] of resumeFrom.loopIterations) {
+      loopIterations.set(key, count);
     }
 
     // Compute frontier for resume
