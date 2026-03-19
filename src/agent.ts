@@ -336,6 +336,20 @@ export function agent(config: AgentConfig): NodeFn {
         });
       });
 
+      session.on('compaction', (phase: string, summary?: string) => {
+        const msg = phase === 'start'
+          ? '\n--- Context compaction started ---\n'
+          : `\n--- Context compaction complete${summary ? `: ${summary}` : ''} ---\n`;
+        outputLines.push(msg);
+        ctx.emitOutput({
+          type: 'node:output',
+          executionId: ctx.executionId,
+          nodeId: ctx.nodeId,
+          content: msg,
+          ts: Date.now(),
+        });
+      });
+
       // Step 6: Send prompt
       session.send(promptStr);
 

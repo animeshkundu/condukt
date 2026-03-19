@@ -57,6 +57,9 @@ interface SdkSessionHandle {
     mode: {
       set(opts: { mode: string }): Promise<void>;
     };
+    compaction: {
+      compact(): Promise<{ success: boolean; tokensRemoved?: number }>;
+    };
   };
 }
 
@@ -234,6 +237,8 @@ class SdkSession implements CopilotSession {
   private readonly pathTools: readonly string[];
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private compactionTimer: ReturnType<typeof setTimeout> | null = null;
+  private compactionInProgress = false;
   private aborted = false;
 
   /**
@@ -560,7 +565,58 @@ class SdkSession implements CopilotSession {
       if (this.aborted) return;
       this.clearTimers();
       const msg = typeof e.data?.message === 'string' ? e.data.message : 'Unknown session error';
+      try { process.stderr.write(`[SdkBackend] session.error: ${msg}\n`); } catch { /* */ }
       this.emitError(new Error(msg));
+    });
+
+    // --- Context compaction (infinite sessions) ---
+    // During compaction the model goes silent. SUSPEND the heartbeat entirely
+    // (not reset) to prevent killing the session. Hard timeout remains as safety net.
+    sdkSession.on('session.compaction_start', () => {
+      if (this.aborted) return;
+      this.compactionInProgress = true;
+      // SUSPEND heartbeat — compaction silence is expected
+      if (this.heartbeatTimer) {
+        clearTimeout(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+      }
+      this.emit('compaction', 'start');
+
+      // Recovery: if compaction doesn't complete within 3 min, escalate
+      this.compactionTimer = setTimeout(async () => {
+        if (!this.compactionInProgress || this.aborted || !this._sdkSession) return;
+        try {
+          process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n');
+          await this._sdkSession.rpc.compaction.compact();
+          // If force-compact works, compaction_complete will fire naturally
+        } catch {
+          process.stderr.write('[SdkBackend] Force compact failed — aborting + re-sending\n');
+          // Escalate: abort current message, then re-send to nudge model
+          // Uses RAW SDK abort (session stays alive), NOT this.abort() (which tears down)
+          try {
+            if (!this._sdkSession) return;
+            await this._sdkSession.abort();
+            await this._sdkSession.send({ prompt: 'Continue from where you left off.' });
+            this.resetHeartbeat();
+          } catch {
+            process.stderr.write('[SdkBackend] Recovery failed — hard timeout will handle\n');
+          }
+        }
+      }, 3 * 60 * 1000);
+    });
+
+    sdkSession.on('session.compaction_complete', (e: SdkEvent) => {
+      if (this.aborted) return;
+      this.compactionInProgress = false;
+      if (this.compactionTimer) { clearTimeout(this.compactionTimer); this.compactionTimer = null; }
+      // Restart heartbeat — model should resume producing output
+      this.resetHeartbeat();
+      const data = e.data as Record<string, unknown> | undefined;
+      const pre = data?.preCompactionTokens;
+      const post = data?.postCompactionTokens;
+      const removed = data?.tokensRemoved;
+      const summary = pre && post ? `${pre} → ${post} tokens (saved ${removed})` : '';
+      this.emit('compaction', 'complete', summary);
     });
 
     // --- Subagent lifecycle ---
@@ -624,6 +680,7 @@ class SdkSession implements CopilotSession {
       'tool.execution_start', 'tool.execution_complete',
       'tool.execution_partial_result',
       'session.idle', 'session.task_complete', 'session.error',
+      'session.compaction_start', 'session.compaction_complete',
       'subagent.started', 'subagent.completed', 'subagent.failed',
       'permission.requested',
     ]);
@@ -654,6 +711,7 @@ class SdkSession implements CopilotSession {
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'permission', handler: (data: PermissionInfo) => void): void;
+  on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
   on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler });
   }
@@ -707,6 +765,7 @@ class SdkSession implements CopilotSession {
   }
 
   private emitError(err: Error): void {
+    try { process.stderr.write(`[SdkBackend] ${err.message}\n`); } catch { /* closed stream */ }
     this.emit('error', err);
   }
 
@@ -729,5 +788,10 @@ class SdkSession implements CopilotSession {
       clearTimeout(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    if (this.compactionTimer) {
+      clearTimeout(this.compactionTimer);
+      this.compactionTimer = null;
+    }
+    this.compactionInProgress = false;
   }
 }

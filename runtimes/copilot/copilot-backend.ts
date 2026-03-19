@@ -111,6 +111,8 @@ export interface CopilotSession {
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   /** Permission request from the agent */
   on(event: 'permission', handler: (data: PermissionInfo) => void): void;
+  /** Context compaction started or completed (infinite sessions) */
+  on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
 
   /** Abort the session -- kill the agent process */
   abort(): Promise<void>;

@@ -11,7 +11,6 @@ export const LIFECYCLE_EVENT_TYPES = new Set([
   'session.start', 'session.resume', 'session.shutdown',
   'session.info', 'session.warning', 'session.title_changed',
   'session.context_changed', 'session.usage_info', 'session.model_change',
-  'session.compaction_start', 'session.compaction_complete',
   'session.mode_changed', 'session.plan_changed',
   'session.truncation', 'session.snapshot_rewind',
   'session.workspace_file_changed', 'session.handoff',
