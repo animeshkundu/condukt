@@ -48,8 +48,8 @@ interface SdkClient {
 }
 
 interface SdkSessionHandle {
-  send(msg: { prompt: string }): Promise<void>;
-  abort(): Promise<void>;
+  send(msg: { prompt: string }): Promise<string>;  // returns message ID
+  abort(): Promise<void>;  // resolves on acknowledgement; session stays valid for new messages
   disconnect(): Promise<void>;
   on(event: string, handler: (e: SdkEvent) => void): void;
   on(handler: (e: SdkEvent) => void): void;
@@ -58,7 +58,7 @@ interface SdkSessionHandle {
       set(opts: { mode: string }): Promise<void>;
     };
     compaction: {
-      compact(): Promise<{ success: boolean; tokensRemoved?: number }>;
+      compact(): Promise<{ success: boolean; tokensRemoved: number; messagesRemoved: number }>;
     };
   };
 }
@@ -580,26 +580,44 @@ class SdkSession implements CopilotSession {
         clearTimeout(this.heartbeatTimer);
         this.heartbeatTimer = null;
       }
+      // Clear any existing stuck timer (handles double compaction_start)
+      if (this.compactionTimer) {
+        clearTimeout(this.compactionTimer);
+        this.compactionTimer = null;
+      }
       this.emit('compaction', 'start');
 
-      // Recovery: if compaction doesn't complete within 3 min, escalate
+      // Recovery: if compaction doesn't complete within 3 min, escalate.
+      // Capture session to local to avoid TOCTOU null dereference after await.
+      const session = this._sdkSession;
       this.compactionTimer = setTimeout(async () => {
-        if (!this.compactionInProgress || this.aborted || !this._sdkSession) return;
+        if (!this.compactionInProgress || this.aborted || !session) return;
         try {
-          process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n');
-          await this._sdkSession.rpc.compaction.compact();
+          try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
+          await session.rpc.compaction.compact();
+          // Re-check guards after await — session may have been torn down
+          if (!this.compactionInProgress || this.aborted) return;
           // If force-compact works, compaction_complete will fire naturally
         } catch {
-          process.stderr.write('[SdkBackend] Force compact failed — aborting + re-sending\n');
-          // Escalate: abort current message, then re-send to nudge model
-          // Uses RAW SDK abort (session stays alive), NOT this.abort() (which tears down)
+          // Re-check guards after await
+          if (this.aborted) return;
+          try { process.stderr.write('[SdkBackend] Force compact failed — aborting + re-sending\n'); } catch { /* */ }
+          // Escalate: abort current message, then re-send to nudge model.
+          // Uses RAW SDK abort (session stays alive), NOT this.abort() (which tears down).
+          // SDK docs: "The session remains valid and can continue to be used for new messages."
+          // Wait for idle after abort before sending, to avoid racing with in-flight processing.
+          this.compactionInProgress = false;
           try {
-            if (!this._sdkSession) return;
-            await this._sdkSession.abort();
-            await this._sdkSession.send({ prompt: 'Continue from where you left off.' });
+            await session.abort();
+            // Wait briefly for the abort to settle before re-sending.
+            // The SDK resolves abort() on acknowledgement, not on idle.
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            if (this.aborted) return;
+            await session.send({ prompt: 'Continue from where you left off.' });
             this.resetHeartbeat();
           } catch {
-            process.stderr.write('[SdkBackend] Recovery failed — hard timeout will handle\n');
+            try { process.stderr.write('[SdkBackend] Recovery failed — restarting heartbeat as safety net\n'); } catch { /* */ }
+            this.resetHeartbeat(); // Detect if model is truly dead instead of waiting for hours-long hard timeout
           }
         }
       }, 3 * 60 * 1000);
@@ -612,10 +630,17 @@ class SdkSession implements CopilotSession {
       // Restart heartbeat — model should resume producing output
       this.resetHeartbeat();
       const data = e.data as Record<string, unknown> | undefined;
+      // Check if compaction actually succeeded
+      if (data?.success === false) {
+        const errMsg = typeof data.error === 'string' ? data.error : 'unknown reason';
+        try { process.stderr.write(`[SdkBackend] Compaction failed: ${errMsg}\n`); } catch { /* */ }
+      }
       const pre = data?.preCompactionTokens;
       const post = data?.postCompactionTokens;
       const removed = data?.tokensRemoved;
-      const summary = pre && post ? `${pre} → ${post} tokens (saved ${removed})` : '';
+      const summary = pre && post
+        ? `${pre} → ${post} tokens${removed != null ? ` (saved ${removed})` : ''}`
+        : '';
       this.emit('compaction', 'complete', summary);
     });
 

@@ -155,7 +155,7 @@ class MockAgentSession implements AgentSession {
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'permission', handler: (data: Record<string, unknown>) => void): void;
-  on(event: 'compaction', handler: (phase: string, summary?: string) => void): void;
+  on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
   on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as SessionEvent);
   }
