@@ -112,17 +112,33 @@ function createDefaultCommandFactory(options: SubprocessBackendOptions): Command
       }
     }
 
-    // Load MCP config: read the file and pass as inline JSON.
-    // Using inline JSON instead of @<path> avoids Windows path issues
-    // and ensures the CLI parses it correctly.
+    // Load MCP config: read the file, resolve relative paths to absolute
+    // (the CLI cwd is the investigation dir, not the project root), then
+    // pass as inline JSON to avoid Windows @<path> issues.
     if (options.mcpConfigPath && fs.existsSync(options.mcpConfigPath)) {
       try {
-        const mcpJson = fs.readFileSync(options.mcpConfigPath, 'utf-8');
-        // Validate it's parseable, then pass as inline JSON string
-        JSON.parse(mcpJson);
-        args.push('--additional-mcp-config', mcpJson);
+        const configDir = path.dirname(options.mcpConfigPath);
+        const raw = JSON.parse(fs.readFileSync(options.mcpConfigPath, 'utf-8'));
+        const servers = raw.mcpServers ?? raw;
+        // Resolve relative paths in server args to absolute paths.
+        // The CLI cwd is the investigation dir, so relative paths like
+        // "scripts/kusto-mcp-server.ts" won't resolve. Make them absolute
+        // relative to the project root (config dir's parent).
+        const projectRoot = path.dirname(configDir);
+        for (const server of Object.values(servers) as Array<Record<string, unknown>>) {
+          const serverArgs = server.args as string[] | undefined;
+          if (serverArgs) {
+            for (let i = 0; i < serverArgs.length; i++) {
+              const arg = serverArgs[i];
+              if (typeof arg === 'string' && !path.isAbsolute(arg) && arg.includes('/')) {
+                const abs = path.resolve(projectRoot, arg);
+                if (fs.existsSync(abs)) serverArgs[i] = abs;
+              }
+            }
+          }
+        }
+        args.push('--additional-mcp-config', JSON.stringify(raw));
       } catch {
-        // Fall back to @file reference
         args.push('--additional-mcp-config', `@${options.mcpConfigPath}`);
       }
     }
