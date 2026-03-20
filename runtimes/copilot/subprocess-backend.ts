@@ -53,6 +53,8 @@ export interface SubprocessBackendOptions {
   pathTools?: readonly string[];
   /** Path to MCP config file. If provided and exists, passed via --additional-mcp-config. */
   mcpConfigPath?: string;
+  /** Project root directory. Passed to CLI via --config-dir so it auto-discovers .copilot/mcp.json. */
+  configDir?: string;
 }
 
 /**
@@ -110,9 +112,24 @@ function createDefaultCommandFactory(options: SubprocessBackendOptions): Command
       }
     }
 
-    // Load MCP config if provided and exists
+    // Load MCP config: read the file and pass as inline JSON.
+    // Using inline JSON instead of @<path> avoids Windows path issues
+    // and ensures the CLI parses it correctly.
     if (options.mcpConfigPath && fs.existsSync(options.mcpConfigPath)) {
-      args.push('--additional-mcp-config', `@${options.mcpConfigPath}`);
+      try {
+        const mcpJson = fs.readFileSync(options.mcpConfigPath, 'utf-8');
+        // Validate it's parseable, then pass as inline JSON string
+        JSON.parse(mcpJson);
+        args.push('--additional-mcp-config', mcpJson);
+      } catch {
+        // Fall back to @file reference
+        args.push('--additional-mcp-config', `@${options.mcpConfigPath}`);
+      }
+    }
+
+    // --config-dir tells the CLI where to find .copilot/ for auto-discovery.
+    if (options.configDir && fs.existsSync(options.configDir)) {
+      args.push('--config-dir', options.configDir);
     }
 
     const copilotPath = resolveCopilotPath();

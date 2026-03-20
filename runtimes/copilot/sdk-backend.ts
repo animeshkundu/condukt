@@ -28,6 +28,8 @@ export interface SdkBackendOptions {
   extraPathDirs?: readonly string[];
   /** Additional tool names to resolve and add to PATH (e.g. ['az', 'dotnet']). */
   pathTools?: readonly string[];
+  /** Project root directory. Unused by SdkBackend (present for interface parity with SubprocessBackend). */
+  configDir?: string;
 }
 
 /** Shape of the dynamically imported @github/copilot-sdk module. */

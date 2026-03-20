@@ -46,4 +46,8 @@ export const LIFECYCLE_EVENT_TYPES = new Set([
 
   // Permission (completion is silent; request is handled separately)
   'permission.completed',
+
+  // MCP server lifecycle (CLI handles MCP internally)
+  'session.mcp_server_status_changed', 'session.mcp_servers_loaded',
+  'session.tools_updated',
 ]);
