@@ -71,15 +71,13 @@ function mockRunOptions(
 }
 
 function emittedTypes(opts: RunOptions): string[] {
-  return (opts.emitState as ReturnType<typeof vi.fn>).mock.calls.map(
-    (c: [ExecutionEvent]) => c[0].type,
-  );
+  const calls = (opts.emitState as ReturnType<typeof vi.fn>).mock.calls as unknown as Array<[ExecutionEvent]>;
+  return calls.map(([event]) => event.type);
 }
 
 function emittedEvents(opts: RunOptions): ExecutionEvent[] {
-  return (opts.emitState as ReturnType<typeof vi.fn>).mock.calls.map(
-    (c: [ExecutionEvent]) => c[0],
-  );
+  const calls = (opts.emitState as ReturnType<typeof vi.fn>).mock.calls as unknown as Array<[ExecutionEvent]>;
+  return calls.map(([event]) => event);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +161,7 @@ describe('scheduler', () => {
         if (event.type === 'run:completed' || event.type === 'edge:traversed') {
           // batch boundary detected implicitly
         }
-        return (originalEmitState as ReturnType<typeof vi.fn>)(event);
+        return originalEmitState(event);
       };
 
       const result = await run(graph, opts);
@@ -171,9 +169,8 @@ describe('scheduler', () => {
       expect(result.completed).toBe(true);
 
       // C should have executed (all 3 nodes ran)
-      const events = (originalEmitState as ReturnType<typeof vi.fn>).mock.calls.map(
-        (c: [ExecutionEvent]) => c[0],
-      );
+      const calls = (originalEmitState as ReturnType<typeof vi.fn>).mock.calls as unknown as Array<[ExecutionEvent]>;
+      const events = calls.map(([event]) => event);
       const completedNodes = events
         .filter((e: ExecutionEvent) => e.type === 'node:completed')
         .map((e: ExecutionEvent) => (e as { nodeId: string }).nodeId);
@@ -258,7 +255,7 @@ describe('scheduler', () => {
       (opts as { emitState: RunOptions['emitState'] }).emitState = async (
         event: ExecutionEvent,
       ) => {
-        await (originalEmit as ReturnType<typeof vi.fn>)(event);
+        await originalEmit(event);
         // Abort after we see A's edge traversed — B will be pending next batch
         if (event.type === 'edge:traversed') {
           ac.abort();
@@ -267,16 +264,15 @@ describe('scheduler', () => {
 
       await expect(run(graph, opts)).rejects.toThrow(FlowAbortedError);
 
-      const types = (originalEmit as ReturnType<typeof vi.fn>).mock.calls.map(
-        (c: [ExecutionEvent]) => c[0].type,
-      );
+      const originalCalls = (originalEmit as ReturnType<typeof vi.fn>).mock.calls as unknown as Array<[ExecutionEvent]>;
+      const types = originalCalls.map(([event]) => event.type);
       expect(types).toContain('node:killed');
       expect(types).toContain('run:completed');
 
       // Verify the run:completed has status 'stopped'
-      const runCompleted = (originalEmit as ReturnType<typeof vi.fn>).mock.calls
-        .map((c: [ExecutionEvent]) => c[0])
-        .find((e: ExecutionEvent) => e.type === 'run:completed');
+      const runCompleted = originalCalls
+        .map(([event]) => event)
+        .find((event) => event.type === 'run:completed');
       expect(runCompleted).toBeDefined();
       expect((runCompleted as { status: string }).status).toBe('stopped');
     });
@@ -328,9 +324,17 @@ describe('scheduler', () => {
       expect(types).toContain('run:resumed');
     });
 
-    it('node timeout', async () => {
-      const slowNode: NodeFn = async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+    it('node timeout aborts the execution context signal', async () => {
+      let observedSignal: AbortSignal | undefined;
+      let sawAbort = false;
+      const slowNode: NodeFn = async (_input, ctx) => {
+        observedSignal = ctx.signal;
+        await new Promise<void>((resolve) => {
+          ctx.signal.addEventListener('abort', () => {
+            sawAbort = true;
+            resolve();
+          }, { once: true });
+        });
         return { action: 'default' };
       };
 
@@ -349,11 +353,56 @@ describe('scheduler', () => {
       const result = await run(graph, opts);
 
       expect(result.completed).toBe(false);
+      expect(observedSignal).toBeDefined();
+      expect(observedSignal).not.toBe(opts.signal);
+      expect(sawAbort).toBe(true);
+      expect(observedSignal!.aborted).toBe(true);
 
       const events = emittedEvents(opts);
       const failEvent = events.find((e) => e.type === 'node:failed');
       expect(failEvent).toBeDefined();
       expect((failEvent as { error: string }).error).toContain('timed out');
+    });
+
+    it('flow abort propagates to an active node execution context signal', async () => {
+      const controller = new AbortController();
+      let nodeStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        nodeStarted = resolve;
+      });
+      let observedSignal: AbortSignal | undefined;
+      let sawAbort = false;
+
+      const blockingNode: NodeFn = async (_input, ctx) => {
+        observedSignal = ctx.signal;
+        nodeStarted();
+        await new Promise<void>((resolve) => {
+          ctx.signal.addEventListener('abort', () => {
+            sawAbort = true;
+            resolve();
+          }, { once: true });
+        });
+        return { action: 'default' };
+      };
+
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(blockingNode, { displayName: 'Blocking Node' }),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const opts = mockRunOptions({ signal: controller.signal });
+      const runPromise = run(graph, opts);
+
+      await started;
+      controller.abort();
+
+      await expect(runPromise).rejects.toThrow(FlowAbortedError);
+      expect(observedSignal).toBeDefined();
+      expect(observedSignal).not.toBe(controller.signal);
+      expect(sawAbort).toBe(true);
+      expect(observedSignal!.aborted).toBe(true);
     });
 
     it('unmatched action falls back to default edge', async () => {

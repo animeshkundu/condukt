@@ -440,14 +440,14 @@ class SubprocessSession implements CopilotSession {
     }
 
     // Process exit
-    this.child.on('close', (code) => {
+    this.child.on('close', (code, signal) => {
       this.clearTimers();
       if (this.aborted) return;
 
-      if (code === 0 || code === null) {
+      if (code === 0 && !signal) {
         this.emit('idle');
       } else {
-        this.emitError(new Error(`Process exited with code ${code}`));
+        this.emitError(new Error(`Process exited code=${code} signal=${signal}`));
       }
     });
 

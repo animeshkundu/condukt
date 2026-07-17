@@ -227,13 +227,14 @@ function extractSkeleton(graph: FlowGraph): {
 function rejectAfterTimeout(
   seconds: number,
   signal: AbortSignal,
+  onTimeout: () => void,
 ): { promise: Promise<never>; clear: () => void } {
   let timer: ReturnType<typeof setTimeout>;
   const promise = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`Node timed out after ${seconds}s`)),
-      seconds * 1000,
-    );
+    timer = setTimeout(() => {
+      reject(new Error(`Node timed out after ${seconds}s`));
+      onTimeout();
+    }, seconds * 1000);
     // Also clear timer on abort to prevent leaks
     signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
   });
@@ -485,13 +486,18 @@ export async function run(
           retryContext: retryContexts?.[nodeId] ?? loopRetryContexts.get(nodeId),
         };
 
+        // Give each dispatch its own cancellation scope. The node stops when either
+        // the flow is stopped or this dispatch reaches its timeout.
+        const nodeController = new AbortController();
+        const nodeSignal = AbortSignal.any([signal, nodeController.signal]);
+
         // Build ExecutionContext
         const execCtx: ExecutionContext = {
           executionId,
           nodeId,
           runtime,
           emitOutput,
-          signal,
+          signal: nodeSignal,
         };
 
         const nodeStart = Date.now();
@@ -499,7 +505,9 @@ export async function run(
 
         // Dispatch with timeout (CR3: applies to ALL node types)
         // C3 fix: clear timer when node completes to prevent leaks
-        const timeout = rejectAfterTimeout(timeoutSecs, signal);
+        const timeout = rejectAfterTimeout(timeoutSecs, nodeSignal, () => {
+          nodeController.abort(new Error(`Node timed out after ${timeoutSecs}s`));
+        });
         try {
           const output: NodeOutput = await Promise.race([
             entry.fn(nodeInput, execCtx),

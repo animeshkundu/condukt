@@ -14,6 +14,8 @@ export interface SessionConfig {
   readonly model: string;
   /** Thinking budget level for extended thinking models */
   readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh';
+  /** Context-window tier to request from the Copilot SDK. */
+  readonly contextTier?: 'default' | 'long_context';
   /** Working directory for the agent (repo root) */
   readonly cwd: string;
   /** Additional directories the agent can access. [] = isolation (step 2a) */

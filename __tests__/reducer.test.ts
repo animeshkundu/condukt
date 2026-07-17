@@ -225,6 +225,32 @@ describe('reducer', () => {
       expect(nodeC.finishedAt).toBe(6000);
       expect(state.graph.completedPath).not.toContain('C');
     });
+
+    it.each(['failed', 'skipped'] as const)(
+      'does not overwrite an already-%s gate',
+      (terminalStatus) => {
+        let state = reduce(withRunStarted(), {
+          type: terminalStatus === 'failed' ? 'node:failed' : 'node:skipped',
+          executionId: 'exec-1',
+          nodeId: 'C',
+          ...(terminalStatus === 'failed' ? { error: 'timed out' } : {}),
+          ts: 5500,
+        } as ExecutionEvent);
+
+        const terminalState = state;
+        state = reduce(state, {
+          type: 'gate:resolved',
+          executionId: 'exec-1',
+          nodeId: 'C',
+          resolution: 'approved',
+          ts: 6000,
+        });
+
+        expect(state).toBe(terminalState);
+        expect(state.graph.nodes.find((n) => n.id === 'C')!.status).toBe(terminalStatus);
+        expect(state.graph.completedPath).not.toContain('C');
+      },
+    );
   });
 
   describe('node:retrying', () => {

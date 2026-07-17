@@ -13,6 +13,7 @@ describe('MockRuntime reasoning', () => {
     const session = await runtime.createSession({
       model: 'mock',
       cwd: '/tmp/testNode',
+      addDirs: [],
       timeout: 10,
       heartbeatTimeout: 10,
     });
@@ -26,7 +27,7 @@ describe('MockRuntime reasoning', () => {
     session.send('test prompt');
 
     // Wait for microtask
-    await new Promise(resolve => queueMicrotask(resolve));
+    await new Promise<void>(resolve => queueMicrotask(() => resolve()));
 
     expect(events).toEqual([
       { event: 'reasoning', data: 'thinking step 1' },
@@ -46,6 +47,7 @@ describe('MockRuntime reasoning', () => {
     const session = await runtime.createSession({
       model: 'mock',
       cwd: '/tmp/testNode',
+      addDirs: [],
       timeout: 10,
       heartbeatTimeout: 10,
     });
@@ -57,7 +59,7 @@ describe('MockRuntime reasoning', () => {
     session.on('idle', () => events.push({ event: 'idle', data: '' }));
 
     session.send('test');
-    await new Promise(resolve => queueMicrotask(resolve));
+    await new Promise<void>(resolve => queueMicrotask(() => resolve()));
 
     expect(events).toEqual([
       { event: 'reasoning', data: 'just thinking' },
@@ -75,6 +77,7 @@ describe('MockRuntime reasoning', () => {
     const session = await runtime.createSession({
       model: 'mock',
       cwd: '/tmp/testNode',
+      addDirs: [],
       timeout: 10,
       heartbeatTimeout: 10,
     });
@@ -86,7 +89,7 @@ describe('MockRuntime reasoning', () => {
     session.on('idle', () => events.push({ event: 'idle', data: '' }));
 
     session.send('test');
-    await new Promise(resolve => queueMicrotask(resolve));
+    await new Promise<void>(resolve => queueMicrotask(() => resolve()));
 
     expect(events).toEqual([
       { event: 'text', data: 'hello' },

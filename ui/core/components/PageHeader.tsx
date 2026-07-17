@@ -19,6 +19,14 @@ export function PageHeader({ title, badge, backHref, backLabel = 'Back', actions
             aria-label={backLabel}
             className="flex items-center justify-center rounded-md hover:bg-[#343230] transition-colors"
             style={{ minWidth: 44, minHeight: 44 }}
+            onClick={(e) => {
+              // Use browser history back to preserve URL query params (filters, grouping).
+              // Falls through to href if there's no history (e.g. direct link).
+              if (window.history.length > 1) {
+                e.preventDefault();
+                window.history.back();
+              }
+            }}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M10 12L6 8L10 4" />

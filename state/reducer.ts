@@ -196,6 +196,11 @@ export function reduce(
       }));
 
     case 'gate:resolved': {
+      // A late external resolution must not resurrect a gate that already timed
+      // out or was explicitly skipped.
+      const existing = state.graph.nodes.find(n => n.id === event.nodeId);
+      if (existing?.status === 'failed' || existing?.status === 'skipped') return state;
+
       const resolvedStatus =
         event.resolution === 'rejected' ? 'skipped' : 'completed';
       const updated = updateNode(state, event.nodeId, (n) => ({

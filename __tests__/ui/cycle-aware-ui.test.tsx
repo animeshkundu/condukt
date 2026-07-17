@@ -234,7 +234,8 @@ describe('Iteration badge', () => {
     // Verify the max iteration logic used by FlowStatusBar
     let maxIter = 0;
     for (const n of proj.graph.nodes) {
-      if (n.iteration > maxIter) maxIter = n.iteration;
+      const iteration = n.iteration ?? 0;
+      if (iteration > maxIter) maxIter = iteration;
     }
     expect(maxIter).toBe(2);
   });

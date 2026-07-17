@@ -15,7 +15,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
-import { LIFECYCLE_EVENT_TYPES } from './lifecycle-events';
+import { classifySdkEvent } from './lifecycle-events';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,7 +28,7 @@ export interface SdkBackendOptions {
   extraPathDirs?: readonly string[];
   /** Additional tool names to resolve and add to PATH (e.g. ['az', 'dotnet']). */
   pathTools?: readonly string[];
-  /** Project root directory. Unused by SdkBackend (present for interface parity with SubprocessBackend). */
+  /** Project root directory used by the CLI to discover .copilot configuration. */
   configDir?: string;
 }
 
@@ -62,6 +62,13 @@ interface SdkSessionHandle {
     compaction: {
       compact(): Promise<{ success: boolean; tokensRemoved: number; messagesRemoved: number }>;
     };
+    mcp: {
+      cancelSamplingExecution(opts: { requestId: string }): Promise<unknown>;
+    };
+    ui: {
+      handlePendingAutoModeSwitch(opts: { requestId: string; response: 'yes' | 'yes_always' | 'no' }): Promise<unknown>;
+      handlePendingSessionLimitsExhausted(opts: { requestId: string; response: { action: 'cancel' } }): Promise<unknown>;
+    };
   };
 }
 
@@ -80,6 +87,19 @@ interface SdkToolResult {
   detailedContent?: string;
   contents?: ReadonlyArray<Record<string, unknown>>;
 }
+
+const NAMED_SDK_EVENTS = new Set([
+  'assistant.message', 'assistant.message_delta',
+  'assistant.reasoning', 'assistant.reasoning_delta',
+  'assistant.intent', 'assistant.usage',
+  'tool.execution_start', 'tool.execution_complete',
+  'tool.execution_partial_result',
+  'session.idle', 'session.task_complete', 'session.error',
+  'model.call_failure', 'abort',
+  'session.compaction_start', 'session.compaction_complete',
+  'subagent.started', 'subagent.completed', 'subagent.failed',
+  'permission.requested',
+]);
 
 // ---------------------------------------------------------------------------
 // PATH hardening: shared logic with SubprocessBackend
@@ -189,11 +209,13 @@ interface SdkEventHandler {
 export class SdkBackend implements CopilotBackend {
   readonly name = 'sdk';
   private readonly mcpConfigPath: string | undefined;
+  private readonly configDir: string | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
 
   constructor(options: SdkBackendOptions = {}) {
     this.mcpConfigPath = options.mcpConfigPath;
+    this.configDir = options.configDir;
     this.extraPathDirs = options.extraPathDirs ?? [];
     this.pathTools = options.pathTools ?? [];
   }
@@ -211,7 +233,7 @@ export class SdkBackend implements CopilotBackend {
   }
 
   async createSession(config: SessionConfig): Promise<CopilotSession> {
-    return new SdkSession(config, this.mcpConfigPath, this.extraPathDirs, this.pathTools);
+    return new SdkSession(config, this.mcpConfigPath, this.configDir, this.extraPathDirs, this.pathTools);
   }
 }
 
@@ -235,13 +257,19 @@ class SdkSession implements CopilotSession {
   private handlers: SdkEventHandler[] = [];
   private readonly config: SessionConfig;
   private readonly mcpConfigPath: string | undefined;
+  private readonly configDir: string | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private compactionTimer: ReturnType<typeof setTimeout> | null = null;
+  private abortGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private compactionInProgress = false;
+  private turnSettled = false;
+  private compactionRecoveryInProgress = false;
   private aborted = false;
+  private _turnText = new Map<string, string>();
+  private intentionalAborts = new WeakSet<SdkSessionHandle>();
 
   /**
    * Maps toolCallId -> toolName for attributing tool_complete events.
@@ -270,11 +298,13 @@ class SdkSession implements CopilotSession {
   constructor(
     config: SessionConfig,
     mcpConfigPath: string | undefined,
+    configDir: string | undefined,
     extraPathDirs: readonly string[],
     pathTools: readonly string[],
   ) {
     this.config = config;
     this.mcpConfigPath = mcpConfigPath;
+    this.configDir = configDir;
     this.extraPathDirs = extraPathDirs;
     this.pathTools = pathTools;
   }
@@ -284,10 +314,21 @@ class SdkSession implements CopilotSession {
    * Matches SubprocessBackend.send() contract: fire-and-forget, events stream via on().
    */
   send(prompt: string): void {
+    if (this.aborted) {
+      this.emitError(new Error('Session is aborted'));
+      return;
+    }
+    // Detach the preceding SDK handle synchronously before resetting shared turn
+    // state. Any late events from it then fail the per-handler isActive() guard.
+    this.clearTimers();
+    void this._cleanup();
+    this._turnText.clear();
+    this._toolCallNames.clear();
+    this._callIdToParent.clear();
+    this._pendingPartials.clear();
+    this.turnSettled = false;
     this._run(prompt).catch((err: unknown) => {
-      if (!this.aborted) {
-        this.emitError(err instanceof Error ? err : new Error(String(err)));
-      }
+      this.fail(err instanceof Error ? err : new Error(String(err)), 'session.run');
     });
   }
 
@@ -326,11 +367,10 @@ class SdkSession implements CopilotSession {
 
     // ---------------------------------------------------------------
     // Create CopilotClient (process-per-session: new client each time)
-    // autoRestart: false — if CLI dies, emit error immediately
     // ---------------------------------------------------------------
     const client = new CopilotClient({
       useStdio: true,
-      autoRestart: false,
+      autoRestart: false, // deprecated in SDK 0.2.0 (no-op), kept for defensive clarity
       env,
       logLevel: 'warning',
     });
@@ -345,11 +385,27 @@ class SdkSession implements CopilotSession {
       onPermissionRequest: approveAll,
       workingDirectory: this.config.cwd,
       reasoningEffort: this.config.thinkingBudget,
+      // Registered before createSession issues its RPC, closing the early-event
+      // gap for session.start and *_loaded events. Named payload handlers are
+      // wired after the handle exists; this hook handles class-wide liveness and
+      // future failure-shaped events without duplicating named event output.
+      onEvent: (e: SdkEvent) => this.handleEarlyEvent(e),
     };
+
+    if (this.config.contextTier) {
+      sessionConfig.contextTier = this.config.contextTier;
+    }
+
+    // CLI 1.0.11+ discovers MCP servers, skills, and custom instructions from
+    // configDir. Without this, the CLI searches workingDirectory (which is often
+    // a temp execution dir) and fails to find the project's .copilot/ config.
+    if (this.configDir) {
+      sessionConfig.configDir = this.configDir;
+    }
 
     if (this.config.systemMessage) {
       sessionConfig.systemMessage = {
-        type: 'append',
+        mode: 'append',
         content: this.config.systemMessage,
       };
     }
@@ -376,6 +432,10 @@ class SdkSession implements CopilotSession {
     };
 
     const sdkSession = await client.createSession(sessionConfig);
+    if (this.aborted) {
+      try { await sdkSession.disconnect(); } catch { /* Ignore inert early-abort handle */ }
+      return;
+    }
     this._sdkSession = sdkSession;
 
     // Set autopilot mode explicitly (matches SubprocessBackend's --autopilot flag)
@@ -386,20 +446,19 @@ class SdkSession implements CopilotSession {
     }
 
     // ---------------------------------------------------------------
-    // Set up hard timeout
-    // ---------------------------------------------------------------
-    this.timeoutTimer = setTimeout(() => {
-      this.emitError(new Error(`Session timed out after ${this.config.timeout}s`));
-      this.abort();
-    }, this.config.timeout * 1000);
-
-    // Set up heartbeat timeout
-    this.resetHeartbeat();
-
-    // ---------------------------------------------------------------
     // Wire SDK events -> CopilotSession events
     // ---------------------------------------------------------------
     this._wireEvents(sdkSession);
+
+    // ---------------------------------------------------------------
+    // Set up turn timers only while this handle is still active
+    // ---------------------------------------------------------------
+    if (this.aborted || this._sdkSession !== sdkSession) return;
+    this.timeoutTimer = setTimeout(() => {
+      if (this.aborted || this._sdkSession !== sdkSession) return;
+      this.fail(new Error(`Session timed out after ${this.config.timeout}s`), 'timeout');
+    }, this.config.timeout * 1000);
+    this.resetHeartbeat();
 
     // ---------------------------------------------------------------
     // Send the prompt (fire-and-forget; events stream via handlers)
@@ -411,15 +470,25 @@ class SdkSession implements CopilotSession {
    * Wire all SDK session events to CopilotSession event emissions.
    */
   private _wireEvents(sdkSession: SdkSessionHandle): void {
+    const isActive = (): boolean => this._sdkSession === sdkSession && !this.aborted;
+
     // --- Assistant text response ---
     sdkSession.on('assistant.message', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
 
       const data = e.data;
       const content = typeof data?.content === 'string' ? data.content : '';
       const parentToolCallId = typeof data?.parentToolCallId === 'string' ? data.parentToolCallId : undefined;
-      if (content) this.emit('text', content, parentToolCallId);
+      const streamKey = parentToolCallId ?? '__root__';
+      if (content) {
+        const streamed = this._turnText.get(streamKey) ?? '';
+        const remainder = content === streamed
+          ? ''
+          : content.startsWith(streamed) ? content.slice(streamed.length) : content;
+        if (remainder) this.emit('text', remainder, parentToolCallId);
+      }
+      this._turnText.delete(streamKey);
 
       // Pre-seed _toolCallNames from tool requests so tool.execution_complete
       // can resolve names even if tool.execution_start lacks a toolCallId.
@@ -433,24 +502,28 @@ class SdkSession implements CopilotSession {
 
     // --- Assistant text delta (streaming) ---
     sdkSession.on('assistant.message_delta', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
       const delta = typeof data?.deltaContent === 'string' ? data.deltaContent : '';
       const parentToolCallId = typeof data?.parentToolCallId === 'string' ? data.parentToolCallId : undefined;
-      if (delta) this.emit('text', delta, parentToolCallId);
+      if (delta) {
+        const streamKey = parentToolCallId ?? '__root__';
+        this._turnText.set(streamKey, (this._turnText.get(streamKey) ?? '') + delta);
+        this.emit('text', delta, parentToolCallId);
+      }
     });
 
     // --- Reasoning ---
     sdkSession.on('assistant.reasoning', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const content = typeof e.data?.content === 'string' ? e.data.content : '';
       if (content) this.emit('reasoning', content);
     });
 
     sdkSession.on('assistant.reasoning_delta', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const delta = typeof e.data?.deltaContent === 'string' ? e.data.deltaContent : '';
       if (delta) this.emit('reasoning', delta);
@@ -458,7 +531,7 @@ class SdkSession implements CopilotSession {
 
     // --- Tool execution start ---
     sdkSession.on('tool.execution_start', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
 
       const data = e.data;
@@ -488,7 +561,7 @@ class SdkSession implements CopilotSession {
 
     // --- Tool execution complete ---
     sdkSession.on('tool.execution_complete', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
 
       const data = e.data;
@@ -524,7 +597,7 @@ class SdkSession implements CopilotSession {
     // the SDK. We look it up from the _callIdToParent map populated by
     // tool.execution_start.
     sdkSession.on('tool.execution_partial_result', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
 
       const data = e.data;
@@ -548,34 +621,65 @@ class SdkSession implements CopilotSession {
 
     // --- Session idle (agent finished all work) ---
     sdkSession.on('session.idle', () => {
-      if (this.aborted) return;
-      this.clearTimers();
-      this.emit('idle');
-      this._cleanup();
+      if (!isActive() || this.compactionRecoveryInProgress) return;
+      this.settleIdle();
     });
 
     // --- task_complete → idle (some models fire this instead of session.idle) ---
     sdkSession.on('session.task_complete', () => {
-      if (this.aborted) return;
-      this.clearTimers();
-      this.emit('idle');
-      this._cleanup();
+      if (!isActive() || this.compactionRecoveryInProgress) return;
+      this.settleIdle();
     });
 
-    // --- Session error ---
+    // The CLI normally follows an abort event with session.idle. If that
+    // terminal event is lost, fail quickly rather than waiting for heartbeat.
+    sdkSession.on('abort', (e: SdkEvent) => {
+      if (!isActive() || this.compactionRecoveryInProgress) return;
+      if (this.intentionalAborts.delete(sdkSession)) return;
+      if (this.abortGraceTimer) clearTimeout(this.abortGraceTimer);
+      this.abortGraceTimer = setTimeout(() => {
+        this.abortGraceTimer = null;
+        if (!isActive()) return;
+        const reason = typeof e.data?.reason === 'string' ? `: ${e.data.reason}` : '';
+        this.fail(new Error(`SDK turn aborted${reason}`), 'abort', e.data);
+      }, 1000);
+    });
+
+    // --- Session/model errors ---
     sdkSession.on('session.error', (e: SdkEvent) => {
-      if (this.aborted) return;
-      this.clearTimers();
+      if (!isActive()) return;
+      // A rate-limit error eligible for automatic model switching is followed by
+      // auto_mode_switch.requested. Let the headless policy resolve that request
+      // instead of tearing down the session before it can recover.
+      if (e.data?.eligibleForAutoSwitch === true) {
+        this.resetHeartbeat();
+        return;
+      }
       const msg = typeof e.data?.message === 'string' ? e.data.message : 'Unknown session error';
-      try { process.stderr.write(`[SdkBackend] session.error: ${msg}\n`); } catch { /* */ }
-      this.emitError(new Error(msg));
+      this.fail(new Error(msg), 'session.error', e.data);
+    });
+
+    // model.call_failure is telemetry for a failed LLM request, but the SDK has
+    // no API to resume/retry that in-flight turn. A second send() would append a
+    // duplicate user message rather than replaying the failed call, so fail the
+    // condukt session immediately instead of waiting for its heartbeat timeout.
+    sdkSession.on('model.call_failure', (e: SdkEvent) => {
+      if (!isActive()) return;
+      const data = e.data;
+      const detail = typeof data?.errorMessage === 'string'
+        ? data.errorMessage
+        : typeof data?.errorCode === 'string'
+          ? data.errorCode
+          : 'Unknown model call failure';
+      const status = typeof data?.statusCode === 'number' ? ` (HTTP ${data.statusCode})` : '';
+      this.fail(new Error(`Model call failed${status}: ${detail}`), 'model.call_failure', data);
     });
 
     // --- Context compaction (infinite sessions) ---
     // During compaction the model goes silent. SUSPEND the heartbeat entirely
     // (not reset) to prevent killing the session. Hard timeout remains as safety net.
     sdkSession.on('session.compaction_start', () => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.compactionInProgress = true;
       // SUSPEND heartbeat — compaction silence is expected
       if (this.heartbeatTimer) {
@@ -592,32 +696,46 @@ class SdkSession implements CopilotSession {
       // Recovery: if compaction doesn't complete within 3 min, escalate.
       // Capture session to local to avoid TOCTOU null dereference after await.
       const session = this._sdkSession;
+      if (!session || !isActive()) return;
       this.compactionTimer = setTimeout(async () => {
-        if (!this.compactionInProgress || this.aborted || !session) return;
+        if (!this.compactionInProgress || !isActive() || !session) return;
         try {
           try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
           await session.rpc.compaction.compact();
           // Re-check guards after await — session may have been torn down
-          if (!this.compactionInProgress || this.aborted) return;
+          if (!this.compactionInProgress || !isActive()) return;
           // If force-compact works, compaction_complete will fire naturally
         } catch {
           // Re-check guards after await
-          if (this.aborted) return;
+          if (!isActive()) return;
           try { process.stderr.write('[SdkBackend] Force compact failed — aborting + re-sending\n'); } catch { /* */ }
           // Escalate: abort current message, then re-send to nudge model.
           // Uses RAW SDK abort (session stays alive), NOT this.abort() (which tears down).
           // SDK docs: "The session remains valid and can continue to be used for new messages."
           // Wait for idle after abort before sending, to avoid racing with in-flight processing.
           this.compactionInProgress = false;
+          this.compactionRecoveryInProgress = true;
+          this._turnText.clear();
           try {
+            this.intentionalAborts.add(session);
             await session.abort();
+            // Some SDK versions emit abort synchronously, others just after the
+            // request resolves. Keep the marker through the settling window.
+            if (this.abortGraceTimer) {
+              clearTimeout(this.abortGraceTimer);
+              this.abortGraceTimer = null;
+            }
+            // WeakSet entries are removed when the delayed intentional abort event
+            // arrives. The handle itself becomes collectible after session cleanup.
             // Wait briefly for the abort to settle before re-sending.
             // The SDK resolves abort() on acknowledgement, not on idle.
             await new Promise(resolve => setTimeout(resolve, 2000));
-            if (this.aborted) return;
+            if (!isActive()) return;
             await session.send({ prompt: 'Continue from where you left off.' });
+            this.compactionRecoveryInProgress = false;
             this.resetHeartbeat();
           } catch {
+            this.compactionRecoveryInProgress = false;
             try { process.stderr.write('[SdkBackend] Recovery failed — restarting heartbeat as safety net\n'); } catch { /* */ }
             this.resetHeartbeat(); // Detect if model is truly dead instead of waiting for hours-long hard timeout
           }
@@ -626,7 +744,7 @@ class SdkSession implements CopilotSession {
     });
 
     sdkSession.on('session.compaction_complete', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.compactionInProgress = false;
       if (this.compactionTimer) { clearTimeout(this.compactionTimer); this.compactionTimer = null; }
       // Restart heartbeat — model should resume producing output
@@ -651,7 +769,7 @@ class SdkSession implements CopilotSession {
     // The synthetic tool_start/tool_complete dual-emit is removed — sub-agent
     // grouping is handled by SubagentSectionPart in the UI layer.
     sdkSession.on('subagent.started', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
@@ -660,7 +778,7 @@ class SdkSession implements CopilotSession {
     });
 
     sdkSession.on('subagent.completed', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
@@ -669,7 +787,7 @@ class SdkSession implements CopilotSession {
     });
 
     sdkSession.on('subagent.failed', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
       const name = String(data?.agentDisplayName ?? data?.agentName ?? 'agent');
@@ -681,44 +799,30 @@ class SdkSession implements CopilotSession {
     // --- Rich events (optional; consumers can subscribe or ignore) ---
 
     sdkSession.on('assistant.intent', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       const intent = typeof e.data?.intent === 'string' ? e.data.intent : '';
       if (intent) this.emit('intent', intent);
     });
 
     sdkSession.on('assistant.usage', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       this.emit('usage', e.data ?? {});
     });
 
     sdkSession.on('permission.requested', (e: SdkEvent) => {
-      if (this.aborted) return;
+      if (!isActive()) return;
       this.resetHeartbeat();
       this.emit('permission', e.data ?? {});
     });
 
-    // Named event types handled by typed handlers above
-    const HANDLED_EVENT_TYPES = new Set([
-      'assistant.message', 'assistant.message_delta',
-      'assistant.reasoning', 'assistant.reasoning_delta',
-      'assistant.intent', 'assistant.usage',
-      'tool.execution_start', 'tool.execution_complete',
-      'tool.execution_partial_result',
-      'session.idle', 'session.task_complete', 'session.error',
-      'session.compaction_start', 'session.compaction_complete',
-      'subagent.started', 'subagent.completed', 'subagent.failed',
-      'permission.requested',
-    ]);
-
+    // Class-level handling for the full SDK event surface. Named handlers above
+    // retain payload-specific mapping; this dispatcher supplies liveness,
+    // terminal fallbacks, pending-request policies, and future-event safety.
     sdkSession.on((e: SdkEvent) => {
-      if (this.aborted) return;
-      if (e && typeof e.type === 'string'
-        && !HANDLED_EVENT_TYPES.has(e.type)
-        && !LIFECYCLE_EVENT_TYPES.has(e.type)) {
-        process.stderr.write(`[SdkBackend] Unhandled event: ${e.type}\n`);
-      }
+      if (!isActive()) return;
+      this.dispatchClassEvent(sdkSession, e);
     });
   }
 
@@ -796,13 +900,151 @@ class SdkSession implements CopilotSession {
     this.emit('error', err);
   }
 
+  private settleIdle(): void {
+    if (this.aborted || this.turnSettled) return;
+    this.turnSettled = true;
+    this._turnText.clear();
+    this.clearTimers();
+    this.emit('idle');
+    void this._cleanup();
+  }
+
+  private fail(err: Error, eventType: string, data?: Record<string, unknown>): void {
+    if (this.aborted || this.turnSettled) return;
+    this.turnSettled = true;
+    this.clearTimers();
+    try {
+      process.stderr.write(`[SdkBackend] ${eventType}: ${this.serializeEventDataCompact(eventType, data)}\n`);
+    } catch { /* closed stream */ }
+    this.emitError(err);
+    this.aborted = true;
+    void this._cleanup();
+  }
+
+  private handleEarlyEvent(e: SdkEvent): void {
+    if (this.aborted || !e || typeof e.type !== 'string') return;
+    // Once the active handle exists, the session catch-all is authoritative.
+    // Only the pre-handle creation window is handled here.
+    if (this._sdkSession) return;
+    const eventClass = classifySdkEvent(e.type);
+    if (eventClass === 'informational') return;
+    if (this.isFailureShapedEvent(e)) {
+      const payload = this.serializeEventDataCompact(e.type, e.data);
+      try { process.stderr.write(`[SdkBackend] Early failure event: ${e.type} data=${payload}\n`); } catch { /* */ }
+      this.fail(new Error(`Early SDK failure event: ${e.type}`), e.type, e.data);
+    }
+  }
+
+  private dispatchClassEvent(sdkSession: SdkSessionHandle, e: SdkEvent): void {
+    if (!e || typeof e.type !== 'string' || NAMED_SDK_EVENTS.has(e.type)) return;
+    const eventClass = classifySdkEvent(e.type);
+    if (e.type === 'session.shutdown' && e.data?.shutdownType === 'error') {
+      const reason = typeof e.data.errorReason === 'string'
+        ? e.data.errorReason
+        : 'SDK session shut down abnormally';
+      this.fail(new Error(reason), 'session.shutdown', e.data);
+      return;
+    }
+    if (eventClass === 'terminal-success') {
+      this.settleIdle();
+      return;
+    }
+    if (eventClass === 'terminal-failure') {
+      this.fail(new Error(`SDK terminal failure: ${e.type}`), e.type, e.data);
+      return;
+    }
+    if (eventClass === 'streaming-liveness') {
+      this.resetHeartbeat();
+      return;
+    }
+    if (eventClass === 'pending-request') {
+      this.resetHeartbeat();
+      void this.resolvePendingRequest(sdkSession, e);
+      return;
+    }
+    if (eventClass === 'informational') return;
+
+    const payload = this.serializeEventDataCompact(e.type, e.data);
+    try { process.stderr.write(`[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
+    if (this.isFailureShapedEvent(e)) {
+      this.fail(new Error(`Unknown SDK failure event: ${e.type}`), e.type, e.data);
+    }
+  }
+
+  private serializeEventData(data?: Record<string, unknown>): string {
+    try {
+      return JSON.stringify(data ?? {});
+    } catch {
+      return '(unstringifiable payload)';
+    }
+  }
+
+  private serializeEventDataCompact(type: string, data?: Record<string, unknown>): string {
+    if (type === 'session.binary_asset') return '(binary payload omitted)';
+    const serialized = this.serializeEventData(data);
+    return serialized.length > 2000 ? `${serialized.slice(0, 2000)}…` : serialized;
+  }
+
+  private isFailureShapedEvent(e: SdkEvent): boolean {
+    const type = e.type ?? '';
+    if (/(?:^|[._-])(error|failure|fatal)(?:$|[._-])/i.test(type)) return true;
+    const data = e.data;
+    if (!data) return false;
+    return data.failed === true
+      || typeof data.error === 'string'
+      || (data.error != null && typeof data.error === 'object');
+  }
+
+  private async resolvePendingRequest(sdkSession: SdkSessionHandle, e: SdkEvent): Promise<void> {
+    if (this.aborted || this._sdkSession !== sdkSession) return;
+    const requestId = typeof e.data?.requestId === 'string' ? e.data.requestId : '';
+    if (!requestId) {
+      this.fail(new Error(`Pending SDK request missing requestId: ${e.type}`), e.type ?? 'pending-request', e.data);
+      return;
+    }
+    try {
+      switch (e.type) {
+        case 'sampling.requested':
+          await sdkSession.rpc.mcp.cancelSamplingExecution({ requestId });
+          break;
+        case 'auto_mode_switch.requested':
+          // Approve this turn only. Do not persist a user preference from a
+          // headless execution engine.
+          await sdkSession.rpc.ui.handlePendingAutoModeSwitch({ requestId, response: 'yes' });
+          break;
+        case 'session_limits_exhausted.requested':
+          await sdkSession.rpc.ui.handlePendingSessionLimitsExhausted({
+            requestId,
+            response: { action: 'cancel' },
+          });
+          break;
+        case 'mcp.headers_refresh_required':
+          // The runtime has its own timeout fallback; registering no response
+          // avoids inventing credentials in a headless process.
+          break;
+      }
+    } catch (err) {
+      if (this.aborted || this._sdkSession !== sdkSession) return;
+      this.fail(
+        err instanceof Error ? err : new Error(String(err)),
+        `${e.type}.policy`,
+        e.data,
+      );
+    }
+  }
+
   private resetHeartbeat(): void {
+    if (this.aborted || this.turnSettled || !this._sdkSession) return;
+    const sdkSession = this._sdkSession;
     if (this.heartbeatTimer) {
       clearTimeout(this.heartbeatTimer);
     }
     this.heartbeatTimer = setTimeout(() => {
-      this.emitError(new Error(`No output for ${this.config.heartbeatTimeout}s (heartbeat timeout)`));
-      this.abort();
+      if (this.aborted || this.turnSettled || this._sdkSession !== sdkSession) return;
+      this.fail(
+        new Error(`No output for ${this.config.heartbeatTimeout}s (heartbeat timeout)`),
+        'heartbeat',
+      );
     }, this.config.heartbeatTimeout * 1000);
   }
 
@@ -819,6 +1061,11 @@ class SdkSession implements CopilotSession {
       clearTimeout(this.compactionTimer);
       this.compactionTimer = null;
     }
+    if (this.abortGraceTimer) {
+      clearTimeout(this.abortGraceTimer);
+      this.abortGraceTimer = null;
+    }
     this.compactionInProgress = false;
+    this.compactionRecoveryInProgress = false;
   }
 }

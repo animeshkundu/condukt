@@ -1,53 +1,92 @@
 /**
- * Shared lifecycle event types — events from the copilot CLI that carry
- * no actionable content and should be silently consumed by all backends.
+ * Classification for the GitHub Copilot SDK session event surface.
  *
- * Both SdkBackend and SubprocessBackend import from this module to avoid
- * duplicating the list.
+ * Unknown events are deliberately not treated as informational by callers: the
+ * SdkBackend applies a failure-shaped fallback and leaves silence to its
+ * heartbeat watchdog. Keep the informational shim for SubprocessBackend's
+ * JSONL warning suppression.
  */
 
-export const LIFECYCLE_EVENT_TYPES = new Set([
-  // Session lifecycle
+export type SdkEventClass =
+  | 'terminal-success'
+  | 'terminal-failure'
+  | 'pending-request'
+  | 'streaming-liveness'
+  | 'informational';
+
+const TERMINAL_SUCCESS = new Set(['session.idle', 'session.task_complete']);
+const TERMINAL_FAILURE = new Set(['session.error', 'model.call_failure', 'abort']);
+const PENDING_REQUEST = new Set([
+  'sampling.requested',
+  'auto_mode_switch.requested',
+  'session_limits_exhausted.requested',
+  'mcp.headers_refresh_required',
+]);
+
+const STREAMING_LIVENESS = new Set([
+  'assistant.reasoning', 'assistant.reasoning_delta',
+  'assistant.message', 'assistant.message_start', 'assistant.message_delta',
+  'assistant.streaming_delta', 'assistant.tool_call_delta',
+  'assistant.turn_start', 'assistant.turn_end', 'assistant.intent',
+  'assistant.idle', 'assistant.usage',
+  'tool.user_requested', 'tool.execution_start',
+  'tool.execution_partial_result', 'tool.execution_progress',
+  'tool.execution_complete',
+  'subagent.started', 'subagent.completed', 'subagent.failed',
+  'session.compaction_start', 'session.compaction_complete',
+]);
+
+const INFORMATIONAL = new Set([
   'session.start', 'session.resume', 'session.shutdown',
   'session.info', 'session.warning', 'session.title_changed',
-  'session.context_changed', 'session.usage_info', 'session.model_change',
-  'session.compaction_start', 'session.compaction_complete',
-  'session.mode_changed', 'session.plan_changed',
-  'session.truncation', 'session.snapshot_rewind',
-  'session.workspace_file_changed', 'session.handoff',
-  'session.background_tasks_changed',
-
-  // Turn lifecycle
-  'user.message', 'assistant.turn_start', 'assistant.turn_end',
-  'assistant.streaming_delta',  // ephemeral progress (totalResponseSizeBytes)
-
-  // Messaging / system
-  'pending_messages.modified', 'system.message', 'abort', 'result',
-
-  // Skill / subagent selection
-  'skill.invoked',
+  'session.context_changed', 'session.usage_info', 'session.usage_checkpoint',
+  'session.model_change', 'session.mode_changed', 'session.plan_changed',
+  'session.todos_changed', 'session.permissions_changed',
+  'session.session_limits_changed', 'session.remote_steerable_changed',
+  'session.schedule_created', 'session.schedule_cancelled', 'session.schedule_rearmed',
+  'session.autopilot_objective_changed', 'session.truncation',
+  'session.snapshot_rewind', 'session.workspace_file_changed', 'session.handoff',
+  'session.background_tasks_changed', 'session.skills_loaded',
+  'session.custom_agents_updated', 'session.extensions_loaded',
+  'session.mcp_server_status_changed', 'session.mcp_servers_loaded',
+  'session.tools_updated', 'session.binary_asset', 'session.custom_notification',
+  'session.extensions.attachments_pushed',
+  'user.message', 'pending_messages.modified', 'system.message',
+  'system.notification', 'skill.invoked',
   'subagent.selected', 'subagent.deselected',
-
-  // User input / elicitation
+  'permission.requested', 'permission.completed',
   'user_input.requested', 'user_input.completed',
   'elicitation.requested', 'elicitation.completed',
-
-  // External tool coordination
   'external_tool.requested', 'external_tool.completed',
-
-  // Command queue
-  'command.queued', 'command.completed',
-
-  // Plan mode
+  'command.queued', 'command.execute', 'command.completed', 'commands.changed',
   'exit_plan_mode.requested', 'exit_plan_mode.completed',
-
-  // Tool UI
-  'tool.user_requested', 'tool.execution_progress',
-
-  // Permission (completion is silent; request is handled separately)
-  'permission.completed',
-
-  // MCP server lifecycle (CLI handles MCP internally)
-  'session.mcp_server_status_changed', 'session.mcp_servers_loaded',
-  'session.tools_updated',
+  'mcp.oauth_required', 'mcp.oauth_completed',
+  'mcp.headers_refresh_completed', 'sampling.completed',
+  'auto_mode_switch.completed', 'session_limits_exhausted.completed',
+  'capabilities.changed',
+  'hook.start', 'hook.progress', 'hook.end',
+  'session.canvas.opened', 'session.canvas.registry_changed',
+  'session.canvas.closed', 'session.canvas.unavailable',
+  'session.canvas.recorded', 'session.canvas.removed',
+  'mcp_app.tool_call_complete',
 ]);
+
+export const KNOWN_SDK_EVENT_TYPES = new Set([
+  ...TERMINAL_SUCCESS,
+  ...TERMINAL_FAILURE,
+  ...PENDING_REQUEST,
+  ...STREAMING_LIVENESS,
+  ...INFORMATIONAL,
+]);
+
+export function classifySdkEvent(type: string): SdkEventClass | undefined {
+  if (TERMINAL_SUCCESS.has(type)) return 'terminal-success';
+  if (TERMINAL_FAILURE.has(type)) return 'terminal-failure';
+  if (PENDING_REQUEST.has(type)) return 'pending-request';
+  if (STREAMING_LIVENESS.has(type)) return 'streaming-liveness';
+  if (INFORMATIONAL.has(type)) return 'informational';
+  return undefined;
+}
+
+/** Legacy shim used by SubprocessBackend's separate JSONL vocabulary. */
+export const LIFECYCLE_EVENT_TYPES = INFORMATIONAL;
