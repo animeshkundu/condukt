@@ -55,6 +55,9 @@ jobs:
 
       - run: npm ci
 
+      # Trusted-publisher OIDC auth (token exchange) requires npm 11.5.1+; node 22 ships npm 10.
+      - run: npm install -g npm@latest
+
       - name: Determine version bump
         id: bump
         run: |
