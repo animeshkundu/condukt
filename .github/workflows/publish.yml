@@ -89,9 +89,9 @@ jobs:
 
       - name: Publish
         if: steps.bump.outputs.skip == 'false'
+        # Auth via npm Trusted Publisher (OIDC) using the id-token permission above.
+        # No NPM_TOKEN: an empty NODE_AUTH_TOKEN would make npm attempt token auth and fail.
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Push version commit and tag
         if: steps.bump.outputs.skip == 'false'
