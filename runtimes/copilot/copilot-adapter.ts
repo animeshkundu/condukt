@@ -35,7 +35,10 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
     },
 
     async createSession(config: SessionConfig): Promise<AgentSession> {
-      // Map flow SessionConfig → CopilotBackend SessionConfig
+      // Map flow SessionConfig → CopilotBackend SessionConfig. Forward every
+      // field SdkBackend consumes; systemMessage (role instructions + any
+      // response schema), the tool filters, and the context tier must reach the
+      // backend or the agent runs on the default persona with no system prompt.
       const copilotConfig = {
         model: config.model,
         thinkingBudget: config.thinkingBudget,
@@ -43,6 +46,10 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         addDirs: config.addDirs,
         timeout: config.timeout,
         heartbeatTimeout: config.heartbeatTimeout,
+        contextTier: config.contextTier,
+        systemMessage: config.systemMessage,
+        availableTools: config.availableTools,
+        excludedTools: config.excludedTools,
       };
 
       const session: CopilotSession = await backend.createSession(copilotConfig);

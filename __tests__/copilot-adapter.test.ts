@@ -95,6 +95,33 @@ describe('adaptCopilotBackend', () => {
     expect(mockSession.on).toHaveBeenCalledWith('text', textHandler);
   });
 
+  it('forwards systemMessage, tool filters, and contextTier to the backend', async () => {
+    const createSession = vi.fn().mockResolvedValue(createMockSession());
+    const backend = createMockBackend({ createSession });
+    const runtime = adaptCopilotBackend(backend);
+
+    await runtime.createSession({
+      model: 'gpt-5.6-sol',
+      cwd: '/test/dir',
+      addDirs: ['/test/dir'],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+      contextTier: 'long_context',
+      systemMessage: 'You are a reviewer. Respond with JSON.',
+      availableTools: ['view', 'glob'],
+      excludedTools: ['apply_patch'],
+    });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextTier: 'long_context',
+        systemMessage: 'You are a reviewer. Respond with JSON.',
+        availableTools: ['view', 'glob'],
+        excludedTools: ['apply_patch'],
+      }),
+    );
+  });
+
   it('handles unavailable backend', async () => {
     const backend = createMockBackend({
       isAvailable: vi.fn().mockResolvedValue(false),
