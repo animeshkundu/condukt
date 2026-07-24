@@ -152,6 +152,8 @@ export interface SessionConfig {
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
   readonly heartbeatTimeout: number; // seconds
+  /** Context-window tier to request (SdkBackend only). */
+  readonly contextTier?: 'default' | 'long_context';
   /** System message to append to the agent's context (SdkBackend only). */
   readonly systemMessage?: string;
   /** Tool allow-list: only these tools are available (SdkBackend only). */
