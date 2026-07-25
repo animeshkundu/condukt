@@ -80,6 +80,27 @@ export interface LoopFallbackEntry {
   ) => string;
 }
 
+/** A bounded multi-node loop with an explicit entry and decision node. */
+export interface LoopRegion {
+  readonly id: string;
+  readonly nodes: readonly string[];
+  readonly entry: string;
+  readonly decision: string;
+  readonly continueOn: string;
+  readonly exitOn: string;
+  /**
+   * Maximum number of loop-backs (continueOn). The body executes up to
+   * maxIterations + 1 times (one initial pass + maxIterations re-runs),
+   * matching loopFallback semantics.
+   */
+  readonly maxIterations: number;
+  readonly onExhausted?: EdgeTarget;
+  readonly feedback?: (
+    decisionOutput: string | null,
+    iteration: number,
+  ) => string;
+}
+
 // ---------------------------------------------------------------------------
 // Composition contract
 // ---------------------------------------------------------------------------
@@ -91,6 +112,7 @@ export interface FlowGraph {
   readonly start: readonly string[];
   readonly maxIterations?: number;
   readonly loopFallback?: Readonly<Record<string, LoopFallbackEntry>>;
+  readonly loops?: readonly LoopRegion[];
 }
 
 /** A node in the flow graph. */

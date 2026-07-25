@@ -24,7 +24,7 @@ export type { DryRunOptions, DryRunResult } from './dry-run';
 // Types
 export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
-  FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry,
+  FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
   AgentRuntime, AgentSession, SessionConfig, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
