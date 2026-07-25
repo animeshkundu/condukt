@@ -191,6 +191,10 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
+  /** Set by agent() so a runtime can identify the node; ignored by real backends. */
+  readonly nodeId?: string;
+  /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
+  readonly artifactFilename?: string;
 }
 
 export interface AgentSession {

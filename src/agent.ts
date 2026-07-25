@@ -185,6 +185,8 @@ export function agent(config: AgentConfig): NodeFn {
             : undefined
         ),
         excludedTools: config.excludedTools,
+        nodeId: ctx.nodeId,
+        artifactFilename: config.output,
       });
 
       // Abort check after session creation

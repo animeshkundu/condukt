@@ -138,6 +138,8 @@ describe('agent factory', () => {
       systemMessage: undefined,
       availableTools: undefined,
       excludedTools: undefined,
+      nodeId: 'node-1',
+      artifactFilename: undefined,
     });
   });
 
