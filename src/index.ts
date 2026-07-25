@@ -1,6 +1,19 @@
 // Execution (scheduler + node factories)
 export { run, computeFrontier, validateGraph, normalizeTargets } from './scheduler';
 export { agent, wasCompletedBeforeCrash } from './agent';
+/**
+ * @experimental Experimental — API may change before it stabilizes into condukt core.
+ */
+export { agentNode } from './agent-node';
+export { toValidator } from './agent-node';
+export type {
+  AgentNodeConfig,
+  AgentNodeSchema,
+  SchemaValidationFunction,
+  SchemaValidationResult,
+  SchemaValidator,
+  StandardSchemaValidator,
+} from './agent-node';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
 export { verify, property } from './verify';
 export { createHmrSingleton } from './hmr-singleton';
