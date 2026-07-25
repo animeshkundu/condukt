@@ -16,6 +16,7 @@ import type {
 import { FlowValidationError, FlowAbortedError } from '../src/types';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
 import { run, computeFrontier, validateGraph } from '../src/scheduler';
+import { deterministic } from '../src/nodes';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,6 +124,41 @@ describe('scheduler', () => {
       expect(types).toContain('run:started');
       expect(types).toContain('run:completed');
       expect(types.filter((t) => t === 'edge:traversed')).toHaveLength(2);
+    });
+
+    it('emits a cost event for usage metadata when a resolver is configured', async () => {
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(
+            deterministic('Usage node', async () => ({
+              action: 'default',
+              metadata: {
+                usage: {
+                  totalTokens: 100,
+                  model: 'test-model',
+                },
+              },
+            })),
+          ),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const opts = mockRunOptions({ costResolver: () => 0.5 });
+
+      await run(graph, opts);
+
+      const costEvent = emittedEvents(opts).find(
+        (event) => event.type === 'cost:recorded',
+      );
+      expect(costEvent).toMatchObject({
+        type: 'cost:recorded',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        cost: 0.5,
+        tokens: 100,
+        model: 'test-model',
+      });
     });
 
     it('parallel start: [A, B] → C (fan-in)', async () => {

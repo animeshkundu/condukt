@@ -19,7 +19,7 @@ import type {
   EdgeTarget,
   RetryContext,
 } from './types';
-import { FlowAbortedError, FlowValidationError } from './types';
+import { FlowAbortedError, FlowValidationError, NO_OP_LOGGER } from './types';
 import type {
   GraphNodeSkeleton,
   GraphEdgeSkeleton,
@@ -350,9 +350,12 @@ export async function run(
     emitState,
     emitOutput,
     signal,
+    costResolver,
     resumeFrom,
     retryContexts,
   } = options;
+  const logger = options.logger ?? NO_OP_LOGGER;
+  void logger;
 
   const skeleton = extractSkeleton(graph);
   const startTime = Date.now();
@@ -582,6 +585,32 @@ export async function run(
           elapsedMs,
           ts: Date.now(),
         });
+
+        if (
+          costResolver &&
+          output.metadata?.usage &&
+          typeof output.metadata.usage === 'object' &&
+          !Array.isArray(output.metadata.usage)
+        ) {
+          const usage = output.metadata.usage as Record<string, unknown>;
+          const tokens = Number(
+            usage.totalTokens ??
+            ((Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0)),
+          ) || 0;
+          const model = (
+            typeof usage.model === 'string' ? usage.model : undefined
+          ) ?? entry.model;
+          const cost = costResolver(usage, model);
+          await emitState({
+            type: 'cost:recorded',
+            executionId,
+            nodeId,
+            tokens,
+            model: model ?? 'unknown',
+            cost,
+            ts: Date.now(),
+          });
+        }
 
         // Write artifact if present
         if (output.artifact && entry.output) {

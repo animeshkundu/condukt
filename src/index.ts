@@ -10,14 +10,14 @@ export { setupOnce, clearSetupCache } from './setup-once';
 export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry,
-  RunOptions, RunResult, ResumeState,
+  RunOptions, RunResult, ResumeState, Logger,
   AgentRuntime, AgentSession, SessionConfig, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,
 } from './types';
 
-export { getParams, FlowAbortedError, FlowValidationError } from './types';
+export { getParams, FlowAbortedError, FlowValidationError, NO_OP_LOGGER } from './types';
 
 // Events
 export type {

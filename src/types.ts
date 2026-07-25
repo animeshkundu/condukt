@@ -108,6 +108,32 @@ export interface NodeEntry {
 // Execution contract
 // ---------------------------------------------------------------------------
 
+export interface Logger {
+  readonly debug: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly info: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly warn: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly error: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+}
+
+export const NO_OP_LOGGER: Logger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 export interface RunOptions {
   readonly executionId: string;
   readonly dir: string;
@@ -116,6 +142,11 @@ export interface RunOptions {
   readonly emitState: (event: ExecutionEvent) => Promise<void>;
   readonly emitOutput: (event: OutputEvent) => void;
   readonly signal: AbortSignal;
+  readonly costResolver?: (
+    usage: Readonly<Record<string, unknown>>,
+    model: string | undefined,
+  ) => number;
+  readonly logger?: Logger;
   readonly resumeFrom?: ResumeState;
   /** PARITY-1: RetryContext for specific nodes (nodeId → RetryContext). */
   readonly retryContexts?: Readonly<Record<string, RetryContext>>;
@@ -196,8 +227,16 @@ export interface ToolRef {
 }
 
 export interface AgentConfig {
-  readonly objective: string;
-  readonly tools: readonly ToolRef[];
+  /**
+   * @deprecated Documentation only — never reaches the model. Inert; retained
+   * for back-compat.
+   */
+  readonly objective?: string;
+  /**
+   * @deprecated Prefer `availableTools`. When `availableTools` is unset, a
+   * non-empty `tools` derives the allow-list from `tools.map(t => t.id)`.
+   */
+  readonly tools?: readonly ToolRef[];
   readonly output?: string;
   readonly reads?: readonly string[];
   readonly model?: string;

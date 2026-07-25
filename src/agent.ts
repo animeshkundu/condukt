@@ -162,6 +162,7 @@ export function agent(config: AgentConfig): NodeFn {
 
     let session: AgentSession | null = null;
     const outputLines: string[] = [];
+    let lastUsage: Record<string, unknown> | undefined;
 
     try {
       // Step 3: Build prompt
@@ -178,7 +179,11 @@ export function agent(config: AgentConfig): NodeFn {
         timeout: config.timeout ?? 3600,
         heartbeatTimeout: config.heartbeatTimeout ?? 120,
         systemMessage: config.systemMessage,
-        availableTools: config.availableTools,
+        availableTools: config.availableTools ?? (
+          config.tools && config.tools.length > 0
+            ? config.tools.map((tool) => tool.id)
+            : undefined
+        ),
         excludedTools: config.excludedTools,
       });
 
@@ -265,6 +270,7 @@ export function agent(config: AgentConfig): NodeFn {
       });
 
       session.on('usage', (data: Record<string, unknown>) => {
+        lastUsage = data;
         ctx.emitOutput({
           type: 'node:usage',
           executionId: ctx.executionId,
@@ -410,7 +416,11 @@ export function agent(config: AgentConfig): NodeFn {
         ? config.actionParser(content)
         : 'default';
 
-      return { action, artifact: content };
+      return {
+        action,
+        artifact: content,
+        metadata: lastUsage ? { usage: lastUsage } : undefined,
+      };
     } finally {
       // AI-1: Close session on all paths (abort is idempotent)
       if (session) {
