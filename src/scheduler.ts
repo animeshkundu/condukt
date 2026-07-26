@@ -18,8 +18,9 @@ import type {
   ResumeState,
   EdgeTarget,
   RetryContext,
+  LoopRegion,
 } from './types';
-import { FlowAbortedError, FlowValidationError } from './types';
+import { FlowAbortedError, FlowValidationError, NO_OP_LOGGER } from './types';
 import type {
   GraphNodeSkeleton,
   GraphEdgeSkeleton,
@@ -67,11 +68,140 @@ export function validateGraph(graph: FlowGraph): void {
     }
   }
 
+  // Validate explicit multi-node loop regions.
+  const claimedRegionNodes = new Map<string, string>();
+  const regionIds = new Set<string>();
+  for (const region of graph.loops ?? []) {
+    if (regionIds.has(region.id)) {
+      issues.push(`Loop region id '${region.id}' is duplicated`);
+    }
+    regionIds.add(region.id);
+
+    const hasMaxIterations = region.maxIterations !== undefined;
+    const hasMaxRounds = region.maxRounds !== undefined;
+    if (hasMaxIterations === hasMaxRounds) {
+      issues.push(
+        `Loop region '${region.id}' must set exactly one of maxIterations or maxRounds`,
+      );
+    }
+    if (region.maxIterations !== undefined && region.maxIterations < 0) {
+      issues.push(`Loop region '${region.id}' maxIterations must be at least 0`);
+    }
+    if (region.maxRounds !== undefined && region.maxRounds < 1) {
+      issues.push(`Loop region '${region.id}' maxRounds must be at least 1`);
+    }
+
+    const regionNodes = new Set<string>();
+    for (const nodeId of region.nodes) {
+      if (regionNodes.has(nodeId)) {
+        issues.push(`Loop region '${region.id}' contains duplicate node '${nodeId}'`);
+        continue;
+      }
+      regionNodes.add(nodeId);
+
+      if (!nodeIds.has(nodeId)) {
+        issues.push(`Loop region '${region.id}' node '${nodeId}' does not exist in graph.nodes`);
+      }
+
+      const claimedBy = claimedRegionNodes.get(nodeId);
+      if (claimedBy) {
+        issues.push(
+          `Loop regions '${claimedBy}' and '${region.id}' overlap at node '${nodeId}'`,
+        );
+      } else {
+        claimedRegionNodes.set(nodeId, region.id);
+      }
+    }
+
+    if (!regionNodes.has(region.entry)) {
+      issues.push(`Loop region '${region.id}' entry '${region.entry}' is not in region.nodes`);
+    }
+    if (!regionNodes.has(region.decision)) {
+      issues.push(`Loop region '${region.id}' decision '${region.decision}' is not in region.nodes`);
+    }
+
+    const regionEntries = new Set<string>();
+    for (const startId of graph.start) {
+      if (regionNodes.has(startId)) regionEntries.add(startId);
+    }
+    for (const [source, actionMap] of Object.entries(graph.edges)) {
+      if (regionNodes.has(source)) continue;
+      for (const edgeTarget of Object.values(actionMap)) {
+        for (const target of normalizeTargets(edgeTarget)) {
+          if (regionNodes.has(target)) regionEntries.add(target);
+        }
+      }
+    }
+    if (regionEntries.size > 1) {
+      issues.push(
+        `Loop region '${region.id}' has multiple entry nodes: ${[...regionEntries].join(', ')}`,
+      );
+    } else if (regionEntries.size === 1 && !regionEntries.has(region.entry)) {
+      issues.push(
+        `Loop region '${region.id}' external entry does not match declared entry '${region.entry}'`,
+      );
+    }
+
+    const decisionEdges = graph.edges[region.decision];
+    if (!decisionEdges || !Object.prototype.hasOwnProperty.call(decisionEdges, region.continueOn)) {
+      issues.push(
+        `Loop region '${region.id}' decision '${region.decision}' has no edge for continueOn action '${region.continueOn}'`,
+      );
+    }
+    if (!decisionEdges || !Object.prototype.hasOwnProperty.call(decisionEdges, region.exitOn)) {
+      issues.push(
+        `Loop region '${region.id}' decision '${region.decision}' has no edge for exitOn action '${region.exitOn}'`,
+      );
+    }
+
+    if (regionNodes.has(region.entry)) {
+      const reachable = new Set<string>([region.entry]);
+      const frontier = [region.entry];
+      while (frontier.length > 0) {
+        const source = frontier.pop();
+        if (!source) continue;
+
+        for (const [action, edgeTarget] of Object.entries(graph.edges[source] ?? {})) {
+          if (source === region.decision && action === region.continueOn) continue;
+
+          for (const target of normalizeTargets(edgeTarget)) {
+            if (!regionNodes.has(target) || reachable.has(target)) continue;
+            reachable.add(target);
+            frontier.push(target);
+          }
+        }
+      }
+
+      for (const nodeId of regionNodes) {
+        if (!reachable.has(nodeId)) {
+          issues.push(
+            `Loop region '${region.id}' node '${nodeId}' is not reachable from entry '${region.entry}'`,
+          );
+        }
+      }
+    }
+
+    if (region.onExhausted !== undefined) {
+      for (const target of normalizeTargets(region.onExhausted)) {
+        if (target !== 'end' && !nodeIds.has(target)) {
+          issues.push(
+            `Loop region '${region.id}' onExhausted target '${target}' does not exist in graph.nodes`,
+          );
+        }
+      }
+    }
+  }
+
   // Cycle detection: DFS from every node. If a back-edge is found, require a loopFallback entry.
   // Build adjacency list from edges
   const adj = new Map<string, Array<{ target: string; source: string; action: string }>>();
   for (const [source, actionMap] of Object.entries(graph.edges)) {
     for (const [action, edgeTarget] of Object.entries(actionMap)) {
+      const isRegionContinuation = graph.loops?.some(region =>
+        region.decision === source && region.continueOn === action,
+      ) ?? false;
+      if (isRegionContinuation) continue;
+
       for (const target of normalizeTargets(edgeTarget)) {
         if (target === 'end') continue;
         if (!adj.has(source)) adj.set(source, []);
@@ -106,7 +236,8 @@ export function validateGraph(graph: FlowGraph): void {
     if (color.get(id) === WHITE) dfs(id);
   }
 
-  // For each back-edge, require a loopFallback entry
+  // For each remaining back-edge, require a loopFallback entry. Declared region
+  // continuation edges were excluded from the adjacency list above.
   for (const edge of backEdges) {
     const key = `${edge.source}:${edge.action}`;
     const fallback = graph.loopFallback?.[key];
@@ -332,6 +463,65 @@ async function resetLoopBody(
   });
 }
 
+/**
+ * Reset an explicit loop region without disturbing external fan-in tokens.
+ * Only sources inside the region reset set are removed from each reset node's inbox.
+ */
+async function resetLoopRegion(
+  region: LoopRegion,
+  continueTargets: readonly string[],
+  iteration: number,
+  executionId: string,
+  completed: Map<string, { action: string; finishedAt: number }>,
+  nodeStatuses: Map<string, string>,
+  firedEdges: Map<string, Set<string>>,
+  failedNodes: Set<string>,
+  emitState: (event: ExecutionEvent) => Promise<void>,
+): Promise<void> {
+  const resetNodes = new Set([...region.nodes, region.decision]);
+
+  for (const nodeId of resetNodes) {
+    completed.delete(nodeId);
+    nodeStatuses.delete(nodeId);
+    failedNodes.delete(nodeId);
+
+    const firedSources = firedEdges.get(nodeId);
+    if (firedSources) {
+      for (const source of [...firedSources]) {
+        if (resetNodes.has(source)) {
+          firedSources.delete(source);
+        }
+      }
+      if (firedSources.size === 0) {
+        firedEdges.delete(nodeId);
+      }
+    }
+  }
+
+  // Remove any prior decision continuation token, including from a target outside
+  // the reset set, so an earlier iteration cannot make a later target ready.
+  for (const target of continueTargets) {
+    const firedSources = firedEdges.get(target);
+    if (!firedSources) continue;
+    firedSources.delete(region.decision);
+    if (firedSources.size === 0) {
+      firedEdges.delete(target);
+    }
+  }
+
+  for (const nodeId of resetNodes) {
+    await emitState({
+      type: 'node:reset',
+      executionId,
+      nodeId,
+      reason: 'loop-back',
+      iteration,
+      sourceNodeId: region.decision,
+      ts: Date.now(),
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main run loop
 // ---------------------------------------------------------------------------
@@ -350,9 +540,12 @@ export async function run(
     emitState,
     emitOutput,
     signal,
+    costResolver,
     resumeFrom,
     retryContexts,
   } = options;
+  const logger = options.logger ?? NO_OP_LOGGER;
+  void logger;
 
   const skeleton = extractSkeleton(graph);
   const startTime = Date.now();
@@ -382,8 +575,12 @@ export async function run(
   const firedEdges = new Map<string, Set<string>>(); // target → sources
   const nodeStatuses = new Map<string, string>();
   const failedNodes = new Set<string>();
-  const loopIterations = new Map<string, number>(); // source:action → iteration count
+  const loopIterations = new Map<string, number>(); // legacy source:action or region:id → iteration count
   const loopRetryContexts = new Map<string, RetryContext>(); // nodeId → RetryContext for loop re-dispatch
+  const loopRegionsByDecision = new Map<string, LoopRegion>();
+  for (const region of graph.loops ?? []) {
+    loopRegionsByDecision.set(region.decision, region);
+  }
 
   let pending: string[];
 
@@ -583,6 +780,32 @@ export async function run(
           ts: Date.now(),
         });
 
+        if (
+          costResolver &&
+          output.metadata?.usage &&
+          typeof output.metadata.usage === 'object' &&
+          !Array.isArray(output.metadata.usage)
+        ) {
+          const usage = output.metadata.usage as Record<string, unknown>;
+          const tokens = Number(
+            usage.totalTokens ??
+            ((Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0)),
+          ) || 0;
+          const model = (
+            typeof usage.model === 'string' ? usage.model : undefined
+          ) ?? entry.model;
+          const cost = costResolver(usage, model);
+          await emitState({
+            type: 'cost:recorded',
+            executionId,
+            nodeId,
+            tokens,
+            model: model ?? 'unknown',
+            cost,
+            ts: Date.now(),
+          });
+        }
+
         // Write artifact if present
         if (output.artifact && entry.output) {
           const artifactPath = path.join(dir, entry.output);
@@ -638,8 +861,28 @@ export async function run(
 
     // Phase 1b: Fire edges for all completed nodes (with loop-back detection)
     const loopResets: string[] = []; // nodes to re-dispatch after loop-back reset
+    const continuingRegionDecisionIds = new Set(
+      newlyCompleted
+        .filter(({ nodeId, output }) => {
+          const region = loopRegionsByDecision.get(nodeId);
+          return region?.continueOn === output.action;
+        })
+        .map(({ nodeId }) => nodeId),
+    );
+    const edgeCompletions = continuingRegionDecisionIds.size === 0
+      ? newlyCompleted
+      : [
+          ...newlyCompleted.filter(({ nodeId }) =>
+            !continuingRegionDecisionIds.has(nodeId),
+          ),
+          ...newlyCompleted.filter(({ nodeId }) =>
+            continuingRegionDecisionIds.has(nodeId),
+          ),
+        ];
 
-    for (const { nodeId, output } of newlyCompleted) {
+    // Process continuing region decisions last so reset clears every internal
+    // contribution fired by body nodes that completed in the same batch.
+    for (const { nodeId, output } of edgeCompletions) {
       const edgeMap = graph.edges[nodeId];
       if (!edgeMap) continue; // terminal node, no outgoing edges
 
@@ -651,6 +894,72 @@ export async function run(
       if (!edgeTarget) continue;
 
       const targets = normalizeTargets(edgeTarget).filter(t => t !== 'end');
+      const region = loopRegionsByDecision.get(nodeId);
+
+      if (region && action === region.continueOn) {
+        const loopKey = `region:${region.id}`;
+        const currentIteration = (loopIterations.get(loopKey) ?? 0) + 1;
+        loopIterations.set(loopKey, currentIteration);
+
+        const effectiveMaxLoopBacks = region.maxRounds !== undefined
+          ? region.maxRounds - 1
+          : region.maxIterations!;
+        if (currentIteration > effectiveMaxLoopBacks) {
+          const exhaustionTarget = region.onExhausted ?? edgeMap[region.exitOn];
+          const exhaustionAction = region.onExhausted === undefined
+            ? region.exitOn
+            : action;
+          for (const target of normalizeTargets(exhaustionTarget)) {
+            if (target === 'end') continue;
+            let sources = firedEdges.get(target);
+            if (!sources) {
+              sources = new Set();
+              firedEdges.set(target, sources);
+            }
+            sources.add(nodeId);
+            await emitState({
+              type: 'edge:traversed',
+              executionId,
+              source: nodeId,
+              target,
+              action: exhaustionAction,
+              ts: Date.now(),
+            });
+          }
+        } else {
+          const entryNode = graph.nodes[region.entry];
+          let priorOutput: string | null = null;
+          if (entryNode.output) {
+            const artifactPath = path.join(dir, entryNode.output);
+            try {
+              if (fs.existsSync(artifactPath)) {
+                priorOutput = fs.readFileSync(artifactPath, 'utf-8');
+              }
+            } catch {
+              // ignore
+            }
+          }
+          const feedback = region.feedback
+            ? region.feedback(output.artifact ?? null, currentIteration)
+            : `iteration ${currentIteration}`;
+          loopRetryContexts.set(region.entry, { priorOutput, feedback });
+
+          await resetLoopRegion(
+            region,
+            targets,
+            currentIteration,
+            executionId,
+            completed,
+            nodeStatuses,
+            firedEdges,
+            failedNodes,
+            emitState,
+          );
+
+          loopResets.push(region.entry);
+        }
+        continue;
+      }
 
       // Check if this is a loop-back: any target is already completed or failed
       const loopBackTargets = targets.filter(t => completed.has(t) || failedNodes.has(t));

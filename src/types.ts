@@ -80,6 +80,33 @@ export interface LoopFallbackEntry {
   ) => string;
 }
 
+/** A bounded multi-node loop with an explicit entry and decision node. */
+export interface LoopRegion {
+  readonly id: string;
+  readonly nodes: readonly string[];
+  readonly entry: string;
+  readonly decision: string;
+  readonly continueOn: string;
+  readonly exitOn: string;
+  /**
+   * Maximum number of loop-backs (continueOn). The body executes up to
+   * maxIterations + 1 times (one initial pass + maxIterations re-runs),
+   * matching loopFallback semantics. Exactly one of maxIterations or
+   * maxRounds must be set.
+   */
+  readonly maxIterations?: number;
+  /**
+   * Maximum total body executions. The producer runs at most maxRounds times.
+   * Exactly one of maxIterations or maxRounds must be set.
+   */
+  readonly maxRounds?: number;
+  readonly onExhausted?: EdgeTarget;
+  readonly feedback?: (
+    decisionOutput: string | null,
+    iteration: number,
+  ) => string;
+}
+
 // ---------------------------------------------------------------------------
 // Composition contract
 // ---------------------------------------------------------------------------
@@ -91,6 +118,7 @@ export interface FlowGraph {
   readonly start: readonly string[];
   readonly maxIterations?: number;
   readonly loopFallback?: Readonly<Record<string, LoopFallbackEntry>>;
+  readonly loops?: readonly LoopRegion[];
 }
 
 /** A node in the flow graph. */
@@ -108,6 +136,32 @@ export interface NodeEntry {
 // Execution contract
 // ---------------------------------------------------------------------------
 
+export interface Logger {
+  readonly debug: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly info: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly warn: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+  readonly error: (
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ) => void;
+}
+
+export const NO_OP_LOGGER: Logger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 export interface RunOptions {
   readonly executionId: string;
   readonly dir: string;
@@ -116,6 +170,11 @@ export interface RunOptions {
   readonly emitState: (event: ExecutionEvent) => Promise<void>;
   readonly emitOutput: (event: OutputEvent) => void;
   readonly signal: AbortSignal;
+  readonly costResolver?: (
+    usage: Readonly<Record<string, unknown>>,
+    model: string | undefined,
+  ) => number;
+  readonly logger?: Logger;
   readonly resumeFrom?: ResumeState;
   /** PARITY-1: RetryContext for specific nodes (nodeId → RetryContext). */
   readonly retryContexts?: Readonly<Record<string, RetryContext>>;
@@ -160,6 +219,10 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
+  /** Set by agent() so a runtime can identify the node; ignored by real backends. */
+  readonly nodeId?: string;
+  /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
+  readonly artifactFilename?: string;
 }
 
 export interface AgentSession {
@@ -196,8 +259,16 @@ export interface ToolRef {
 }
 
 export interface AgentConfig {
-  readonly objective: string;
-  readonly tools: readonly ToolRef[];
+  /**
+   * @deprecated Documentation only — never reaches the model. Inert; retained
+   * for back-compat.
+   */
+  readonly objective?: string;
+  /**
+   * @deprecated Prefer `availableTools`. When `availableTools` is unset, a
+   * non-empty `tools` derives the allow-list from `tools.map(t => t.id)`.
+   */
+  readonly tools?: readonly ToolRef[];
   readonly output?: string;
   readonly reads?: readonly string[];
   readonly model?: string;

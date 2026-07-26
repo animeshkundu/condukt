@@ -140,8 +140,43 @@ condukt is split into sub-path exports so you only pull in what you need.
 - **Fan-out** — one node fans out to multiple parallel branches
 - **Fan-in** — multiple branches converge into a single node (waits for all)
 - **Loop-back** — edges that point backward with `maxIterations` bounds and `loopFallback` strategy
+- **Loop regions** — bounded multi-node producer/critic/refinement loops with an explicit entry and decision node
 - **Per-node timeout** — individual deadline per node
 - **Abort / Resume** — stop mid-execution and pick up where you left off
+
+### Multi-node loop regions
+
+Declare a `LoopRegion` alongside the graph. The decision node's `continueOn` action resets only the declared region and re-dispatches its entry. Its `exitOn` action follows the normal graph edge.
+
+```typescript
+import type { FlowGraph, LoopRegion } from 'condukt';
+
+const reviewLoop: LoopRegion = {
+  id: 'review-loop',
+  nodes: ['producer', 'critic', 'refine'],
+  entry: 'producer',
+  decision: 'refine',
+  continueOn: 'revise',
+  exitOn: 'accepted',
+  maxIterations: 3,
+  onExhausted: 'manualReview',
+  feedback: (decisionOutput, iteration) =>
+    `Round ${iteration}: ${decisionOutput ?? 'revise the prior output'}`,
+};
+
+const graph: FlowGraph = {
+  nodes: { producer, critic, refine, done, manualReview },
+  edges: {
+    producer: { default: 'critic' },
+    critic: { default: 'refine' },
+    refine: { revise: 'producer', accepted: 'done' },
+  },
+  start: ['producer'],
+  loops: [reviewLoop],
+};
+```
+
+External fan-in contributions to region nodes are preserved across resets. Fired contributions from predecessors inside the region are cleared and rebuilt by the next iteration.
 
 ## UI components
 

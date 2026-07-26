@@ -111,7 +111,6 @@ describe('agent factory', () => {
   it('creates session with correct config', async () => {
     const config: AgentConfig = {
       objective: 'test objective',
-      tools: [{ id: 'tool-1', displayName: 'Tool 1' }],
       model: 'gpt-5.3',
       timeout: 1800,
       heartbeatTimeout: 60,
@@ -131,11 +130,90 @@ describe('agent factory', () => {
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith({
       model: 'gpt-5.3',
+      thinkingBudget: undefined,
       cwd: '/tmp/test-agent',
       addDirs: ['/tmp/test-agent'],
       timeout: 1800,
       heartbeatTimeout: 60,
+      systemMessage: undefined,
+      availableTools: undefined,
+      excludedTools: undefined,
+      nodeId: 'node-1',
+      artifactFilename: undefined,
     });
+  });
+
+  it.each([
+    {
+      name: 'prefers explicit availableTools over tools',
+      config: {
+        availableTools: ['explicit-tool'],
+        tools: [{ id: 'legacy-tool', displayName: 'Legacy Tool' }],
+      },
+      expected: ['explicit-tool'],
+    },
+    {
+      name: 'derives availableTools from tools',
+      config: {
+        tools: [
+          { id: 'tool-1', displayName: 'Tool 1' },
+          { id: 'tool-2', displayName: 'Tool 2' },
+        ],
+      },
+      expected: ['tool-1', 'tool-2'],
+    },
+    {
+      name: 'leaves availableTools undefined when neither is set',
+      config: {},
+      expected: undefined,
+    },
+  ])('$name', async ({ config, expected }) => {
+    const nodeFn = agent({
+      ...config,
+      promptBuilder: () => 'test prompt',
+    });
+
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await nodeFn(createMockInput(), createMockContext(mockRuntime));
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ availableTools: expected }),
+    );
+  });
+
+  it('returns the last usage event in metadata while preserving output emission', async () => {
+    const nodeFn = agent({ promptBuilder: () => 'go' });
+    const ctx = createMockContext(mockRuntime);
+    const usage = {
+      inputTokens: 30,
+      outputTokens: 20,
+      totalTokens: 50,
+      model: 'test-model',
+    };
+
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => {
+        mockSession._emit('usage', { totalTokens: 10, model: 'initial-model' });
+        mockSession._emit('usage', usage);
+        mockSession._emit('idle');
+      });
+    });
+
+    const result = await nodeFn(createMockInput(), ctx);
+
+    expect(result.metadata).toEqual({ usage });
+    expect(ctx.emitOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'node:usage',
+        inputTokens: 30,
+        outputTokens: 20,
+        totalTokens: 50,
+        model: 'test-model',
+      }),
+    );
   });
 
   it('builds and sends prompt from promptBuilder', async () => {
