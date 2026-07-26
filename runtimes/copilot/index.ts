@@ -2,5 +2,12 @@ export type { CopilotBackend, CopilotSession, SessionConfig as CopilotSessionCon
 export { SubprocessBackend } from './subprocess-backend';
 export { SdkBackend } from './sdk-backend';
 export type { SdkBackendOptions } from './sdk-backend';
+export { DEFAULT_SUBAGENT_ROSTER, mergeSubagentRosters } from './subagents';
+export type {
+  SubagentRoster,
+  SubagentRosterEntry,
+  SubagentRosterOption,
+  SubagentRosterValue,
+} from './subagents';
 export { adaptCopilotBackend } from './copilot-adapter';
 export { isProcessAlive, killProcessTree } from './process-killer';

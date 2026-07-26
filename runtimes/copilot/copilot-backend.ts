@@ -9,6 +9,8 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
+import type { SubagentRosterOption } from './subagents';
+
 export interface MCPServerConfig {
   readonly type?: string;
   readonly command?: string;
@@ -17,6 +19,7 @@ export interface MCPServerConfig {
   readonly url?: string;
   readonly headers?: Readonly<Record<string, string>>;
   readonly tools?: readonly string[];
+  readonly timeout?: number;
   readonly [key: string]: unknown;
 }
 
@@ -34,7 +37,6 @@ export interface CustomAgentConfig {
 
 export interface DefaultAgentConfig {
   readonly excludedTools?: readonly string[];
-  readonly [key: string]: unknown;
 }
 
 export interface SessionConfig {
@@ -58,8 +60,10 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
-  /** Custom subagent roster (SdkBackend only). */
+  /** Custom subagent definitions (SdkBackend only). */
   readonly customAgents?: readonly CustomAgentConfig[];
+  /** Stable subagent model/settings roster, or false to opt out (SdkBackend only). */
+  readonly subagentRoster?: SubagentRosterOption;
   /** Main-agent configuration (SdkBackend only). */
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session (SdkBackend only). */

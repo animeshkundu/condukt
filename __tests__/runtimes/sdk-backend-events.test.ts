@@ -27,7 +27,8 @@ interface MockSdkSession {
   disconnect: ReturnType<typeof vi.fn>;
   rpc: {
     mode: { set: ReturnType<typeof vi.fn> };
-    compaction: { compact: ReturnType<typeof vi.fn> };
+    tools: { updateSubagentSettings: ReturnType<typeof vi.fn> };
+    history: { compact: ReturnType<typeof vi.fn> };
     mcp: { cancelSamplingExecution: ReturnType<typeof vi.fn> };
     ui: {
       handlePendingAutoModeSwitch: ReturnType<typeof vi.fn>;
@@ -49,7 +50,8 @@ function createMockSdkSession(): MockSdkSession {
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: {
       mode: { set: vi.fn().mockResolvedValue(undefined) },
-      compaction: { compact: vi.fn().mockResolvedValue({ success: true, tokensRemoved: 0, messagesRemoved: 0 }) },
+      tools: { updateSubagentSettings: vi.fn().mockResolvedValue({}) },
+      history: { compact: vi.fn().mockResolvedValue({ success: true, tokensRemoved: 0, messagesRemoved: 0 }) },
       mcp: { cancelSamplingExecution: vi.fn().mockResolvedValue({ cancelled: true }) },
       ui: {
         handlePendingAutoModeSwitch: vi.fn().mockResolvedValue({ success: true }),
@@ -115,6 +117,9 @@ beforeEach(() => {
   const mockFunction = function (...args: string[]): Function {
     if (args.length === 2 && args[0] === 'specifier' && args[1] === 'return import(specifier)') {
       return () => Promise.resolve({
+        RuntimeConnection: {
+          forStdio: vi.fn(() => ({ kind: 'stdio' as const })),
+        },
         CopilotClient: class MockCopilotClient {
           async createSession(config: Record<string, unknown>) {
             const onEvent = config.onEvent as SdkEventHandler | undefined;
@@ -185,8 +190,8 @@ describe('SdkBackend event mapping', () => {
       expect(classifySdkEvent(phantom), phantom).toBeUndefined();
     }
   });
-  it('forwards contextTier and configDir to the SDK session config', async () => {
-    const backend = new SdkBackend({ configDir: '/project' });
+  it('forwards contextTier and configDirectory to the SDK session config', async () => {
+    const backend = new SdkBackend({ configDir: '/project', subagentRoster: false });
     await backend.createSession({
       model: 'test-model',
       contextTier: 'long_context',
@@ -199,7 +204,7 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => {
       expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
         contextTier: 'long_context',
-        configDir: '/project',
+        configDirectory: '/project',
       }));
     });
   });
@@ -217,6 +222,13 @@ describe('SdkBackend event mapping', () => {
         prompt: 'Do bounded work.',
         tools: [],
         model: 'cheap-model',
+        mcpServers: {
+          filtered: {
+            command: 'filtered-server',
+            tools: ['read'],
+            timeout: 15_000,
+          },
+        },
       }],
       defaultAgent: { excludedTools: ['task'] },
       excludedBuiltinAgents: ['explore'],
@@ -230,6 +242,14 @@ describe('SdkBackend event mapping', () => {
           prompt: 'Do bounded work.',
           tools: [],
           model: 'cheap-model',
+          mcpServers: {
+            filtered: {
+              type: 'local',
+              command: 'filtered-server',
+              tools: ['read'],
+              timeout: 15_000,
+            },
+          },
         }],
         defaultAgent: { excludedTools: ['task'] },
         excludedBuiltinAgents: ['explore'],
@@ -383,13 +403,29 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
+  it('forces a stuck compaction through the SDK history API', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession();
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('session.compaction_start');
+      await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+
+      expect(mock.rpc.history.compact).toHaveBeenCalledOnce();
+      expect(mock.abort).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('recovers a stuck compaction after an intentional abort', async () => {
     vi.useFakeTimers();
     try {
       const { session, mock } = await createTestSession();
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
-      mock.rpc.compaction.compact.mockRejectedValueOnce(new Error('compact failed'));
+      mock.rpc.history.compact.mockRejectedValueOnce(new Error('compact failed'));
       mock.abort.mockImplementationOnce(async () => {
         mock._emit('abort', { reason: 'user_initiated' });
         mock._emit('session.idle');
@@ -414,7 +450,7 @@ describe('SdkBackend event mapping', () => {
       const { session, mock } = await createTestSession();
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
-      mock.rpc.compaction.compact.mockRejectedValueOnce(new Error('compact failed'));
+      mock.rpc.history.compact.mockRejectedValueOnce(new Error('compact failed'));
       let resolveRecovery!: () => void;
       const recoverySend = new Promise<void>(resolve => { resolveRecovery = resolve; });
       mock.send.mockResolvedValueOnce(undefined).mockReturnValueOnce(recoverySend);
@@ -442,7 +478,7 @@ describe('SdkBackend event mapping', () => {
       const { session, mock } = await createTestSession();
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
-      mock.rpc.compaction.compact.mockRejectedValueOnce(new Error('compact failed'));
+      mock.rpc.history.compact.mockRejectedValueOnce(new Error('compact failed'));
       let resolveRecovery!: () => void;
       const recoverySend = new Promise<void>(resolve => { resolveRecovery = resolve; });
       mock.send.mockResolvedValueOnce(undefined).mockReturnValueOnce(recoverySend);

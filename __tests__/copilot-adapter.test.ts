@@ -124,6 +124,9 @@ describe('adaptCopilotBackend', () => {
         skills: ['review'],
         model: 'fast-model',
       }],
+      subagentRoster: {
+        explore: { model: 'gemini-3.6-flash', contextTier: 'long_context' },
+      },
       defaultAgent: { excludedTools: ['task'] },
       excludedBuiltinAgents: ['explore'],
     });
@@ -135,6 +138,9 @@ describe('adaptCopilotBackend', () => {
         availableTools: ['view', 'glob'],
         excludedTools: ['apply_patch'],
         customAgents: [expect.objectContaining({ name: 'reviewer', model: 'fast-model' })],
+        subagentRoster: {
+          explore: { model: 'gemini-3.6-flash', contextTier: 'long_context' },
+        },
         defaultAgent: { excludedTools: ['task'] },
         excludedBuiltinAgents: ['explore'],
       }),
@@ -156,6 +162,7 @@ describe('adaptCopilotBackend', () => {
 
     const forwarded = createSession.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(forwarded).not.toHaveProperty('customAgents');
+    expect(forwarded).not.toHaveProperty('subagentRoster');
     expect(forwarded).not.toHaveProperty('defaultAgent');
     expect(forwarded).not.toHaveProperty('excludedBuiltinAgents');
   });

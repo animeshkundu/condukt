@@ -11,6 +11,7 @@ import type {
   RetryPolicy,
   ThinkingBudget,
   ToolRef,
+  SubagentRosterOption,
 } from './types';
 
 export type SchemaValidationResult<T> =
@@ -68,6 +69,7 @@ export interface AgentNodeConfig<T> {
   readonly tools?: readonly ToolRef[] | readonly string[];
   readonly retry?: RetryPolicy;
   readonly customAgents?: readonly CustomAgentConfig[];
+  readonly subagentRoster?: SubagentRosterOption;
   readonly defaultAgent?: DefaultAgentConfig;
   readonly excludedBuiltinAgents?: readonly string[];
   /** Runtime-only identifier used to distinguish concurrent panel members. */
@@ -320,6 +322,7 @@ export async function produce<T>(
     availableTools: toolIds(config.tools),
     retry: config.retry,
     customAgents: config.customAgents,
+    subagentRoster: config.subagentRoster,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     memberId: config.memberId,
@@ -388,14 +391,15 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
 
     const validator = toValidator(config.schema);
     const retryBudgetMs = config.retry?.budgetMs;
-    const retryDeadlineMs = nodeContext.retryDeadlineMs
-      ?? (retryBudgetMs === undefined
+    const retryWindowMs = retryBudgetMs === undefined
+      ? config.retry === undefined
         ? undefined
-        : Date.now() + (
-            Number.isFinite(retryBudgetMs)
-              ? Math.max(0, retryBudgetMs)
-              : 0
-          ));
+        : (config.timeout ?? 3600) * 1000
+      : Number.isFinite(retryBudgetMs)
+        ? Math.max(0, retryBudgetMs)
+        : 0;
+    const retryDeadlineMs = nodeContext.retryDeadlineMs
+      ?? (retryWindowMs === undefined ? undefined : Date.now() + retryWindowMs);
     const producerContext = retryDeadlineMs === undefined
       ? nodeContext
       : { ...nodeContext, retryDeadlineMs };
