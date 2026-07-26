@@ -14,6 +14,14 @@ export type {
   SchemaValidator,
   StandardSchemaValidator,
 } from './agent-node';
+/**
+ * @experimental Experimental — API may change before it stabilizes into condukt core.
+ */
+export { panelNode } from './panel-node';
+/**
+ * @experimental Experimental — API may change before it stabilizes into condukt core.
+ */
+export type { PanelConfig, PanelMember, PanelMemberMeta } from './panel-node';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
 export { verify, property } from './verify';
 export { createHmrSingleton } from './hmr-singleton';

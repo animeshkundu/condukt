@@ -77,6 +77,20 @@ export function validateGraph(graph: FlowGraph): void {
     }
     regionIds.add(region.id);
 
+    const hasMaxIterations = region.maxIterations !== undefined;
+    const hasMaxRounds = region.maxRounds !== undefined;
+    if (hasMaxIterations === hasMaxRounds) {
+      issues.push(
+        `Loop region '${region.id}' must set exactly one of maxIterations or maxRounds`,
+      );
+    }
+    if (region.maxIterations !== undefined && region.maxIterations < 0) {
+      issues.push(`Loop region '${region.id}' maxIterations must be at least 0`);
+    }
+    if (region.maxRounds !== undefined && region.maxRounds < 1) {
+      issues.push(`Loop region '${region.id}' maxRounds must be at least 1`);
+    }
+
     const regionNodes = new Set<string>();
     for (const nodeId of region.nodes) {
       if (regionNodes.has(nodeId)) {
@@ -887,7 +901,10 @@ export async function run(
         const currentIteration = (loopIterations.get(loopKey) ?? 0) + 1;
         loopIterations.set(loopKey, currentIteration);
 
-        if (currentIteration > region.maxIterations) {
+        const effectiveMaxLoopBacks = region.maxRounds !== undefined
+          ? region.maxRounds - 1
+          : region.maxIterations!;
+        if (currentIteration > effectiveMaxLoopBacks) {
           const exhaustionTarget = region.onExhausted ?? edgeMap[region.exitOn];
           const exhaustionAction = region.onExhausted === undefined
             ? region.exitOn

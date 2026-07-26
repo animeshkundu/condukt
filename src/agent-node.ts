@@ -129,7 +129,7 @@ export function toValidator<T>(schema: AgentNodeSchema<T>): SchemaValidator<T> {
  * precedes the real answer, or a span that parses but fails validation, does not
  * mask a later valid value.
  */
-function* extractJsonCandidates(text: string): Generator<unknown> {
+export function* extractJsonCandidates(text: string): Generator<unknown> {
   const trimmed = text.trim();
   if (trimmed.length > 0) {
     try {
@@ -189,7 +189,7 @@ function parseRead(raw: string): unknown {
   }
 }
 
-function loadReads(
+export function loadReads(
   input: NodeInput,
   names: readonly string[] | undefined,
 ): Readonly<Record<string, unknown>> {
@@ -211,7 +211,7 @@ function toolIds(
   return tools?.map((tool) => typeof tool === 'string' ? tool : tool.id);
 }
 
-function repairPrompt(prompt: string, raw: string, error: Error): string {
+export function repairPrompt(prompt: string, raw: string, error: Error): string {
   return [
     prompt,
     '',
@@ -224,12 +224,12 @@ function repairPrompt(prompt: string, raw: string, error: Error): string {
   ].join('\n');
 }
 
-function validationError(issues: readonly string[]): Error {
+export function validationError(issues: readonly string[]): Error {
   const details = issues.length > 0 ? issues : ['Schema validation failed'];
   return new Error(details.map((issue) => `- ${issue}`).join('\n'));
 }
 
-async function validateCandidate<T>(
+export async function validateCandidate<T>(
   validator: SchemaValidator<T>,
   value: unknown,
 ): Promise<SchemaValidationResult<T>> {
@@ -240,7 +240,7 @@ async function validateCandidate<T>(
   }
 }
 
-function serialize(value: unknown): string {
+export function serialize(value: unknown): string {
   const json = JSON.stringify(value, null, 2);
   if (json === undefined) {
     throw new Error('Structured result is not JSON-serializable');
@@ -248,14 +248,14 @@ function serialize(value: unknown): string {
   return json;
 }
 
-function writeOutput(input: NodeInput, output: string | undefined, content: string): void {
+export function writeOutput(input: NodeInput, output: string | undefined, content: string): void {
   if (!output) return;
   const outputPath = path.join(input.dir, output);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, content, 'utf-8');
 }
 
-function removeInvalidOutput(input: NodeInput, output: string | undefined): void {
+export function removeInvalidOutput(input: NodeInput, output: string | undefined): void {
   if (!output) return;
   try {
     fs.unlinkSync(path.join(input.dir, output));
@@ -264,13 +264,13 @@ function removeInvalidOutput(input: NodeInput, output: string | undefined): void
   }
 }
 
-function retryCount(value: number | undefined): number {
+export function retryCount(value: number | undefined): number {
   if (value === undefined) return 1;
   if (!Number.isFinite(value)) return 1;
   return Math.max(0, Math.trunc(value));
 }
 
-interface ProducerResult {
+export interface ProducerResult {
   readonly artifact?: string;
   readonly text: string;
   readonly metadata?: Record<string, unknown>;
@@ -281,7 +281,7 @@ interface RawCandidate {
   readonly raw: string;
 }
 
-function rawCandidates(result: ProducerResult): readonly RawCandidate[] {
+export function rawCandidates(result: ProducerResult): readonly RawCandidate[] {
   const candidates: RawCandidate[] = [];
   if (result.artifact !== undefined) {
     candidates.push({ label: 'Artifact', raw: result.artifact });
@@ -294,7 +294,7 @@ function rawCandidates(result: ProducerResult): readonly RawCandidate[] {
     : [{ label: 'Response', raw: '' }];
 }
 
-async function produce<T>(
+export async function produce<T>(
   config: AgentNodeConfig<T>,
   prompt: string,
   input: NodeInput,

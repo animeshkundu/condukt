@@ -91,9 +91,15 @@ export interface LoopRegion {
   /**
    * Maximum number of loop-backs (continueOn). The body executes up to
    * maxIterations + 1 times (one initial pass + maxIterations re-runs),
-   * matching loopFallback semantics.
+   * matching loopFallback semantics. Exactly one of maxIterations or
+   * maxRounds must be set.
    */
-  readonly maxIterations: number;
+  readonly maxIterations?: number;
+  /**
+   * Maximum total body executions. The producer runs at most maxRounds times.
+   * Exactly one of maxIterations or maxRounds must be set.
+   */
+  readonly maxRounds?: number;
   readonly onExhausted?: EdgeTarget;
   readonly feedback?: (
     decisionOutput: string | null,

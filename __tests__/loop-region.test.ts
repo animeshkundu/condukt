@@ -134,6 +134,69 @@ describe('loop regions', () => {
     )).toHaveLength(2);
   });
 
+  it('limits total body executions with maxRounds', async () => {
+    const counts: Record<string, number> = { produce: 0, decision: 0, done: 0 };
+    const events: ExecutionEvent[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        produce: entry(async () => {
+          counts.produce += 1;
+          return { action: 'default' };
+        }),
+        decision: entry(async () => {
+          counts.decision += 1;
+          return { action: 'continue' };
+        }),
+        done: entry(async () => {
+          counts.done += 1;
+          return { action: 'default' };
+        }),
+      },
+      edges: {
+        produce: { default: 'decision' },
+        decision: { continue: 'produce', exit: 'done' },
+      },
+      start: ['produce'],
+      loops: [{
+        id: 'total-rounds',
+        nodes: ['produce', 'decision'],
+        entry: 'produce',
+        decision: 'decision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 3,
+      }],
+    };
+
+    await run(graph, runOptions(events));
+
+    expect(counts).toEqual({ produce: 3, decision: 3, done: 1 });
+    expect(events.filter(event =>
+      event.type === 'node:reset' && event.nodeId === 'produce'
+    )).toHaveLength(2);
+  });
+
+  it('requires exactly one loop bound and validates its range', () => {
+    const neither = validationGraph([region({ maxIterations: undefined })]);
+    const both = validationGraph([region({ maxRounds: 2 })]);
+    const invalidRounds = validationGraph([
+      region({ maxIterations: undefined, maxRounds: 0 }),
+    ]);
+    const invalidIterations = validationGraph([region({ maxIterations: -1 })]);
+
+    for (const graph of [neither, both]) {
+      expect(() => validateGraph(graph)).toThrow(
+        "Loop region 'review-loop' must set exactly one of maxIterations or maxRounds",
+      );
+    }
+    expect(() => validateGraph(invalidRounds)).toThrow(
+      "Loop region 'review-loop' maxRounds must be at least 1",
+    );
+    expect(() => validateGraph(invalidIterations)).toThrow(
+      "Loop region 'review-loop' maxIterations must be at least 0",
+    );
+  });
+
   it('fires onExhausted exactly once without starting another epoch', async () => {
     const counts: Record<string, number> = { produce: 0, decision: 0, exhausted: 0 };
     const events: ExecutionEvent[] = [];
