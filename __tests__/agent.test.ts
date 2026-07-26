@@ -14,7 +14,12 @@ import type {
 } from '../src/types';
 import type { OutputEvent } from '../src/events';
 import { FlowAbortedError } from '../src/types';
-import { agent, wasCompletedBeforeCrash } from '../src/agent';
+import {
+  agent,
+  isRetriableModelError,
+  retryDelayMs,
+  wasCompletedBeforeCrash,
+} from '../src/agent';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,19 +133,25 @@ describe('agent factory', () => {
 
     await nodeFn(input, ctx);
 
-    expect(mockRuntime.createSession).toHaveBeenCalledWith({
-      model: 'gpt-5.3',
-      thinkingBudget: undefined,
-      cwd: '/tmp/test-agent',
-      addDirs: ['/tmp/test-agent'],
-      timeout: 1800,
-      heartbeatTimeout: 60,
-      systemMessage: undefined,
-      availableTools: undefined,
-      excludedTools: undefined,
-      nodeId: 'node-1',
-      artifactFilename: undefined,
-    });
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      {
+        model: 'gpt-5.3',
+        thinkingBudget: undefined,
+        cwd: '/tmp/test-agent',
+        addDirs: ['/tmp/test-agent'],
+        timeout: 1800,
+        heartbeatTimeout: 60,
+        systemMessage: undefined,
+        availableTools: undefined,
+        excludedTools: undefined,
+        customAgents: undefined,
+        defaultAgent: undefined,
+        excludedBuiltinAgents: undefined,
+        nodeId: 'node-1',
+        artifactFilename: undefined,
+      },
+      { signal: ctx.signal },
+    );
   });
 
   it.each([
@@ -181,6 +192,7 @@ describe('agent factory', () => {
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ availableTools: expected }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 
@@ -414,6 +426,7 @@ describe('agent factory', () => {
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ addDirs: [] }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 
@@ -543,6 +556,251 @@ describe('agent factory', () => {
 
     // existsSync is called first to check for stale artifact, then unlinkSync to delete
     expect(fs.unlinkSync).toHaveBeenCalled();
+  });
+
+  it('retries a retriable error with a fresh session and emits node:retrying', async () => {
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'retry-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const emitState = vi.fn().mockResolvedValue(undefined);
+    failed.send.mockImplementation(() => queueMicrotask(() => failed._emit(
+      'error', Object.assign(new Error('upstream unavailable'), { statusCode: 503 }),
+    )));
+    succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+    await agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime, { emitState }));
+
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
+    expect(emitState).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'node:retrying',
+      attempt: 2,
+    }));
+  });
+
+  it('does not retry a permanent error', async () => {
+    mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+      'error', Object.assign(new Error('permission denied'), { statusCode: 403 }),
+    )));
+    const ctx = createMockContext(mockRuntime, { emitState: vi.fn().mockResolvedValue(undefined) });
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 3, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), ctx)).rejects.toThrow('permission denied');
+
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+    expect(ctx.emitState).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with the last error when attempts are exhausted', async () => {
+    const first = createMockSession();
+    const last = createMockSession();
+    const runtime = createMockRuntime(first);
+    (runtime.createSession as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(first as unknown as AgentSession)
+      .mockResolvedValueOnce(last as unknown as AgentSession);
+    first.send.mockImplementation(() => queueMicrotask(() => first._emit(
+      'error', Object.assign(new Error('first failure'), { statusCode: 500 }),
+    )));
+    last.send.mockImplementation(() => queueMicrotask(() => last._emit(
+      'error', Object.assign(new Error('last failure'), { statusCode: 503 }),
+    )));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime))).rejects.toThrow('last failure');
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops before retry when the wall-clock budget cannot cover backoff', async () => {
+    mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+      'error', Object.assign(new Error('rate limited'), { statusCode: 429 }),
+    )));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 3, backoffBaseMs: 50, jitter: false, budgetMs: 10 },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow('rate limited');
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('aborts during retry backoff without starting another attempt', async () => {
+    const controller = new AbortController();
+    mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+      'error', Object.assign(new Error('temporary network failure'), { code: 'ECONNRESET' }),
+    )));
+    const emitState = vi.fn().mockImplementation(async () => {
+      controller.abort();
+    });
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 3, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime, {
+      signal: controller.signal,
+      emitState,
+    }))).rejects.toThrow(FlowAbortedError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('preserves default no-retry behavior', async () => {
+    mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+      'error', Object.assign(new Error('transient'), { statusCode: 503 }),
+    )));
+
+    await expect(agent({ promptBuilder: () => 'go' })(
+      createMockInput(), createMockContext(mockRuntime),
+    )).rejects.toThrow('transient');
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('records subagent model and token usage in node metadata', async () => {
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('subagent_end', 'Worker', {
+        model: 'cheap-worker',
+        totalTokens: 321,
+        durationMs: 20,
+        totalToolCalls: 2,
+      });
+      mockSession._emit('idle');
+    }));
+
+    const output = await agent({ promptBuilder: () => 'go' })(
+      createMockInput(), createMockContext(mockRuntime),
+    );
+    expect(output.metadata?.subagentUsage).toEqual([
+      { model: 'cheap-worker', totalTokens: 321 },
+    ]);
+  });
+
+  it('does not retry auth failures merely because their message contains timeout', async () => {
+    const error = new Error('Auth token timeout while refreshing credentials');
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', error);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(error);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed for unrecognized model errors', () => {
+    expect(isRetriableModelError(new Error('unrecognized failure'), { attempt: 1 })).toBe(false);
+  });
+
+  it('does not retry a deeply nested string-status 401 from the runtime', async () => {
+    const nestedError = new Error('outer', {
+      cause: new Error('middle', {
+        cause: Object.assign(new Error('credential rejected'), { status: '401' }),
+      }),
+    });
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', nestedError);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(nestedError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('retries a deeply nested string-status 503 from the runtime', async () => {
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'deep-status-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const nestedError = new Error('outer', {
+      cause: new Error('middle', {
+        cause: Object.assign(new Error('upstream rejected'), { statusCode: '503' }),
+      }),
+    });
+    failed.send.mockImplementation(() => queueMicrotask(() => failed._emit('error', nestedError)));
+    succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+    await agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime));
+
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps retry delays finite and at least 100ms for invalid configuration and jitter', () => {
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      expect(retryDelayMs({ backoffBaseMs: 1, jitter: true }, 1)).toBe(100);
+      expect(retryDelayMs({ backoffBaseMs: 0, jitter: false }, 1)).toBe(5_000);
+      expect(retryDelayMs({ backoffBaseMs: Number.NaN, jitter: false }, 1)).toBe(5_000);
+      expect(retryDelayMs({
+        backoffBaseMs: Number.POSITIVE_INFINITY,
+        backoffMaxMs: Number.POSITIVE_INFINITY,
+        jitter: false,
+      }, Number.MAX_SAFE_INTEGER)).toBe(120_000);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('surfaces FlowAbortedError when abort races an in-flight 500', async () => {
+    const controller = new AbortController();
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      controller.abort();
+      mockSession._emit('error', Object.assign(new Error('upstream failed'), { statusCode: 500 }));
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime, {
+      signal: controller.signal,
+    }))).rejects.toThrow(FlowAbortedError);
+  });
+
+  it('aborts a late session when cancellation wins pending session creation', async () => {
+    const controller = new AbortController();
+    const lateSession = createMockSession();
+    let resolveCreation: ((session: AgentSession) => void) | undefined;
+    const creation = new Promise<AgentSession>((resolve) => {
+      resolveCreation = resolve;
+    });
+    const runtime: AgentRuntime = {
+      name: 'slow-creation-runtime',
+      createSession: vi.fn().mockReturnValue(creation),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+
+    const runPromise = agent({ promptBuilder: () => 'go' })(
+      createMockInput(),
+      createMockContext(runtime, { signal: controller.signal }),
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(runPromise).rejects.toThrow(FlowAbortedError);
+    resolveCreation?.(lateSession as unknown as AgentSession);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(lateSession.abort).toHaveBeenCalledOnce();
+    expect(lateSession.send).not.toHaveBeenCalled();
   });
 });
 

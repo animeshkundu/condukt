@@ -1,9 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { dryRun, panelNode } from '../src';
-import type { FlowGraph } from '../src/types';
+import type {
+  AgentRuntime,
+  AgentSession,
+  ExecutionContext,
+  FlowGraph,
+  NodeInput,
+} from '../src/types';
 
 interface Vote {
   readonly choice: string;
@@ -248,5 +254,59 @@ describe('panelNode', () => {
     expect(reconciliations).toBe(2);
     expect(action(result, 'panel')).toBe('exit');
     expect(action(result, 'done')).toBe('default');
+  });
+
+  it('shares one retry deadline across sequential panel members', async () => {
+    vi.useFakeTimers();
+    try {
+      const input: NodeInput = { dir: createTmpDir(), params: {}, artifactPaths: {} };
+      dirs.push(input.dir);
+      const sendTimes: number[] = [];
+      const runtime: AgentRuntime = {
+        name: 'panel-deadline-runtime',
+        createSession: vi.fn().mockImplementation(async () => {
+          const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+          return {
+            pid: null,
+            send: () => {
+              sendTimes.push(Date.now());
+              setTimeout(() => {
+                for (const handler of handlers.get('text') ?? []) handler('vote');
+                for (const handler of handlers.get('idle') ?? []) handler();
+              }, 60);
+            },
+            on: (event: string, handler: (...args: unknown[]) => void) => {
+              handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+            },
+            abort: vi.fn().mockResolvedValue(undefined),
+          } as unknown as AgentSession;
+        }),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      const entry = panelNode({
+        prompt: 'Vote',
+        members: [{ model: 'first' }, { model: 'second' }],
+        retry: { budgetMs: 100 },
+        reconcile: (verdicts: readonly string[]) => verdicts.join(','),
+      });
+      const context: ExecutionContext = {
+        executionId: 'panel-deadline',
+        nodeId: 'panel',
+        runtime,
+        emitOutput: vi.fn(),
+        signal: new AbortController().signal,
+      };
+
+      const resultPromise = entry.fn(input, context);
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(result.action).toBe('default');
+      expect(sendTimes).toHaveLength(2);
+      expect(sendTimes[1] - sendTimes[0]).toBe(60);
+      expect(runtime.createSession).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -11,7 +11,12 @@
  */
 
 import type { CopilotBackend, CopilotSession } from './copilot-backend';
-import type { AgentRuntime, AgentSession, SessionConfig } from '../../src/types';
+import type {
+  AgentRuntime,
+  AgentSession,
+  SessionConfig,
+  SessionCreationOptions,
+} from '../../src/types';
 
 /**
  * Wraps a CopilotBackend as an AgentRuntime for the flow framework.
@@ -34,25 +39,47 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
       return backend.isAvailable();
     },
 
-    async createSession(config: SessionConfig): Promise<AgentSession> {
+    async createSession(
+      config: SessionConfig,
+      options?: SessionCreationOptions,
+    ): Promise<AgentSession> {
       // Map flow SessionConfig → CopilotBackend SessionConfig. Forward every
       // field SdkBackend consumes; systemMessage (role instructions + any
       // response schema), the tool filters, and the context tier must reach the
       // backend or the agent runs on the default persona with no system prompt.
       const copilotConfig = {
         model: config.model,
-        thinkingBudget: config.thinkingBudget,
+        ...(config.thinkingBudget !== undefined
+          ? { thinkingBudget: config.thinkingBudget }
+          : {}),
         cwd: config.cwd,
         addDirs: config.addDirs,
         timeout: config.timeout,
         heartbeatTimeout: config.heartbeatTimeout,
-        contextTier: config.contextTier,
-        systemMessage: config.systemMessage,
-        availableTools: config.availableTools,
-        excludedTools: config.excludedTools,
+        ...(config.contextTier !== undefined
+          ? { contextTier: config.contextTier }
+          : {}),
+        ...(config.systemMessage !== undefined
+          ? { systemMessage: config.systemMessage }
+          : {}),
+        ...(config.availableTools !== undefined
+          ? { availableTools: config.availableTools }
+          : {}),
+        ...(config.excludedTools !== undefined
+          ? { excludedTools: config.excludedTools }
+          : {}),
+        ...(config.customAgents !== undefined
+          ? { customAgents: config.customAgents }
+          : {}),
+        ...(config.defaultAgent !== undefined
+          ? { defaultAgent: config.defaultAgent }
+          : {}),
+        ...(config.excludedBuiltinAgents !== undefined
+          ? { excludedBuiltinAgents: config.excludedBuiltinAgents }
+          : {}),
       };
 
-      const session: CopilotSession = await backend.createSession(copilotConfig);
+      const session: CopilotSession = await backend.createSession(copilotConfig, options);
 
       // CopilotSession and AgentSession are structurally identical —
       // same methods, same event signatures. Direct pass-through.

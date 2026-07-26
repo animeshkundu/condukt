@@ -4,7 +4,15 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import type { ChildProcess } from 'child_process';
-import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
+import type {
+  CopilotBackend,
+  CopilotSession,
+  SessionConfig,
+  SessionCreationOptions,
+  UsageData,
+  ContentBlock,
+  PermissionInfo,
+} from './copilot-backend';
 import { killProcessTree } from './process-killer';
 import { LIFECYCLE_EVENT_TYPES } from './lifecycle-events';
 
@@ -175,7 +183,13 @@ export class SubprocessBackend implements CopilotBackend {
     return result.status === 0;
   }
 
-  async createSession(config: SessionConfig): Promise<CopilotSession> {
+  async createSession(
+    config: SessionConfig,
+    options?: SessionCreationOptions,
+  ): Promise<CopilotSession> {
+    if (options?.signal?.aborted) {
+      throw new Error('Session creation aborted');
+    }
     return new SubprocessSession(config, this.commandFactory, this.extraPathDirs, this.pathTools);
   }
 }

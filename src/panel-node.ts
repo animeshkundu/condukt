@@ -14,10 +14,13 @@ import {
   writeOutput,
 } from './agent-node';
 import type {
+  CustomAgentConfig,
+  DefaultAgentConfig,
   ExecutionContext,
   NodeEntry,
   NodeInput,
   NodeOutput,
+  RetryPolicy,
 } from './types';
 
 export interface PanelMember {
@@ -51,6 +54,10 @@ export interface PanelConfig<T, V = unknown> {
   readonly fallback?: (error: Error) => T;
   readonly timeout?: number;
   readonly isolation?: boolean;
+  readonly retry?: RetryPolicy;
+  readonly customAgents?: readonly CustomAgentConfig[];
+  readonly defaultAgent?: DefaultAgentConfig;
+  readonly excludedBuiltinAgents?: readonly string[];
   readonly structuredRetry?: number;
 }
 
@@ -74,6 +81,10 @@ async function runMember<T, V>(
     output: memberOutput,
     timeout: config.timeout,
     isolation: config.isolation,
+    retry: config.retry,
+    customAgents: config.customAgents,
+    defaultAgent: config.defaultAgent,
+    excludedBuiltinAgents: config.excludedBuiltinAgents,
   };
 
   if (!config.memberSchema) {
@@ -157,6 +168,28 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
   }
 
   const fn = async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
+    let retryAttempt = 1;
+    const panelContext: ExecutionContext = ctx.nextRetryAttempt
+      ? ctx
+      : {
+          ...ctx,
+          nextRetryAttempt: () => {
+            retryAttempt += 1;
+            return retryAttempt;
+          },
+        };
+    const retryBudgetMs = config.retry?.budgetMs;
+    const retryDeadlineMs = panelContext.retryDeadlineMs
+      ?? (retryBudgetMs === undefined
+        ? undefined
+        : Date.now() + (
+            Number.isFinite(retryBudgetMs)
+              ? Math.max(0, retryBudgetMs)
+              : 0
+          ));
+    const memberContext = retryDeadlineMs === undefined
+      ? panelContext
+      : { ...panelContext, retryDeadlineMs };
     const reads = loadReads(input, config.reads);
     const prompt = typeof config.prompt === 'string'
       ? config.prompt
@@ -168,7 +201,7 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
     for (const member of config.members) {
       let memberResult: MemberResult<V>;
       try {
-        memberResult = await runMember(config, member, prompt, input, ctx);
+        memberResult = await runMember(config, member, prompt, input, memberContext);
       } catch (error) {
         memberResult = {
           ok: false,

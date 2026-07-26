@@ -10,12 +10,14 @@ import type {
   FlowGraph,
   ResumeState,
   AgentRuntime,
+  AgentSession,
   NodeInput,
   ExecutionContext,
 } from '../src/types';
 import { FlowValidationError, FlowAbortedError } from '../src/types';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
 import { run, computeFrontier, validateGraph } from '../src/scheduler';
+import { agent } from '../src/agent';
 import { deterministic } from '../src/nodes';
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,29 @@ function emittedTypes(opts: RunOptions): string[] {
 function emittedEvents(opts: RunOptions): ExecutionEvent[] {
   const calls = (opts.emitState as ReturnType<typeof vi.fn>).mock.calls as unknown as Array<[ExecutionEvent]>;
   return calls.map(([event]) => event);
+}
+
+type SessionHandler = (...args: unknown[]) => void;
+
+interface UsageSession {
+  readonly session: AgentSession;
+  readonly emit: (event: string, ...args: unknown[]) => void;
+}
+
+function usageSession(onSend: (emit: UsageSession['emit']) => void): UsageSession {
+  const handlers = new Map<string, SessionHandler[]>();
+  const emit = (event: string, ...args: unknown[]) => {
+    for (const handler of handlers.get(event) ?? []) handler(...args);
+  };
+  const session = {
+    pid: null,
+    send: () => onSend(emit),
+    on: (event: string, handler: SessionHandler) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+    abort: vi.fn().mockResolvedValue(undefined),
+  } as unknown as AgentSession;
+  return { session, emit };
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +184,146 @@ describe('scheduler', () => {
         tokens: 100,
         model: 'test-model',
       });
+    });
+
+    it('emits separate cost attribution for main-agent and subagent usage', async () => {
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(mockNode('default', undefined, {
+            usage: { totalTokens: 100, model: 'main-model' },
+            subagentUsage: [
+              { totalTokens: 40, model: 'cheap-worker' },
+              { totalTokens: 60, model: 'review-worker' },
+            ],
+          }), { model: 'main-model' }),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const opts = mockRunOptions({
+        costResolver: (usage, model) => Number(usage.totalTokens) * (model === 'main-model' ? 2 : 1),
+      });
+
+      await run(graph, opts);
+
+      const costs = emittedEvents(opts).filter((event) => event.type === 'cost:recorded');
+      expect(costs).toHaveLength(3);
+      expect(costs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ model: 'main-model', tokens: 100, cost: 200 }),
+        expect.objectContaining({ model: 'cheap-worker', tokens: 40, cost: 40 }),
+        expect.objectContaining({ model: 'review-worker', tokens: 60, cost: 60 }),
+      ]));
+    });
+
+    it('uses unknown instead of the parent model for model-less subagent usage', async () => {
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(mockNode('default', undefined, {
+            subagentUsage: [{ totalTokens: 40 }],
+          }), { model: 'parent-model' }),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const resolver = vi.fn().mockReturnValue(4);
+      const opts = mockRunOptions({ costResolver: resolver });
+
+      await run(graph, opts);
+
+      const costEvent = emittedEvents(opts).find(
+        (event) => event.type === 'cost:recorded',
+      );
+      expect(costEvent).toMatchObject({
+        type: 'cost:recorded',
+        model: 'unknown',
+        provenance: 'subagent',
+        tokens: 40,
+      });
+      expect(resolver).toHaveBeenCalledWith(
+        expect.objectContaining({ totalTokens: 40, provenance: 'subagent' }),
+        'unknown',
+      );
+    });
+
+    it('records main usage from failed and successful retry attempts', async () => {
+      const first = usageSession((emit) => queueMicrotask(() => {
+        emit('usage', { totalTokens: 10, model: 'attempt-one' });
+        emit('error', Object.assign(new Error('temporary'), { statusCode: 503 }));
+      }));
+      const second = usageSession((emit) => queueMicrotask(() => {
+        emit('usage', { totalTokens: 20, model: 'attempt-two' });
+        emit('idle');
+      }));
+      const runtime: AgentRuntime = {
+        name: 'retry-usage-runtime',
+        createSession: vi.fn()
+          .mockResolvedValueOnce(first.session)
+          .mockResolvedValueOnce(second.session),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(agent({
+            model: 'parent-model',
+            promptBuilder: () => 'go',
+            retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+          }), { model: 'parent-model' }),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const opts = mockRunOptions({ runtime, costResolver: () => 1 });
+
+      await run(graph, opts);
+
+      const costs = emittedEvents(opts).filter((event) => event.type === 'cost:recorded');
+      expect(costs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ model: 'attempt-one', tokens: 10, provenance: 'main' }),
+        expect.objectContaining({ model: 'attempt-two', tokens: 20, provenance: 'main' }),
+      ]));
+      expect(costs).toHaveLength(2);
+    });
+
+    it('records usage from every failed attempt when retries are exhausted', async () => {
+      const first = usageSession((emit) => queueMicrotask(() => {
+        emit('usage', { totalTokens: 11, model: 'attempt-one' });
+        emit('subagent_end', 'worker', { totalTokens: 3 });
+        emit('error', Object.assign(new Error('first failure'), { statusCode: 500 }));
+      }));
+      const second = usageSession((emit) => queueMicrotask(() => {
+        emit('usage', { totalTokens: 22, model: 'attempt-two' });
+        emit('error', Object.assign(new Error('last failure'), { statusCode: 503 }));
+      }));
+      const runtime: AgentRuntime = {
+        name: 'failed-usage-runtime',
+        createSession: vi.fn()
+          .mockResolvedValueOnce(first.session)
+          .mockResolvedValueOnce(second.session),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      const graph: FlowGraph = {
+        nodes: {
+          A: mockNodeEntry(agent({
+            model: 'parent-model',
+            promptBuilder: () => 'go',
+            retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+          }), { model: 'parent-model' }),
+        },
+        edges: {},
+        start: ['A'],
+      };
+      const opts = mockRunOptions({ runtime, costResolver: () => 1 });
+
+      const result = await run(graph, opts);
+
+      expect(result.completed).toBe(false);
+      const costs = emittedEvents(opts).filter((event) => event.type === 'cost:recorded');
+      expect(costs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ model: 'attempt-one', tokens: 11, provenance: 'main' }),
+        expect.objectContaining({ model: 'attempt-two', tokens: 22, provenance: 'main' }),
+        expect.objectContaining({ model: 'unknown', tokens: 3, provenance: 'subagent' }),
+      ]));
+      expect(costs).toHaveLength(3);
     });
 
     it('parallel start: [A, B] → C (fan-in)', async () => {

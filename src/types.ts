@@ -57,6 +57,12 @@ export interface ExecutionContext {
   readonly nodeId: string;
   readonly runtime: AgentRuntime;
   readonly emitOutput: (event: OutputEvent) => void;
+  /** Scheduler-owned state channel used by agent() for observable session retries. */
+  readonly emitState?: (event: ExecutionEvent) => Promise<void>;
+  /** Shared absolute retry deadline, initialized once per node invocation. */
+  readonly retryDeadlineMs?: number;
+  /** Returns the next monotonic session-attempt number for this node invocation. */
+  readonly nextRetryAttempt?: () => number;
   readonly signal: AbortSignal;
 }
 
@@ -196,13 +202,65 @@ export interface ResumeState {
 // Runtime contract (implemented by CopilotBackend, Claude SDK, etc.)
 // ---------------------------------------------------------------------------
 
+export interface SessionCreationOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface AgentRuntime {
-  createSession(config: SessionConfig): Promise<AgentSession>;
+  createSession(
+    config: SessionConfig,
+    options?: SessionCreationOptions,
+  ): Promise<AgentSession>;
   isAvailable(): Promise<boolean>;
   readonly name: string;
 }
 
 export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+
+export interface RetryMeta {
+  readonly attempt: number;
+  readonly statusCode?: number;
+  readonly errorCode?: string;
+}
+
+/** Opt-in whole-session retry policy. maxAttempts defaults to 1 (no retry). */
+export interface RetryPolicy {
+  readonly maxAttempts?: number;
+  readonly backoffBaseMs?: number;
+  readonly backoffMaxMs?: number;
+  readonly jitter?: boolean;
+  readonly budgetMs?: number;
+  readonly isRetriable?: (error: Error, meta: RetryMeta) => boolean;
+}
+
+/** Minimal structural MCP server configuration accepted by Copilot custom agents. */
+export interface MCPServerConfig {
+  readonly type?: string;
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly tools?: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+export interface CustomAgentConfig {
+  readonly name: string;
+  readonly displayName?: string;
+  readonly description?: string;
+  readonly tools?: readonly string[] | null;
+  readonly prompt: string;
+  readonly mcpServers?: Readonly<Record<string, MCPServerConfig>>;
+  readonly infer?: boolean;
+  readonly skills?: readonly string[];
+  readonly model?: string;
+}
+
+export interface DefaultAgentConfig {
+  readonly excludedTools?: readonly string[];
+  readonly [key: string]: unknown;
+}
 
 export interface SessionConfig {
   readonly model: string;
@@ -219,6 +277,12 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
+  /** Custom subagent roster. A name matching a built-in replaces that built-in. */
+  readonly customAgents?: readonly CustomAgentConfig[];
+  /** Main-agent configuration; excludedTools remains available to subagents. */
+  readonly defaultAgent?: DefaultAgentConfig;
+  /** Built-in subagents unavailable to this session. */
+  readonly excludedBuiltinAgents?: readonly string[];
   /** Set by agent() so a runtime can identify the node; ignored by real backends. */
   readonly nodeId?: string;
   /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
@@ -289,6 +353,14 @@ export interface AgentConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list (SdkBackend only). */
   readonly excludedTools?: readonly string[];
+  /** Whole-session retry policy. Omit or set maxAttempts to 1 for no retries. */
+  readonly retry?: RetryPolicy;
+  /** Custom subagent roster (SdkBackend only). */
+  readonly customAgents?: readonly CustomAgentConfig[];
+  /** Main-agent configuration (SdkBackend only). */
+  readonly defaultAgent?: DefaultAgentConfig;
+  /** Built-in subagents unavailable to this session (SdkBackend only). */
+  readonly excludedBuiltinAgents?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------

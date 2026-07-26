@@ -523,6 +523,106 @@ async function resetLoopRegion(
 }
 
 // ---------------------------------------------------------------------------
+// Usage attribution
+// ---------------------------------------------------------------------------
+
+interface UsageAttribution {
+  readonly usage: Readonly<Record<string, unknown>>;
+  readonly provenance: 'main' | 'subagent';
+}
+
+interface ErrorWithNodeUsage extends Error {
+  readonly nodeUsage?: {
+    readonly attemptUsage?: readonly unknown[];
+    readonly subagentUsage?: readonly unknown[];
+  };
+}
+
+function appendUsageRecords(
+  target: UsageAttribution[],
+  values: unknown,
+  provenance: UsageAttribution['provenance'],
+): void {
+  if (!Array.isArray(values)) return;
+  for (const value of values) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      target.push({
+        usage: value as Readonly<Record<string, unknown>>,
+        provenance,
+      });
+    }
+  }
+}
+
+function usageAttributions(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+): readonly UsageAttribution[] {
+  if (!metadata) return [];
+  const usages: UsageAttribution[] = [];
+  if (Array.isArray(metadata.attemptUsage)) {
+    appendUsageRecords(usages, metadata.attemptUsage, 'main');
+  } else if (
+    metadata.usage &&
+    typeof metadata.usage === 'object' &&
+    !Array.isArray(metadata.usage)
+  ) {
+    usages.push({
+      usage: metadata.usage as Readonly<Record<string, unknown>>,
+      provenance: 'main',
+    });
+  }
+  appendUsageRecords(usages, metadata.subagentUsage, 'subagent');
+  return usages;
+}
+
+function errorUsageAttributions(error: unknown): readonly UsageAttribution[] {
+  if (!(error instanceof Error)) return [];
+  const nodeUsage = (error as ErrorWithNodeUsage).nodeUsage;
+  if (!nodeUsage) return [];
+  const usages: UsageAttribution[] = [];
+  appendUsageRecords(usages, nodeUsage.attemptUsage, 'main');
+  appendUsageRecords(usages, nodeUsage.subagentUsage, 'subagent');
+  return usages;
+}
+
+async function recordUsageCosts(
+  usages: readonly UsageAttribution[],
+  entry: NodeEntry,
+  executionId: string,
+  nodeId: string,
+  costResolver: NonNullable<RunOptions['costResolver']>,
+  emitState: RunOptions['emitState'],
+): Promise<void> {
+  for (const item of usages) {
+    const tokens = Number(
+      item.usage.totalTokens ??
+      ((Number(item.usage.inputTokens) || 0) + (Number(item.usage.outputTokens) || 0)),
+    ) || 0;
+    const reportedModel = typeof item.usage.model === 'string'
+      ? item.usage.model
+      : undefined;
+    const model = item.provenance === 'subagent'
+      ? reportedModel ?? 'unknown'
+      : reportedModel ?? entry.model ?? 'unknown';
+    const usageWithProvenance: Readonly<Record<string, unknown>> = {
+      ...item.usage,
+      provenance: item.provenance,
+    };
+    const cost = costResolver(usageWithProvenance, model);
+    await emitState({
+      type: 'cost:recorded',
+      executionId,
+      nodeId,
+      tokens,
+      model,
+      provenance: item.provenance,
+      cost,
+      ts: Date.now(),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main run loop
 // ---------------------------------------------------------------------------
 
@@ -688,12 +788,17 @@ export async function run(
         const nodeController = new AbortController();
         const nodeSignal = AbortSignal.any([signal, nodeController.signal]);
 
-        // Build ExecutionContext
+        let retryAttempt = 1;
         const execCtx: ExecutionContext = {
           executionId,
           nodeId,
           runtime,
           emitOutput,
+          emitState,
+          nextRetryAttempt: () => {
+            retryAttempt += 1;
+            return retryAttempt;
+          },
           signal: nodeSignal,
         };
 
@@ -780,30 +885,15 @@ export async function run(
           ts: Date.now(),
         });
 
-        if (
-          costResolver &&
-          output.metadata?.usage &&
-          typeof output.metadata.usage === 'object' &&
-          !Array.isArray(output.metadata.usage)
-        ) {
-          const usage = output.metadata.usage as Record<string, unknown>;
-          const tokens = Number(
-            usage.totalTokens ??
-            ((Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0)),
-          ) || 0;
-          const model = (
-            typeof usage.model === 'string' ? usage.model : undefined
-          ) ?? entry.model;
-          const cost = costResolver(usage, model);
-          await emitState({
-            type: 'cost:recorded',
+        if (costResolver) {
+          await recordUsageCosts(
+            usageAttributions(output.metadata),
+            entry,
             executionId,
             nodeId,
-            tokens,
-            model: model ?? 'unknown',
-            cost,
-            ts: Date.now(),
-          });
+            costResolver,
+            emitState,
+          );
         }
 
         // Write artifact if present
@@ -845,6 +935,17 @@ export async function run(
           result.reason instanceof Error
             ? result.reason.message
             : String(result.reason);
+
+        if (costResolver) {
+          await recordUsageCosts(
+            errorUsageAttributions(result.reason),
+            graph.nodes[nodeId],
+            executionId,
+            nodeId,
+            costResolver,
+            emitState,
+          );
+        }
 
         await emitState({
           type: 'node:failed',

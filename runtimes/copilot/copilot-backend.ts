@@ -9,6 +9,34 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
+export interface MCPServerConfig {
+  readonly type?: string;
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly tools?: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+export interface CustomAgentConfig {
+  readonly name: string;
+  readonly displayName?: string;
+  readonly description?: string;
+  readonly tools?: readonly string[] | null;
+  readonly prompt: string;
+  readonly mcpServers?: Readonly<Record<string, MCPServerConfig>>;
+  readonly infer?: boolean;
+  readonly skills?: readonly string[];
+  readonly model?: string;
+}
+
+export interface DefaultAgentConfig {
+  readonly excludedTools?: readonly string[];
+  readonly [key: string]: unknown;
+}
+
 export interface SessionConfig {
   /** Model to use: "claude-opus-4.6", "gpt-5.4", etc. */
   readonly model: string;
@@ -30,6 +58,12 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
+  /** Custom subagent roster (SdkBackend only). */
+  readonly customAgents?: readonly CustomAgentConfig[];
+  /** Main-agent configuration (SdkBackend only). */
+  readonly defaultAgent?: DefaultAgentConfig;
+  /** Built-in subagents unavailable to this session (SdkBackend only). */
+  readonly excludedBuiltinAgents?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -120,9 +154,16 @@ export interface CopilotSession {
   abort(): Promise<void>;
 }
 
+export interface SessionCreationOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface CopilotBackend {
   /** Create a new agent session with the given configuration */
-  createSession(config: SessionConfig): Promise<CopilotSession>;
+  createSession(
+    config: SessionConfig,
+    options?: SessionCreationOptions,
+  ): Promise<CopilotSession>;
 
   /** Check if copilot CLI is available */
   isAvailable(): Promise<boolean>;
