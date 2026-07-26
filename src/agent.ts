@@ -296,6 +296,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     nodeId: ctx.nodeId,
+    memberId: config.memberId,
     artifactFilename: config.output,
   };
 }

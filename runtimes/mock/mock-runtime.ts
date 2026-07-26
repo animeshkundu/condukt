@@ -117,7 +117,13 @@ export class MockRuntime implements AgentRuntime {
       throw new Error('Session creation aborted');
     }
     const nodeKey = this.nodeResolver(config);
-    const nodeConfig = this.configs[nodeKey] ?? {};
+    const memberKey = config.memberId === undefined
+      ? undefined
+      : `${nodeKey}:${config.memberId}`;
+    const fixtureKey = memberKey !== undefined && this.configs[memberKey] !== undefined
+      ? memberKey
+      : nodeKey;
+    const nodeConfig = this.configs[fixtureKey] ?? {};
     // Parity: the node's real configured output (SessionConfig.artifactFilename,
     // set by agent() from config.output) wins so the mock writes where the node
     // actually reads. nodeConfig.artifactFilename is only an override for tests
@@ -129,7 +135,7 @@ export class MockRuntime implements AgentRuntime {
       nodeConfig,
       config.cwd,
       artifactFilename,
-      () => this.claimResponseIndex(nodeKey),
+      () => this.claimResponseIndex(fixtureKey),
     );
   }
 

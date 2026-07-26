@@ -1,4 +1,5 @@
 import type { AgentNodeConfig, AgentNodeSchema } from './agent-node';
+import { FlowAbortedError } from './types';
 import {
   extractJsonCandidates,
   loadReads,
@@ -68,12 +69,14 @@ type MemberResult<V> =
 async function runMember<T, V>(
   config: PanelConfig<T, V>,
   member: PanelMember,
+  memberIndex: number,
   prompt: string,
   input: NodeInput,
   ctx: ExecutionContext,
 ): Promise<MemberResult<V>> {
-  const memberOutput = config.output
-    ?? `.condukt/${ctx.executionId}-${ctx.nodeId}-panel-member.json`;
+  const executionId = encodeURIComponent(ctx.executionId);
+  const nodeId = encodeURIComponent(ctx.nodeId);
+  const memberOutput = `.condukt/${executionId}-${nodeId}-panel-member-${memberIndex}.json`;
   const memberConfig: AgentNodeConfig<V> = {
     prompt,
     model: member.model,
@@ -85,60 +88,61 @@ async function runMember<T, V>(
     customAgents: config.customAgents,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
+    memberId: member.id ?? `member-${memberIndex}`,
   };
 
-  if (!config.memberSchema) {
-    try {
-      removeInvalidOutput(input, memberOutput);
-      const result = await produce(memberConfig, prompt, input, ctx);
-      if (!config.output) removeInvalidOutput(input, memberOutput);
-      return { ok: true, value: (result.artifact ?? result.text) as V };
-    } catch (error) {
-      if (!config.output) removeInvalidOutput(input, memberOutput);
-      return {
-        ok: false,
-        error: error instanceof Error ? error : new Error(String(error)),
-      };
-    }
-  }
-
-  const validator = toValidator(config.memberSchema);
-  let raw = '';
-  let lastError = new Error('Structured output was not produced');
-  const attempts = retryCount(config.structuredRetry) + 1;
-
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const currentPrompt = attempt === 0
-      ? `${prompt}\n\nReturn exactly one valid JSON value with no prose or markdown fences.`
-      : repairPrompt(prompt, raw, lastError);
-    try {
-      removeInvalidOutput(input, memberOutput);
-      const result = await produce(memberConfig, currentPrompt, input, ctx);
-      const issues: string[] = [];
-      for (const source of rawCandidates(result)) {
-        raw = source.raw;
-        let sawCandidate = false;
-        for (const candidate of extractJsonCandidates(source.raw)) {
-          sawCandidate = true;
-          const validated = await validateCandidate(validator, candidate);
-          if (validated.ok) {
-            if (!config.output) removeInvalidOutput(input, memberOutput);
-            return { ok: true, value: validated.value };
-          }
-          issues.push(...validated.issues.map((issue) => `${source.label}: ${issue}`));
-        }
-        if (!sawCandidate) {
-          issues.push(`${source.label}: no valid JSON value was found`);
-        }
+  try {
+    if (!config.memberSchema) {
+      try {
+        removeInvalidOutput(input, memberOutput);
+        const result = await produce(memberConfig, prompt, input, ctx);
+        return { ok: true, value: (result.artifact ?? result.text) as V };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
       }
-      lastError = validationError(issues);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
     }
-  }
 
-  if (!config.output) removeInvalidOutput(input, memberOutput);
-  return { ok: false, error: lastError };
+    const validator = toValidator(config.memberSchema);
+    let raw = '';
+    let lastError = new Error('Structured output was not produced');
+    const attempts = retryCount(config.structuredRetry) + 1;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const currentPrompt = attempt === 0
+        ? `${prompt}\n\nReturn exactly one valid JSON value with no prose or markdown fences.`
+        : repairPrompt(prompt, raw, lastError);
+      try {
+        removeInvalidOutput(input, memberOutput);
+        const result = await produce(memberConfig, currentPrompt, input, ctx);
+        const issues: string[] = [];
+        for (const source of rawCandidates(result)) {
+          raw = source.raw;
+          let sawCandidate = false;
+          for (const candidate of extractJsonCandidates(source.raw)) {
+            sawCandidate = true;
+            const validated = await validateCandidate(validator, candidate);
+            if (validated.ok) {
+              return { ok: true, value: validated.value };
+            }
+            issues.push(...validated.issues.map((issue) => `${source.label}: ${issue}`));
+          }
+          if (!sawCandidate) {
+            issues.push(`${source.label}: no valid JSON value was found`);
+          }
+        }
+        lastError = validationError(issues);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+
+    return { ok: false, error: lastError };
+  } finally {
+    removeInvalidOutput(input, memberOutput);
+  }
 }
 
 function successOutput<T, V>(
@@ -157,8 +161,8 @@ function successOutput<T, V>(
 }
 
 /**
- * Create a sequential multi-agent panel whose successful member verdicts are
- * combined by a caller-supplied reconciliation policy.
+ * Create a concurrent multi-agent panel whose successful member verdicts are
+ * combined in member input order by a caller-supplied reconciliation policy.
  *
  * @experimental Experimental — API may change before it stabilizes into condukt core.
  */
@@ -194,25 +198,40 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
     const prompt = typeof config.prompt === 'string'
       ? config.prompt
       : config.prompt(input, reads);
+    const memberOutcomes = await Promise.all(
+      config.members.map(async (member, memberIndex) => {
+        let result: MemberResult<V>;
+        try {
+          result = await runMember(
+            config,
+            member,
+            memberIndex,
+            prompt,
+            input,
+            memberContext,
+          );
+        } catch (error) {
+          result = {
+            ok: false,
+            error: error instanceof Error ? error : new Error(String(error)),
+          };
+        }
+        return { member, result };
+      }),
+    );
+    if (ctx.signal.aborted) {
+      throw new FlowAbortedError('Panel aborted during member execution');
+    }
     const verdicts: V[] = [];
     const meta: PanelMemberMeta[] = [];
     let lastError = new Error('No panel members produced a verdict');
 
-    for (const member of config.members) {
-      let memberResult: MemberResult<V>;
-      try {
-        memberResult = await runMember(config, member, prompt, input, memberContext);
-      } catch (error) {
-        memberResult = {
-          ok: false,
-          error: error instanceof Error ? error : new Error(String(error)),
-        };
-      }
-      meta.push({ member, ok: memberResult.ok });
-      if (memberResult.ok) {
-        verdicts.push(memberResult.value);
+    for (const { member, result } of memberOutcomes) {
+      meta.push({ member, ok: result.ok });
+      if (result.ok) {
+        verdicts.push(result.value);
       } else {
-        lastError = memberResult.error;
+        lastError = result.error;
       }
     }
 

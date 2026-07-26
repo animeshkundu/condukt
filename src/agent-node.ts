@@ -70,6 +70,8 @@ export interface AgentNodeConfig<T> {
   readonly customAgents?: readonly CustomAgentConfig[];
   readonly defaultAgent?: DefaultAgentConfig;
   readonly excludedBuiltinAgents?: readonly string[];
+  /** Runtime-only identifier used to distinguish concurrent panel members. */
+  readonly memberId?: string;
   readonly route?: (result: T) => string;
   readonly fallback?: (raw: string, error: Error) => T;
   readonly structuredRetry?: number;
@@ -320,6 +322,7 @@ export async function produce<T>(
     customAgents: config.customAgents,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
+    memberId: config.memberId,
     promptBuilder: () => prompt,
   });
   const result = await producer(input, {

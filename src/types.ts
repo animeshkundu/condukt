@@ -285,6 +285,8 @@ export interface SessionConfig {
   readonly excludedBuiltinAgents?: readonly string[];
   /** Set by agent() so a runtime can identify the node; ignored by real backends. */
   readonly nodeId?: string;
+  /** Set by panelNode() so a runtime can identify one panel member; ignored by real backends. */
+  readonly memberId?: string;
   /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
   readonly artifactFilename?: string;
 }
@@ -361,6 +363,8 @@ export interface AgentConfig {
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session (SdkBackend only). */
   readonly excludedBuiltinAgents?: readonly string[];
+  /** Runtime-only panel member identifier; ignored by real backends. */
+  readonly memberId?: string;
 }
 
 // ---------------------------------------------------------------------------

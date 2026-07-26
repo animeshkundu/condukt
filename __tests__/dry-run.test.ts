@@ -233,6 +233,31 @@ describe('dryRun', () => {
     expect(fs.readFileSync(path.join(dir, 'override.txt'), 'utf-8')).toBe('x');
   });
 
+  it('prefers a member fixture and falls back to the existing node fixture', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const runtime = new MockRuntime({
+      node: { artifact: ['node-first', 'node-second'] },
+      'node:member-a': { artifact: 'member-a' },
+    });
+
+    const runSession = async (memberId: string, artifactFilename: string) => {
+      const session = await runtime.createSession(createSessionConfig(dir, {
+        nodeId: 'node',
+        memberId,
+        artifactFilename,
+      }));
+      const idle = new Promise<void>((resolve) => session.on('idle', resolve));
+      session.send('test');
+      await idle;
+      return fs.readFileSync(path.join(dir, artifactFilename), 'utf-8');
+    };
+
+    await expect(runSession('member-a', 'member-a.txt')).resolves.toBe('member-a');
+    await expect(runSession('missing-a', 'fallback-a.txt')).resolves.toBe('node-first');
+    await expect(runSession('missing-b', 'fallback-b.txt')).resolves.toBe('node-second');
+  });
+
   it('reports artifact write failures instead of emitting idle', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
