@@ -15,6 +15,17 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type {
+  CopilotClient as CopilotSdkClient,
+  CopilotSession as CopilotSdkSession,
+  CustomAgentConfig as CopilotSdkCustomAgentConfig,
+  MCPServerConfig as CopilotMcpServerConfig,
+  SessionConfig as CopilotSdkSessionConfig,
+  approveAll as approveAllPermissions,
+  RuntimeConnection as CopilotRuntimeConnection,
+} from '@github/copilot-sdk';
+import type { Logger } from '../../src/types';
+import { NO_OP_LOGGER } from '../../src/types';
+import type {
   CopilotBackend,
   CopilotSession,
   SessionConfig,
@@ -24,6 +35,8 @@ import type {
   PermissionInfo,
 } from './copilot-backend';
 import { classifySdkEvent } from './lifecycle-events';
+import { DEFAULT_SUBAGENT_ROSTER, mergeSubagentRosters } from './subagents';
+import type { SubagentRoster } from './subagents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,58 +44,43 @@ import { classifySdkEvent } from './lifecycle-events';
 
 export interface SdkBackendOptions {
   /** Path to .copilot/mcp.json for MCP server configuration. */
-  mcpConfigPath?: string;
+  readonly mcpConfigPath?: string;
   /** Extra directories to add to PATH (e.g. .tools/bin). */
-  extraPathDirs?: readonly string[];
+  readonly extraPathDirs?: readonly string[];
   /** Additional tool names to resolve and add to PATH (e.g. ['az', 'dotnet']). */
-  pathTools?: readonly string[];
-  /** Project root directory used by the CLI to discover .copilot configuration. */
-  configDir?: string;
+  readonly pathTools?: readonly string[];
+  /** Existing Copilot home/config directory passed through to the SDK untouched. */
+  readonly configDir?: string;
+  /** Opt-in per-agent overrides merged over the stable default roster; omit or pass false for no roster. */
+  readonly subagentRoster?: SubagentRoster | false;
+  /** Receives non-fatal backend diagnostics. */
+  readonly logger?: Logger;
 }
 
 /** Shape of the dynamically imported @github/copilot-sdk module. */
 interface CopilotSdkModule {
-  CopilotClient: new (opts: {
-    useStdio: boolean;
-    autoRestart: boolean;
-    env: Record<string, string | undefined>;
-    logLevel: string;
-  }) => SdkClient;
-  approveAll: (req: unknown) => unknown;
+  readonly CopilotClient: typeof CopilotSdkClient;
+  readonly RuntimeConnection: typeof CopilotRuntimeConnection;
+  readonly approveAll: typeof approveAllPermissions;
 }
 
-interface SdkClient {
-  createSession(config: Record<string, unknown>): Promise<SdkSessionHandle>;
-  stop(): Promise<void>;
-  forceStop(): Promise<void>;
-}
-
-interface SdkSessionHandle {
-  send(msg: { prompt: string }): Promise<string>;  // returns message ID
-  abort(): Promise<void>;  // resolves on acknowledgement; session stays valid for new messages
-  disconnect(): Promise<void>;
-  on(event: string, handler: (e: SdkEvent) => void): void;
-  on(handler: (e: SdkEvent) => void): void;
-  rpc: {
-    mode: {
-      set(opts: { mode: string }): Promise<void>;
-    };
-    compaction: {
-      compact(): Promise<{ success: boolean; tokensRemoved: number; messagesRemoved: number }>;
-    };
-    mcp: {
-      cancelSamplingExecution(opts: { requestId: string }): Promise<unknown>;
-    };
-    ui: {
-      handlePendingAutoModeSwitch(opts: { requestId: string; response: 'yes' | 'yes_always' | 'no' }): Promise<unknown>;
-      handlePendingSessionLimitsExhausted(opts: { requestId: string; response: { action: 'cancel' } }): Promise<unknown>;
-    };
-  };
-}
+type SdkClient = CopilotSdkClient;
+type SdkSessionHandle = CopilotSdkSession;
 
 interface SdkEvent {
-  type?: string;
-  data?: Record<string, unknown>;
+  readonly type?: string;
+  readonly data?: Record<string, unknown>;
+}
+
+function normalizeSdkEvent(event: unknown): SdkEvent {
+  if (typeof event !== 'object' || event === null) return {};
+  const candidate = event as { readonly type?: unknown; readonly data?: unknown };
+  return {
+    ...(typeof candidate.type === 'string' ? { type: candidate.type } : {}),
+    ...(typeof candidate.data === 'object' && candidate.data !== null
+      ? { data: candidate.data as Record<string, unknown> }
+      : {}),
+  };
 }
 
 interface SdkToolRequest {
@@ -170,28 +168,115 @@ function extractArgSummary(args: Record<string, unknown>): string {
  * Parse .copilot/mcp.json format and convert to SDK-compatible MCPServerConfig.
  * Adds `tools: ["*"]` to each entry to enable all tools.
  */
-function parseMcpConfig(configPath: string): Record<string, Record<string, unknown>> | null {
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value);
+  return entries.every((entry): entry is [string, string] => typeof entry[1] === 'string')
+    ? Object.fromEntries(entries)
+    : undefined;
+}
+
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function parseMcpServer(
+  value: unknown,
+  forceAllTools = false,
+): CopilotMcpServerConfig | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entry = value as Record<string, unknown>;
+  const configuredTools = stringArray(entry.tools);
+  const tools = forceAllTools ? ['*'] : configuredTools;
+  const timeout = nonNegativeFiniteNumber(entry.timeout);
+
+  if (entry.type === 'http' || entry.type === 'sse') {
+    if (typeof entry.url !== 'string') return undefined;
+    const headers = stringRecord(entry.headers);
+    return {
+      type: entry.type,
+      url: entry.url,
+      ...(headers !== undefined ? { headers } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(timeout !== undefined ? { timeout } : {}),
+    };
+  }
+
+  if (typeof entry.command !== 'string') return undefined;
+  const args = stringArray(entry.args);
+  const env = stringRecord(entry.env);
+  return {
+    type: entry.type === 'stdio' ? 'stdio' : 'local',
+    command: entry.command,
+    ...(args !== undefined ? { args } : {}),
+    ...(env !== undefined ? { env } : {}),
+    ...(typeof entry.workingDirectory === 'string'
+      ? { workingDirectory: entry.workingDirectory }
+      : {}),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(timeout !== undefined ? { timeout } : {}),
+  };
+}
+
+function parseMcpConfig(configPath: string): Record<string, CopilotMcpServerConfig> | null {
   try {
     if (!fs.existsSync(configPath)) return null;
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-    const servers = (raw.mcpServers ?? raw.servers ?? raw) as Record<string, unknown>;
-    if (!servers || typeof servers !== 'object') return null;
+    const raw: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const root = raw as Record<string, unknown>;
+    const servers = root.mcpServers ?? root.servers ?? root;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return null;
 
-    const result: Record<string, Record<string, unknown>> = {};
+    const result: Record<string, CopilotMcpServerConfig> = {};
     for (const [name, config] of Object.entries(servers)) {
-      if (!config || typeof config !== 'object') continue;
-      const entry = config as Record<string, unknown>;
-      result[name] = {
-        ...entry,
-        type: entry.type === 'stdio' ? 'local' : (entry.type ?? 'local'),
-        tools: ['*'],
-      };
+      const parsed = parseMcpServer(config, true);
+      if (parsed) result[name] = parsed;
     }
     return Object.keys(result).length > 0 ? result : null;
   } catch (err) {
     process.stderr.write(`[SdkBackend] Failed to parse MCP config at ${configPath}: ${err}\n`);
     return null;
   }
+}
+
+function toSdkMcpServers(
+  servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | undefined,
+): Record<string, CopilotMcpServerConfig> | undefined {
+  if (servers === undefined) return undefined;
+  const converted: Record<string, CopilotMcpServerConfig> = {};
+  for (const [name, server] of Object.entries(servers)) {
+    const parsed = parseMcpServer(server);
+    if (parsed) converted[name] = parsed;
+  }
+  return converted;
+}
+
+function toSdkCustomAgent(
+  agent: import('./copilot-backend').CustomAgentConfig,
+): CopilotSdkCustomAgentConfig {
+  return {
+    name: agent.name,
+    prompt: agent.prompt,
+    ...(agent.displayName !== undefined ? { displayName: agent.displayName } : {}),
+    ...(agent.description !== undefined ? { description: agent.description } : {}),
+    ...(agent.tools !== undefined
+      ? { tools: agent.tools === null ? null : [...agent.tools] }
+      : {}),
+    ...(agent.mcpServers !== undefined
+      ? { mcpServers: toSdkMcpServers(agent.mcpServers) }
+      : {}),
+    ...(agent.infer !== undefined ? { infer: agent.infer } : {}),
+    ...(agent.skills !== undefined ? { skills: [...agent.skills] } : {}),
+    ...(agent.model !== undefined ? { model: agent.model } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,15 +302,19 @@ interface SdkEventHandler {
 export class SdkBackend implements CopilotBackend {
   readonly name = 'sdk';
   private readonly mcpConfigPath: string | undefined;
-  private readonly configDir: string | undefined;
+  private readonly configDirectory: string | undefined;
+  private readonly subagentRoster: SubagentRoster | false | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
+  private readonly logger: Logger;
 
   constructor(options: SdkBackendOptions = {}) {
     this.mcpConfigPath = options.mcpConfigPath;
-    this.configDir = options.configDir;
+    this.configDirectory = options.configDir;
+    this.subagentRoster = options.subagentRoster;
     this.extraPathDirs = options.extraPathDirs ?? [];
     this.pathTools = options.pathTools ?? [];
+    this.logger = options.logger ?? NO_OP_LOGGER;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -247,7 +336,15 @@ export class SdkBackend implements CopilotBackend {
     if (options?.signal?.aborted) {
       throw new Error('Session creation aborted');
     }
-    return new SdkSession(config, this.mcpConfigPath, this.configDir, this.extraPathDirs, this.pathTools);
+    return new SdkSession(
+      config,
+      this.mcpConfigPath,
+      this.configDirectory,
+      this.subagentRoster,
+      this.extraPathDirs,
+      this.pathTools,
+      this.logger,
+    );
   }
 }
 
@@ -271,9 +368,11 @@ class SdkSession implements CopilotSession {
   private handlers: SdkEventHandler[] = [];
   private readonly config: SessionConfig;
   private readonly mcpConfigPath: string | undefined;
-  private readonly configDir: string | undefined;
+  private readonly configDirectory: string | undefined;
+  private readonly backendRoster: SubagentRoster | false | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
+  private readonly logger: Logger;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private compactionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -312,15 +411,19 @@ class SdkSession implements CopilotSession {
   constructor(
     config: SessionConfig,
     mcpConfigPath: string | undefined,
-    configDir: string | undefined,
+    configDirectory: string | undefined,
+    backendRoster: SubagentRoster | false | undefined,
     extraPathDirs: readonly string[],
     pathTools: readonly string[],
+    logger: Logger,
   ) {
     this.config = config;
     this.mcpConfigPath = mcpConfigPath;
-    this.configDir = configDir;
+    this.configDirectory = configDirectory;
+    this.backendRoster = backendRoster;
     this.extraPathDirs = extraPathDirs;
     this.pathTools = pathTools;
+    this.logger = logger;
   }
 
   /**
@@ -357,7 +460,7 @@ class SdkSession implements CopilotSession {
     const sdkModuleName = '@github/copilot-sdk';
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
     const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<CopilotSdkModule>;
-    const { CopilotClient, approveAll } = await dynamicImport(sdkModuleName);
+    const { CopilotClient, RuntimeConnection, approveAll } = await dynamicImport(sdkModuleName);
 
     // ---------------------------------------------------------------
     // Build hardened environment (strip NODE_OPTIONS, extend PATH)
@@ -383,8 +486,7 @@ class SdkSession implements CopilotSession {
     // Create CopilotClient (process-per-session: new client each time)
     // ---------------------------------------------------------------
     const client = new CopilotClient({
-      useStdio: true,
-      autoRestart: false, // deprecated in SDK 0.2.0 (no-op), kept for defensive clarity
+      connection: RuntimeConnection.forStdio(),
       env,
       logLevel: 'warning',
     });
@@ -393,81 +495,74 @@ class SdkSession implements CopilotSession {
     // ---------------------------------------------------------------
     // Create SDK session
     // ---------------------------------------------------------------
-    const sessionConfig: Record<string, unknown> = {
+    const sessionRoster = this.config.subagentRoster;
+    let roster: SubagentRoster | false | undefined;
+    if (sessionRoster === false || (sessionRoster === undefined && this.backendRoster === false)) {
+      roster = false;
+    } else if (
+      sessionRoster !== undefined
+      && this.backendRoster !== undefined
+      && this.backendRoster !== false
+    ) {
+      roster = mergeSubagentRosters(
+        DEFAULT_SUBAGENT_ROSTER,
+        mergeSubagentRosters(this.backendRoster, sessionRoster),
+      );
+    } else if (sessionRoster !== undefined) {
+      roster = mergeSubagentRosters(DEFAULT_SUBAGENT_ROSTER, sessionRoster);
+    } else if (this.backendRoster !== undefined && this.backendRoster !== false) {
+      roster = mergeSubagentRosters(DEFAULT_SUBAGENT_ROSTER, this.backendRoster);
+    } else {
+      roster = this.backendRoster;
+    }
+
+    const sessionConfig: CopilotSdkSessionConfig = {
       model: this.config.model,
       streaming: true,
       onPermissionRequest: approveAll,
       workingDirectory: this.config.cwd,
       reasoningEffort: this.config.thinkingBudget,
+      ...(this.config.contextTier !== undefined
+        ? { contextTier: this.config.contextTier }
+        : {}),
+      ...(this.configDirectory !== undefined
+        ? { configDirectory: this.configDirectory }
+        : {}),
+      ...(this.config.systemMessage !== undefined
+        ? { systemMessage: { mode: 'append', content: this.config.systemMessage } }
+        : {}),
+      ...(this.config.availableTools !== undefined
+        ? { availableTools: [...this.config.availableTools] }
+        : {}),
+      ...(this.config.excludedTools !== undefined
+        ? { excludedTools: [...this.config.excludedTools] }
+        : {}),
+      ...(this.config.customAgents !== undefined
+        ? { customAgents: this.config.customAgents.map(toSdkCustomAgent) }
+        : {}),
+      ...(this.config.defaultAgent !== undefined
+        ? {
+            defaultAgent: {
+              ...(this.config.defaultAgent.excludedTools !== undefined
+                ? { excludedTools: [...this.config.defaultAgent.excludedTools] }
+                : {}),
+            },
+          }
+        : {}),
+      ...(this.config.excludedBuiltinAgents !== undefined
+        ? { excludedBuiltinAgents: [...this.config.excludedBuiltinAgents] }
+        : {}),
+      ...(mcpServers !== null ? { mcpServers } : {}),
+      // Enable infinite sessions with automatic context compaction.
+      // Without this, GPT models can go silent when the context window fills.
+      infiniteSessions: {
+        enabled: true,
+        backgroundCompactionThreshold: 0.75,
+        bufferExhaustionThreshold: 0.90,
+      },
       // Registered before createSession issues its RPC, closing the early-event
-      // gap for session.start and *_loaded events. Named payload handlers are
-      // wired after the handle exists; this hook handles class-wide liveness and
-      // future failure-shaped events without duplicating named event output.
-      onEvent: (e: SdkEvent) => this.handleEarlyEvent(e),
-    };
-
-    if (this.config.contextTier) {
-      sessionConfig.contextTier = this.config.contextTier;
-    }
-
-    // CLI 1.0.11+ discovers MCP servers, skills, and custom instructions from
-    // configDir. Without this, the CLI searches workingDirectory (which is often
-    // a temp execution dir) and fails to find the project's .copilot/ config.
-    if (this.configDir) {
-      sessionConfig.configDir = this.configDir;
-    }
-
-    if (this.config.systemMessage) {
-      sessionConfig.systemMessage = {
-        mode: 'append',
-        content: this.config.systemMessage,
-      };
-    }
-
-    if (this.config.availableTools) {
-      sessionConfig.availableTools = [...this.config.availableTools];
-    }
-
-    if (this.config.excludedTools) {
-      sessionConfig.excludedTools = [...this.config.excludedTools];
-    }
-
-    if (this.config.customAgents) {
-      sessionConfig.customAgents = this.config.customAgents.map((customAgent) => ({
-        ...customAgent,
-        ...(customAgent.tools !== undefined && customAgent.tools !== null
-          ? { tools: [...customAgent.tools] }
-          : {}),
-        ...(customAgent.skills !== undefined
-          ? { skills: [...customAgent.skills] }
-          : {}),
-      }));
-    }
-
-    if (this.config.defaultAgent) {
-      sessionConfig.defaultAgent = {
-        ...this.config.defaultAgent,
-        ...(this.config.defaultAgent.excludedTools !== undefined
-          ? { excludedTools: [...this.config.defaultAgent.excludedTools] }
-          : {}),
-      };
-    }
-
-    if (this.config.excludedBuiltinAgents) {
-      sessionConfig.excludedBuiltinAgents = [...this.config.excludedBuiltinAgents];
-    }
-
-    if (mcpServers) {
-      sessionConfig.mcpServers = mcpServers;
-    }
-
-    // Enable infinite sessions with automatic context compaction.
-    // Without this, GPT models silently stop responding after ~140 tool calls
-    // when the context window fills up (no error, no idle — just silence).
-    sessionConfig.infiniteSessions = {
-      enabled: true,
-      backgroundCompactionThreshold: 0.75,
-      bufferExhaustionThreshold: 0.90,
+      // gap for session.start and *_loaded events.
+      onEvent: (event) => this.handleEarlyEvent(normalizeSdkEvent(event)),
     };
 
     const sdkSession = await client.createSession(sessionConfig);
@@ -476,6 +571,20 @@ class SdkSession implements CopilotSession {
       return;
     }
     this._sdkSession = sdkSession;
+
+    // Apply the live override before any prompt can dispatch a subagent.
+    // This experimental RPC degrades safely if the installed CLI rejects it.
+    if (roster !== undefined && roster !== false) {
+      try {
+        await sdkSession.rpc.tools.updateSubagentSettings({
+          subagents: { agents: roster },
+        });
+      } catch (err) {
+        this.logger.warn('Failed to apply Copilot subagent roster; using default settings', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Set autopilot mode explicitly (matches SubprocessBackend's --autopilot flag)
     try {
@@ -748,7 +857,7 @@ class SdkSession implements CopilotSession {
         if (!this.compactionInProgress || !isActive() || !session) return;
         try {
           try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
-          await session.rpc.compaction.compact();
+          await session.rpc.history.compact();
           // Re-check guards after await — session may have been torn down
           if (!this.compactionInProgress || !isActive()) return;
           // If force-compact works, compaction_complete will fire naturally

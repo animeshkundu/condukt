@@ -13,7 +13,7 @@ import type {
   SessionConfig,
 } from '../src/types';
 import type { OutputEvent } from '../src/events';
-import { FlowAbortedError } from '../src/types';
+import { DEFAULT_RETRY_POLICY, FlowAbortedError } from '../src/types';
 import {
   agent,
   isRetriableModelError,
@@ -145,12 +145,14 @@ describe('agent factory', () => {
         availableTools: undefined,
         excludedTools: undefined,
         customAgents: undefined,
+        subagentRoster: undefined,
         defaultAgent: undefined,
         excludedBuiltinAgents: undefined,
         nodeId: 'node-1',
+        memberId: undefined,
         artifactFilename: undefined,
       },
-      { signal: ctx.signal },
+      expect.objectContaining({ signal: expect.anything() }),
     );
   });
 
@@ -653,7 +655,7 @@ describe('agent factory', () => {
     expect(mockRuntime.createSession).toHaveBeenCalledOnce();
   });
 
-  it('preserves default no-retry behavior', async () => {
+  it('preserves one-attempt behavior when no retry policy is configured', async () => {
     mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
       'error', Object.assign(new Error('transient'), { statusCode: 503 }),
     )));
@@ -662,6 +664,70 @@ describe('agent factory', () => {
       createMockInput(), createMockContext(mockRuntime),
     )).rejects.toThrow('transient');
     expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('retries transient failures with the exported default policy', async () => {
+    vi.useFakeTimers();
+    try {
+      const failed = createMockSession();
+      const succeeded = createMockSession();
+      const runtime: AgentRuntime = {
+        name: 'default-retry-runtime',
+        createSession: vi.fn()
+          .mockResolvedValueOnce(failed as unknown as AgentSession)
+          .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      failed.send.mockImplementation(() => queueMicrotask(() => failed._emit(
+        'error', Object.assign(new Error('transient'), { statusCode: 503 }),
+      )));
+      succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+      const run = agent({
+        promptBuilder: () => 'go',
+        retry: DEFAULT_RETRY_POLICY,
+      })(createMockInput(), createMockContext(runtime));
+      await vi.advanceTimersByTimeAsync(5_000);
+      await run;
+
+      expect(runtime.createSession).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses maxAttempts 1 to disable an explicit retry policy', async () => {
+    mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+      'error', Object.assign(new Error('transient'), { statusCode: 503 }),
+    )));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { ...DEFAULT_RETRY_POLICY, maxAttempts: 1 },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow('transient');
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('bounds the default retry deadline to the node timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSession.send.mockImplementation(() => queueMicrotask(() => mockSession._emit(
+        'error', Object.assign(new Error('transient'), { statusCode: 503 }),
+      )));
+
+      const run = agent({
+        promptBuilder: () => 'go',
+        timeout: 1,
+        retry: { backoffBaseMs: 5_000, jitter: false },
+      })(createMockInput(), createMockContext(mockRuntime));
+      const rejected = expect(run).rejects.toThrow('transient');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await rejected;
+      expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('records subagent model and token usage in node metadata', async () => {

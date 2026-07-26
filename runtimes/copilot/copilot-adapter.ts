@@ -71,6 +71,9 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.customAgents !== undefined
           ? { customAgents: config.customAgents }
           : {}),
+        ...(config.subagentRoster !== undefined
+          ? { subagentRoster: config.subagentRoster }
+          : {}),
         ...(config.defaultAgent !== undefined
           ? { defaultAgent: config.defaultAgent }
           : {}),

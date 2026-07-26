@@ -35,13 +35,19 @@ export type {
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
   AgentRuntime, AgentSession, SessionConfig, SessionCreationOptions, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
-  RetryPolicy, RetryMeta, MCPServerConfig, CustomAgentConfig, DefaultAgentConfig,
+  RetryPolicy, RetryMeta, MCPServerConfig, CustomAgentConfig, DefaultAgentConfig, SubagentRosterOption,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,
 } from './types';
 
-export { getParams, FlowAbortedError, FlowValidationError, NO_OP_LOGGER } from './types';
+export {
+  DEFAULT_RETRY_POLICY,
+  getParams,
+  FlowAbortedError,
+  FlowValidationError,
+  NO_OP_LOGGER,
+} from './types';
 
 // Events
 export type {

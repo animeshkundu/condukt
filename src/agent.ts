@@ -293,6 +293,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     ),
     excludedTools: config.excludedTools,
     customAgents: config.customAgents,
+    subagentRoster: config.subagentRoster,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     nodeId: ctx.nodeId,
@@ -553,7 +554,9 @@ export function agent(config: AgentConfig): NodeFn {
       const policy = config.retry ?? {};
       const maxAttempts = positiveInteger(policy.maxAttempts, DEFAULT_MAX_ATTEMPTS);
       const budgetMs = policy.budgetMs === undefined
-        ? undefined
+        ? config.retry === undefined
+          ? undefined
+          : (config.timeout ?? 3600) * 1000
         : nonNegativeFinite(policy.budgetMs, 0);
       const retryDeadlineMs = ctx.retryDeadlineMs
         ?? (budgetMs === undefined ? undefined : Date.now() + budgetMs);

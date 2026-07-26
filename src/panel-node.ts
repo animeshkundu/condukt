@@ -22,6 +22,7 @@ import type {
   NodeInput,
   NodeOutput,
   RetryPolicy,
+  SubagentRosterOption,
 } from './types';
 
 export interface PanelMember {
@@ -57,6 +58,7 @@ export interface PanelConfig<T, V = unknown> {
   readonly isolation?: boolean;
   readonly retry?: RetryPolicy;
   readonly customAgents?: readonly CustomAgentConfig[];
+  readonly subagentRoster?: SubagentRosterOption;
   readonly defaultAgent?: DefaultAgentConfig;
   readonly excludedBuiltinAgents?: readonly string[];
   readonly structuredRetry?: number;
@@ -86,6 +88,7 @@ async function runMember<T, V>(
     isolation: config.isolation,
     retry: config.retry,
     customAgents: config.customAgents,
+    subagentRoster: config.subagentRoster,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     memberId: member.id ?? `member-${memberIndex}`,
@@ -183,14 +186,15 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
           },
         };
     const retryBudgetMs = config.retry?.budgetMs;
-    const retryDeadlineMs = panelContext.retryDeadlineMs
-      ?? (retryBudgetMs === undefined
+    const retryWindowMs = retryBudgetMs === undefined
+      ? config.retry === undefined
         ? undefined
-        : Date.now() + (
-            Number.isFinite(retryBudgetMs)
-              ? Math.max(0, retryBudgetMs)
-              : 0
-          ));
+        : (config.timeout ?? 3600) * 1000
+      : Number.isFinite(retryBudgetMs)
+        ? Math.max(0, retryBudgetMs)
+        : 0;
+    const retryDeadlineMs = panelContext.retryDeadlineMs
+      ?? (retryWindowMs === undefined ? undefined : Date.now() + retryWindowMs);
     const memberContext = retryDeadlineMs === undefined
       ? panelContext
       : { ...panelContext, retryDeadlineMs };

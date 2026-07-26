@@ -6,7 +6,10 @@
  * One composition: FlowGraph + run()
  */
 
+import type { SubagentRosterOption } from '../runtimes/copilot/subagents';
 import type { ExecutionEvent, OutputEvent } from './events';
+
+export type { SubagentRosterOption } from '../runtimes/copilot/subagents';
 
 // ---------------------------------------------------------------------------
 // Branded types (opt-in — structural, zero runtime cost)
@@ -223,7 +226,15 @@ export interface RetryMeta {
   readonly errorCode?: string;
 }
 
-/** Opt-in whole-session retry policy. maxAttempts defaults to 1 (no retry). */
+/**
+ * Opt-in whole-session retry policy. A failed attempt creates a fresh session
+ * and replays the prompt. This is safe for read/produce nodes. Nodes that
+ * perform external side effects should be idempotent-by-lookup or set
+ * maxAttempts to 1 so a retry cannot repeat a push, PR creation, or mutation.
+ *
+ * When a policy omits budgetMs, its retry deadline is the node timeout. Omitting
+ * the policy itself preserves the upgrade-safe one-attempt behavior.
+ */
 export interface RetryPolicy {
   readonly maxAttempts?: number;
   readonly backoffBaseMs?: number;
@@ -232,6 +243,18 @@ export interface RetryPolicy {
   readonly budgetMs?: number;
   readonly isRetriable?: (error: Error, meta: RetryMeta) => boolean;
 }
+
+/**
+ * Batteries-included retry policy for consumers that explicitly opt in.
+ * Spread this object to override individual fields. See RetryPolicy for the
+ * external-side-effect warning; budgetMs intentionally derives from node timeout.
+ */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts: 4,
+  backoffBaseMs: 5_000,
+  backoffMaxMs: 120_000,
+  jitter: true,
+};
 
 /** Minimal structural MCP server configuration accepted by Copilot custom agents. */
 export interface MCPServerConfig {
@@ -242,6 +265,7 @@ export interface MCPServerConfig {
   readonly url?: string;
   readonly headers?: Readonly<Record<string, string>>;
   readonly tools?: readonly string[];
+  readonly timeout?: number;
   readonly [key: string]: unknown;
 }
 
@@ -259,7 +283,6 @@ export interface CustomAgentConfig {
 
 export interface DefaultAgentConfig {
   readonly excludedTools?: readonly string[];
-  readonly [key: string]: unknown;
 }
 
 export interface SessionConfig {
@@ -277,8 +300,10 @@ export interface SessionConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list: these tools are excluded (SdkBackend only). */
   readonly excludedTools?: readonly string[];
-  /** Custom subagent roster. A name matching a built-in replaces that built-in. */
+  /** Custom subagent definitions. A name matching a built-in replaces that built-in. */
   readonly customAgents?: readonly CustomAgentConfig[];
+  /** Provider-specific subagent model/settings roster, or false to opt out. */
+  readonly subagentRoster?: SubagentRosterOption;
   /** Main-agent configuration; excludedTools remains available to subagents. */
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session. */
@@ -355,10 +380,12 @@ export interface AgentConfig {
   readonly availableTools?: readonly string[];
   /** Tool deny-list (SdkBackend only). */
   readonly excludedTools?: readonly string[];
-  /** Whole-session retry policy. Omit or set maxAttempts to 1 for no retries. */
+  /** Opt-in whole-session retry policy. Use DEFAULT_RETRY_POLICY for batteries-included behavior. */
   readonly retry?: RetryPolicy;
-  /** Custom subagent roster (SdkBackend only). */
+  /** Custom subagent definitions (SdkBackend only). */
   readonly customAgents?: readonly CustomAgentConfig[];
+  /** Provider-specific subagent model/settings roster, or false to opt out. */
+  readonly subagentRoster?: SubagentRosterOption;
   /** Main-agent configuration (SdkBackend only). */
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session (SdkBackend only). */
