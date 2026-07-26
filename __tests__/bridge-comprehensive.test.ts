@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createBridge } from '../bridge/bridge';
+import { _buildResumeStateForTesting, createBridge } from '../bridge/bridge';
 import { StateRuntime } from '../state/state-runtime';
 import { MemoryStorage } from '../state/storage-memory';
 import { resolveGate, _getGateRegistryForTesting } from '../src/nodes';
@@ -281,6 +281,112 @@ describe('bridge — resume', () => {
 
     const finalProj = stateRuntime.getProjection('resume-test');
     expect(finalProj!.status).toBe('completed');
+  });
+
+  it('reconstructs legacy and LoopRegion iteration keys', async () => {
+    const executionId = 'resume-loop-keys';
+    const graph: FlowGraph = {
+      nodes: {
+        legacyEntry: mkEntry(async () => ({ action: 'default' })),
+        legacyDecision: mkEntry(async () => ({ action: 'retry' })),
+        regionEntry: mkEntry(async () => ({ action: 'default' })),
+        regionDecision: mkEntry(async () => ({ action: 'continue' })),
+      },
+      edges: {
+        legacyEntry: { default: 'legacyDecision' },
+        legacyDecision: { retry: 'legacyEntry' },
+        regionEntry: { default: 'regionDecision' },
+        regionDecision: { continue: 'regionEntry', exit: 'end' },
+      },
+      start: ['legacyEntry', 'regionEntry'],
+      loopFallback: {
+        'legacyDecision:retry': {
+          source: 'legacyDecision',
+          action: 'retry',
+          fallbackTarget: 'end',
+          maxIterations: 3,
+        },
+      },
+      loops: [{
+        id: 'review',
+        nodes: ['regionEntry', 'regionDecision'],
+        entry: 'regionEntry',
+        decision: 'regionDecision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 4,
+      }],
+    };
+    const events = [
+      {
+        type: 'edge:traversed' as const,
+        executionId,
+        source: 'legacyDecision',
+        target: 'legacyEntry',
+        action: 'retry',
+        ts: 1,
+      },
+      {
+        type: 'node:reset' as const,
+        executionId,
+        nodeId: 'legacyEntry',
+        reason: 'loop-back' as const,
+        iteration: 2,
+        sourceNodeId: 'legacyDecision',
+        ts: 2,
+      },
+      {
+        type: 'node:reset' as const,
+        executionId,
+        nodeId: 'legacyDecision',
+        reason: 'loop-back' as const,
+        iteration: 1,
+        sourceNodeId: 'legacyDecision',
+        ts: 3,
+      },
+      {
+        type: 'edge:traversed' as const,
+        executionId,
+        source: 'regionDecision',
+        target: 'regionEntry',
+        action: 'continue',
+        ts: 4,
+      },
+      {
+        type: 'node:reset' as const,
+        executionId,
+        nodeId: 'regionEntry',
+        reason: 'loop-back' as const,
+        iteration: 3,
+        sourceNodeId: 'regionDecision',
+        ts: 5,
+      },
+      {
+        type: 'node:reset' as const,
+        executionId,
+        nodeId: 'regionDecision',
+        reason: 'loop-back' as const,
+        iteration: 2,
+        sourceNodeId: 'regionDecision',
+        ts: 6,
+      },
+    ];
+    const projection: ExecutionProjection = {
+      id: executionId,
+      flowId: '',
+      status: 'stopped',
+      params: {},
+      graph: { nodes: [], edges: [], activeNodes: [], completedPath: [] },
+      totalCost: 0,
+      metadata: {},
+    };
+
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(Object.fromEntries(state.loopIterations)).toEqual({
+      'legacyDecision:retry': 2,
+      'region:review': 3,
+    });
   });
 
   it('resume on completed execution throws', async () => {

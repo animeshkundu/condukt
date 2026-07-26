@@ -23,8 +23,12 @@ import type {
 import { FlowAbortedError } from '../src/types';
 import { run, computeFrontier } from '../src/scheduler';
 import { resolveGate } from '../src/nodes';
+import {
+  createConsoleOutputRenderer,
+  type OutputEventSink,
+} from '../src/console-output';
 import type { StateRuntime } from '../state/state-runtime';
-import type { ExecutionEvent } from '../src/events';
+import type { ExecutionEvent, OutputEvent } from '../src/events';
 
 const MAX_CONCURRENT = 10;
 
@@ -51,6 +55,14 @@ export interface LaunchParams {
   readonly params: Record<string, unknown>;
 }
 
+export interface BridgeOptions {
+  /**
+   * Receives streamed output after state capture. Defaults to an attributed
+   * plain-text stdout renderer. Pass false to silence bridge console output.
+   */
+  readonly emitOutput?: OutputEventSink | false;
+}
+
 // ---------------------------------------------------------------------------
 // Bridge factory
 // ---------------------------------------------------------------------------
@@ -58,7 +70,38 @@ export interface LaunchParams {
 export function createBridge(
   runtime: AgentRuntime,
   stateRuntime: StateRuntime,
+  options?: BridgeOptions,
 ): BridgeApi {
+  const consoleRenderer = options?.emitOutput === undefined
+    ? createConsoleOutputRenderer()
+    : null;
+  const outputSink = options?.emitOutput === undefined
+    ? consoleRenderer?.emitOutput
+    : options.emitOutput || undefined;
+
+  function handleOutput(event: OutputEvent): void {
+    stateRuntime.handleOutput(event);
+    try {
+      outputSink?.(event);
+    } catch {
+      // Consumer output sinks must not interrupt an execution.
+    }
+  }
+
+  function flushNodeOutput(event: ExecutionEvent): void {
+    if (
+      event.type === 'node:completed'
+      || event.type === 'node:failed'
+      || event.type === 'node:killed'
+    ) {
+      consoleRenderer?.flushNode(event.executionId, event.nodeId);
+    }
+  }
+
+  async function handleState(event: ExecutionEvent): Promise<void> {
+    await stateRuntime.handleEvent(event);
+    flushNodeOutput(event);
+  }
 
   // ARCH-2: Track running executions per-bridge (not module-level)
   const runningExecutions = new Map<string, {
@@ -92,12 +135,8 @@ export function createBridge(
       dir,
       params: paramsWithDir,
       runtime,
-      emitState: async (event) => {
-        await stateRuntime.handleEvent(event);
-      },
-      emitOutput: (event) => {
-        stateRuntime.handleOutput(event);
-      },
+      emitState: handleState,
+      emitOutput: handleOutput,
       signal: controller.signal,
     };
 
@@ -118,6 +157,7 @@ export function createBridge(
           ts: Date.now(),
         });
       } finally {
+        consoleRenderer?.flushExecution(executionId);
         runningExecutions.delete(executionId);
       }
     })();
@@ -156,7 +196,7 @@ export function createBridge(
 
     // Build ResumeState from projection + events (for loopIterations reconstruction)
     const events = stateRuntime.readEvents(executionId);
-    const resumeState = buildResumeState(projection, events);
+    const resumeState = buildResumeState(projection, graph, events);
     const frontier = computeFrontier(graph, resumeState);
 
     if (frontier.length === 0) return null;
@@ -173,12 +213,8 @@ export function createBridge(
       dir,
       params: projection.params,
       runtime,
-      emitState: async (event) => {
-        await stateRuntime.handleEvent(event);
-      },
-      emitOutput: (event) => {
-        stateRuntime.handleOutput(event);
-      },
+      emitState: handleState,
+      emitOutput: handleOutput,
       signal: controller.signal,
       resumeFrom: resumeState,
     };
@@ -196,6 +232,7 @@ export function createBridge(
           });
         }
       } finally {
+        consoleRenderer?.flushExecution(executionId);
         runningExecutions.delete(executionId);
       }
     })();
@@ -237,7 +274,7 @@ export function createBridge(
 
     // Build ResumeState: mark this node + downstream as pending
     const retryEvents = stateRuntime.readEvents(executionId);
-    const resumeState = buildResumeState(projection, retryEvents);
+    const resumeState = buildResumeState(projection, graph, retryEvents);
     // Remove the retried node and its downstream from completedNodes
     resetNodeAndDownstream(resumeState, nodeId, graph);
 
@@ -270,12 +307,8 @@ export function createBridge(
       dir: (projection.params.__flow as { dir: string } | undefined)?.dir ?? '.',
       params: projection.params,
       runtime,
-      emitState: async (event) => {
-        await stateRuntime.handleEvent(event);
-      },
-      emitOutput: (event) => {
-        stateRuntime.handleOutput(event);
-      },
+      emitState: handleState,
+      emitOutput: handleOutput,
       signal: controller.signal,
       resumeFrom: resumeState,
       retryContexts: { [nodeId]: retryContext },
@@ -294,6 +327,7 @@ export function createBridge(
           });
         }
       } finally {
+        consoleRenderer?.flushExecution(executionId);
         runningExecutions.delete(executionId);
       }
     })();
@@ -372,6 +406,7 @@ export function createBridge(
 
 function buildResumeState(
   projection: ExecutionProjection,
+  graph: FlowGraph,
   events?: readonly ExecutionEvent[],
 ): ResumeState {
   const completedNodes = new Map<string, { action: string; finishedAt: number }>();
@@ -399,10 +434,12 @@ function buildResumeState(
   }
 
   // Reconstruct loopIterations from node:reset events.
-  // The scheduler keys are source:action, but NodeResetEvent doesn't carry the action.
-  // Cross-reference with edge:traversed events to reconstruct the action.
+  // Loop regions key by region:id; legacy loops key by source:action.
   const loopIterations = new Map<string, number>();
   if (events) {
+    const loopRegionsByDecision = new Map(
+      (graph.loops ?? []).map(region => [region.decision, region] as const),
+    );
     // Build a map of (source, target) → action from edge:traversed events
     const edgeActions = new Map<string, string>();
     for (const event of events) {
@@ -413,10 +450,14 @@ function buildResumeState(
 
     for (const event of events) {
       if (event.type === 'node:reset') {
-        // Find the action for this source→target edge
+        const region = loopRegionsByDecision.get(event.sourceNodeId);
         const action = edgeActions.get(`${event.sourceNodeId}:${event.nodeId}`);
-        if (action) {
-          const key = `${event.sourceNodeId}:${action}`;
+        const key = region
+          ? `region:${region.id}`
+          : action
+            ? `${event.sourceNodeId}:${action}`
+            : undefined;
+        if (key) {
           const current = loopIterations.get(key) ?? 0;
           if (event.iteration > current) {
             loopIterations.set(key, event.iteration);
@@ -428,6 +469,8 @@ function buildResumeState(
 
   return { completedNodes, firedEdges, nodeStatuses, loopIterations };
 }
+
+export const _buildResumeStateForTesting = buildResumeState;
 
 function resetNodeAndDownstream(
   state: ResumeState,
