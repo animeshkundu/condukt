@@ -204,6 +204,39 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
+  it('forwards subagent configuration to the SDK session', async () => {
+    const backend = new SdkBackend();
+    const session = await backend.createSession({
+      model: 'test-model',
+      cwd: '.',
+      addDirs: [],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+      customAgents: [{
+        name: 'worker',
+        prompt: 'Do bounded work.',
+        tools: [],
+        model: 'cheap-model',
+      }],
+      defaultAgent: { excludedTools: ['task'] },
+      excludedBuiltinAgents: ['explore'],
+    });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        customAgents: [{
+          name: 'worker',
+          prompt: 'Do bounded work.',
+          tools: [],
+          model: 'cheap-model',
+        }],
+        defaultAgent: { excludedTools: ['task'] },
+        excludedBuiltinAgents: ['explore'],
+      }));
+    });
+  });
+
   it('treats SDK 0.2 lifecycle events as informational without changing turn state', async () => {
     const { session, mock } = await createTestSession();
     const idleHandler = vi.fn();
@@ -737,12 +770,31 @@ describe('SdkBackend event mapping', () => {
     expect(errorHandler).toHaveBeenCalledOnce();
     expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining('transient upstream failure'),
+      statusCode: 503,
     }));
     expect(idleHandler).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(mock.abort).toHaveBeenCalledOnce();
       expect(mock.disconnect).toHaveBeenCalledOnce();
     });
+  });
+
+  it('preserves string status codes from model.call_failure', async () => {
+    const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+
+    await new Promise(r => setTimeout(r, 50));
+    mock._emit('model.call_failure', {
+      errorMessage: 'unauthorized',
+      statusCode: '401',
+    });
+
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('HTTP 401'),
+      statusCode: '401',
+    }));
   });
 
   it('fails an abort-only turn after a short grace window', async () => {

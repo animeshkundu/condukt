@@ -1,9 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { agentNode, dryRun, toValidator } from '../src';
-import type { FlowGraph, NodeEntry } from '../src/types';
+import type {
+  AgentRuntime,
+  AgentSession,
+  ExecutionContext,
+  FlowGraph,
+  NodeEntry,
+  NodeInput,
+} from '../src/types';
 
 interface StructuredResult {
   readonly status: string;
@@ -398,5 +405,144 @@ describe('agentNode', () => {
       ok: false,
       issues: ['result: Expected a structured result'],
     });
+  });
+
+  it('shares one retry deadline across structured repair sends', async () => {
+    vi.useFakeTimers();
+    try {
+      const input: NodeInput = { dir: createTmpDir(), params: {}, artifactPaths: {} };
+      dirs.push(input.dir);
+      const sendTimes: number[] = [];
+      const abortCalls: Array<ReturnType<typeof vi.fn>> = [];
+      const runtime: AgentRuntime = {
+        name: 'structured-deadline-runtime',
+        createSession: vi.fn().mockImplementation(async () => {
+          const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+          const abort = vi.fn().mockImplementation(async () => {
+            for (const handler of handlers.get('error') ?? []) {
+              handler(new Error('session aborted'));
+            }
+          });
+          abortCalls.push(abort);
+          return {
+            pid: null,
+            send: () => {
+              sendTimes.push(Date.now());
+              const delay = sendTimes.length === 1 ? 60 : 80;
+              setTimeout(() => {
+                for (const handler of handlers.get('text') ?? []) handler('not JSON');
+                for (const handler of handlers.get('idle') ?? []) handler();
+              }, delay);
+            },
+            on: (event: string, handler: (...args: unknown[]) => void) => {
+              handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+            },
+            abort,
+          } as unknown as AgentSession;
+        }),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      const entry = agentNode({
+        prompt: 'Return a result',
+        model: 'mock-model',
+        schema: parseStructured,
+        structuredRetry: 1,
+        retry: { budgetMs: 100 },
+      });
+      const context: ExecutionContext = {
+        executionId: 'structured-deadline',
+        nodeId: 'repair',
+        runtime,
+        emitOutput: vi.fn(),
+        signal: new AbortController().signal,
+      };
+
+      const resultPromise = entry.fn(input, context);
+      const resultExpectation = expect(resultPromise).rejects.toThrow('session aborted');
+      await vi.advanceTimersByTimeAsync(100);
+      await resultExpectation;
+
+      expect(sendTimes).toHaveLength(2);
+      expect(sendTimes[1] - sendTimes[0]).toBe(60);
+      expect(runtime.createSession).toHaveBeenCalledTimes(2);
+      expect(abortCalls[1]).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits monotonic retry attempts across structured repair sends', async () => {
+    vi.useFakeTimers();
+    try {
+      const input: NodeInput = { dir: createTmpDir(), params: {}, artifactPaths: {} };
+      dirs.push(input.dir);
+      const responses = [
+        { kind: 'error' as const },
+        { kind: 'invalid' as const },
+        { kind: 'error' as const },
+        { kind: 'valid' as const },
+      ];
+      const runtime: AgentRuntime = {
+        name: 'monotonic-retry-runtime',
+        createSession: vi.fn().mockImplementation(async () => {
+          const response = responses.shift();
+          const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+          return {
+            pid: null,
+            send: () => queueMicrotask(() => {
+              if (response?.kind === 'error') {
+                for (const handler of handlers.get('error') ?? []) {
+                  handler(Object.assign(new Error('temporary'), { statusCode: 503 }));
+                }
+                return;
+              }
+              const text = response?.kind === 'valid'
+                ? '{"status":"done","count":1}'
+                : 'not JSON';
+              for (const handler of handlers.get('text') ?? []) handler(text);
+              for (const handler of handlers.get('idle') ?? []) handler();
+            }),
+            on: (event: string, handler: (...args: unknown[]) => void) => {
+              handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+            },
+            abort: vi.fn().mockResolvedValue(undefined),
+          } as unknown as AgentSession;
+        }),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
+      let retryAttempt = 1;
+      const emitState = vi.fn().mockResolvedValue(undefined);
+      const entry = agentNode({
+        prompt: 'Return a result',
+        model: 'mock-model',
+        schema: parseStructured,
+        structuredRetry: 1,
+        retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+      });
+      const context: ExecutionContext = {
+        executionId: 'monotonic-retry',
+        nodeId: 'repair',
+        runtime,
+        emitOutput: vi.fn(),
+        emitState,
+        nextRetryAttempt: () => {
+          retryAttempt += 1;
+          return retryAttempt;
+        },
+        signal: new AbortController().signal,
+      };
+
+      const resultPromise = entry.fn(input, context);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result.action).toBe('default');
+      const attempts = emitState.mock.calls.map(([event]) => (
+        event as { readonly attempt: number }
+      ).attempt);
+      expect(attempts).toEqual([2, 3]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

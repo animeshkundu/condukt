@@ -6,7 +6,12 @@
  * that need a controllable runtime without real subprocesses.
  */
 
-import type { AgentRuntime, AgentSession, SessionConfig } from '../../src/types';
+import type {
+  AgentRuntime,
+  AgentSession,
+  SessionConfig,
+  SessionCreationOptions,
+} from '../../src/types';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -25,8 +30,8 @@ export interface MockNodeConfig {
   readonly artifact?: string | readonly string[];
   /** Override the SessionConfig-derived artifact filename. */
   readonly artifactFilename?: string;
-  /** If provided, emit this error instead of idle. */
-  readonly error?: Error;
+  /** Error to emit instead of idle, or one error/success value per send. */
+  readonly error?: Error | readonly (Error | undefined)[];
   /** Delay in milliseconds before emitting events (simulates work). */
   readonly delay?: number;
 }
@@ -70,6 +75,14 @@ function resolveArtifact(
   return sequenceValue(configured, responseIndex);
 }
 
+function resolveError(
+  configured: MockNodeConfig['error'],
+  responseIndex: number,
+): Error | undefined {
+  if (configured === undefined || configured instanceof Error) return configured;
+  return sequenceValue(configured, responseIndex);
+}
+
 /**
  * A deterministic mock runtime that replays configured events per node.
  *
@@ -96,9 +109,21 @@ export class MockRuntime implements AgentRuntime {
     return true;
   }
 
-  async createSession(config: SessionConfig): Promise<AgentSession> {
+  async createSession(
+    config: SessionConfig,
+    options?: SessionCreationOptions,
+  ): Promise<AgentSession> {
+    if (options?.signal?.aborted) {
+      throw new Error('Session creation aborted');
+    }
     const nodeKey = this.nodeResolver(config);
-    const nodeConfig = this.configs[nodeKey] ?? {};
+    const memberKey = config.memberId === undefined
+      ? undefined
+      : `${nodeKey}:${config.memberId}`;
+    const fixtureKey = memberKey !== undefined && this.configs[memberKey] !== undefined
+      ? memberKey
+      : nodeKey;
+    const nodeConfig = this.configs[fixtureKey] ?? {};
     // Parity: the node's real configured output (SessionConfig.artifactFilename,
     // set by agent() from config.output) wins so the mock writes where the node
     // actually reads. nodeConfig.artifactFilename is only an override for tests
@@ -110,7 +135,7 @@ export class MockRuntime implements AgentRuntime {
       nodeConfig,
       config.cwd,
       artifactFilename,
-      () => this.claimResponseIndex(nodeKey),
+      () => this.claimResponseIndex(fixtureKey),
     );
   }
 
@@ -193,8 +218,9 @@ class MockAgentSession implements AgentSession {
       if (this.aborted) return;
 
       // Emit error or idle
-      if (this.nodeConfig.error) {
-        this.emit('error', this.nodeConfig.error);
+      const error = resolveError(this.nodeConfig.error, responseIndex);
+      if (error) {
+        this.emit('error', error);
       } else {
         this.emit('idle');
       }

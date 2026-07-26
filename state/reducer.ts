@@ -50,9 +50,9 @@ function updateNode(
   const nodes = state.graph.nodes.map((n) =>
     n.id === nodeId ? updater(n) : n,
   );
-  // Recalculate activeNodes: nodes with status 'running' or 'gated'
+  // Recalculate activeNodes: nodes currently executing, waiting, or retrying.
   const activeNodes = nodes
-    .filter((n) => n.status === 'running' || n.status === 'gated')
+    .filter((n) => n.status === 'running' || n.status === 'gated' || n.status === 'retrying')
     .map((n) => n.id);
   return {
     ...state,

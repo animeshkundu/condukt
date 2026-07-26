@@ -6,6 +6,9 @@ import type {
   NodeEntry,
   NodeInput,
   NodeOutput,
+  CustomAgentConfig,
+  DefaultAgentConfig,
+  RetryPolicy,
   ThinkingBudget,
   ToolRef,
 } from './types';
@@ -63,6 +66,12 @@ export interface AgentNodeConfig<T> {
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly tools?: readonly ToolRef[] | readonly string[];
+  readonly retry?: RetryPolicy;
+  readonly customAgents?: readonly CustomAgentConfig[];
+  readonly defaultAgent?: DefaultAgentConfig;
+  readonly excludedBuiltinAgents?: readonly string[];
+  /** Runtime-only identifier used to distinguish concurrent panel members. */
+  readonly memberId?: string;
   readonly route?: (result: T) => string;
   readonly fallback?: (raw: string, error: Error) => T;
   readonly structuredRetry?: number;
@@ -309,6 +318,11 @@ export async function produce<T>(
     timeout: config.timeout,
     systemMessage: config.system,
     availableTools: toolIds(config.tools),
+    retry: config.retry,
+    customAgents: config.customAgents,
+    defaultAgent: config.defaultAgent,
+    excludedBuiltinAgents: config.excludedBuiltinAgents,
+    memberId: config.memberId,
     promptBuilder: () => prompt,
   });
   const result = await producer(input, {
@@ -347,13 +361,23 @@ function successOutput<T>(
  */
 export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
   const fn = async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
+    let retryAttempt = 1;
+    const nodeContext: ExecutionContext = ctx.nextRetryAttempt
+      ? ctx
+      : {
+          ...ctx,
+          nextRetryAttempt: () => {
+            retryAttempt += 1;
+            return retryAttempt;
+          },
+        };
     const reads = loadReads(input, config.reads);
     const prompt = typeof config.prompt === 'string'
       ? config.prompt
       : config.prompt(input, reads);
 
     if (!config.schema) {
-      const result = await produce(config, prompt, input, ctx);
+      const result = await produce(config, prompt, input, nodeContext);
       const raw = result.artifact ?? result.text;
       return {
         action: config.route?.(raw as unknown as T) ?? 'default',
@@ -363,6 +387,18 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
     }
 
     const validator = toValidator(config.schema);
+    const retryBudgetMs = config.retry?.budgetMs;
+    const retryDeadlineMs = nodeContext.retryDeadlineMs
+      ?? (retryBudgetMs === undefined
+        ? undefined
+        : Date.now() + (
+            Number.isFinite(retryBudgetMs)
+              ? Math.max(0, retryBudgetMs)
+              : 0
+          ));
+    const producerContext = retryDeadlineMs === undefined
+      ? nodeContext
+      : { ...nodeContext, retryDeadlineMs };
     let raw = '';
     let lastError = new Error('Structured output was not produced');
     let metadata: Record<string, unknown> | undefined;
@@ -372,7 +408,7 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
       const currentPrompt = attempt === 0
         ? `${prompt}\n\nReturn exactly one valid JSON value with no prose or markdown fences.`
         : repairPrompt(prompt, raw, lastError);
-      const result = await produce(config, currentPrompt, input, ctx);
+      const result = await produce(config, currentPrompt, input, producerContext);
       metadata = result.metadata;
       const issues: string[] = [];
       for (const source of rawCandidates(result)) {

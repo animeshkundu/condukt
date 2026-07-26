@@ -146,6 +146,7 @@ export interface CostRecordedEvent {
   readonly nodeId: string;
   readonly tokens: number;
   readonly model: string;
+  readonly provenance?: 'main' | 'subagent';
   readonly cost: number;
   readonly ts: number;
 }

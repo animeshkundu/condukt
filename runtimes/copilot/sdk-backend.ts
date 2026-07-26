@@ -14,7 +14,15 @@
 import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { CopilotBackend, CopilotSession, SessionConfig, UsageData, ContentBlock, PermissionInfo } from './copilot-backend';
+import type {
+  CopilotBackend,
+  CopilotSession,
+  SessionConfig,
+  SessionCreationOptions,
+  UsageData,
+  ContentBlock,
+  PermissionInfo,
+} from './copilot-backend';
 import { classifySdkEvent } from './lifecycle-events';
 
 // ---------------------------------------------------------------------------
@@ -232,7 +240,13 @@ export class SdkBackend implements CopilotBackend {
     }
   }
 
-  async createSession(config: SessionConfig): Promise<CopilotSession> {
+  async createSession(
+    config: SessionConfig,
+    options?: SessionCreationOptions,
+  ): Promise<CopilotSession> {
+    if (options?.signal?.aborted) {
+      throw new Error('Session creation aborted');
+    }
     return new SdkSession(config, this.mcpConfigPath, this.configDir, this.extraPathDirs, this.pathTools);
   }
 }
@@ -416,6 +430,31 @@ class SdkSession implements CopilotSession {
 
     if (this.config.excludedTools) {
       sessionConfig.excludedTools = [...this.config.excludedTools];
+    }
+
+    if (this.config.customAgents) {
+      sessionConfig.customAgents = this.config.customAgents.map((customAgent) => ({
+        ...customAgent,
+        ...(customAgent.tools !== undefined && customAgent.tools !== null
+          ? { tools: [...customAgent.tools] }
+          : {}),
+        ...(customAgent.skills !== undefined
+          ? { skills: [...customAgent.skills] }
+          : {}),
+      }));
+    }
+
+    if (this.config.defaultAgent) {
+      sessionConfig.defaultAgent = {
+        ...this.config.defaultAgent,
+        ...(this.config.defaultAgent.excludedTools !== undefined
+          ? { excludedTools: [...this.config.defaultAgent.excludedTools] }
+          : {}),
+      };
+    }
+
+    if (this.config.excludedBuiltinAgents) {
+      sessionConfig.excludedBuiltinAgents = [...this.config.excludedBuiltinAgents];
     }
 
     if (mcpServers) {
@@ -671,8 +710,16 @@ class SdkSession implements CopilotSession {
         : typeof data?.errorCode === 'string'
           ? data.errorCode
           : 'Unknown model call failure';
-      const status = typeof data?.statusCode === 'number' ? ` (HTTP ${data.statusCode})` : '';
-      this.fail(new Error(`Model call failed${status}: ${detail}`), 'model.call_failure', data);
+      const rawStatusCode = data?.statusCode;
+      const statusCode = typeof rawStatusCode === 'number' || typeof rawStatusCode === 'string'
+        ? rawStatusCode
+        : undefined;
+      const errorCode = typeof data?.errorCode === 'string' ? data.errorCode : undefined;
+      const status = statusCode !== undefined ? ` (HTTP ${statusCode})` : '';
+      const error = new Error(`Model call failed${status}: ${detail}`);
+      if (statusCode !== undefined) Object.assign(error, { statusCode });
+      if (errorCode !== undefined) Object.assign(error, { errorCode });
+      this.fail(error, 'model.call_failure', data);
     });
 
     // --- Context compaction (infinite sessions) ---

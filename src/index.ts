@@ -1,6 +1,6 @@
 // Execution (scheduler + node factories)
 export { run, computeFrontier, validateGraph, normalizeTargets } from './scheduler';
-export { agent, wasCompletedBeforeCrash } from './agent';
+export { agent, wasCompletedBeforeCrash, isRetriableModelError, retryDelayMs } from './agent';
 /**
  * @experimental Experimental — API may change before it stabilizes into condukt core.
  */
@@ -34,7 +34,8 @@ export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
-  AgentRuntime, AgentSession, SessionConfig, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, AgentSession, SessionConfig, SessionCreationOptions, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
+  RetryPolicy, RetryMeta, MCPServerConfig, CustomAgentConfig, DefaultAgentConfig,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,

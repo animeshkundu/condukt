@@ -56,13 +56,16 @@ describe('adaptCopilotBackend', () => {
     expect(session.abort).toBeDefined();
 
     // Verify createSession was called with mapped config
-    expect(createSession).toHaveBeenCalledWith({
-      model: 'claude-opus-4.6',
-      cwd: '/test/dir',
-      addDirs: ['/test/dir'],
-      timeout: 3600,
-      heartbeatTimeout: 120,
-    });
+    expect(createSession).toHaveBeenCalledWith(
+      {
+        model: 'claude-opus-4.6',
+        cwd: '/test/dir',
+        addDirs: ['/test/dir'],
+        timeout: 3600,
+        heartbeatTimeout: 120,
+      },
+      undefined,
+    );
   });
 
   it('session events work through the adapter', async () => {
@@ -95,7 +98,7 @@ describe('adaptCopilotBackend', () => {
     expect(mockSession.on).toHaveBeenCalledWith('text', textHandler);
   });
 
-  it('forwards systemMessage, tool filters, and contextTier to the backend', async () => {
+  it('forwards systemMessage, tool filters, contextTier, and subagent config to the backend', async () => {
     const createSession = vi.fn().mockResolvedValue(createMockSession());
     const backend = createMockBackend({ createSession });
     const runtime = adaptCopilotBackend(backend);
@@ -110,6 +113,19 @@ describe('adaptCopilotBackend', () => {
       systemMessage: 'You are a reviewer. Respond with JSON.',
       availableTools: ['view', 'glob'],
       excludedTools: ['apply_patch'],
+      customAgents: [{
+        name: 'reviewer',
+        displayName: 'Reviewer',
+        description: 'Reviews code',
+        tools: ['builtin:*'],
+        prompt: 'Find defects.',
+        mcpServers: { local: { type: 'local', command: 'server' } },
+        infer: true,
+        skills: ['review'],
+        model: 'fast-model',
+      }],
+      defaultAgent: { excludedTools: ['task'] },
+      excludedBuiltinAgents: ['explore'],
     });
 
     expect(createSession).toHaveBeenCalledWith(
@@ -118,8 +134,30 @@ describe('adaptCopilotBackend', () => {
         systemMessage: 'You are a reviewer. Respond with JSON.',
         availableTools: ['view', 'glob'],
         excludedTools: ['apply_patch'],
+        customAgents: [expect.objectContaining({ name: 'reviewer', model: 'fast-model' })],
+        defaultAgent: { excludedTools: ['task'] },
+        excludedBuiltinAgents: ['explore'],
       }),
+      undefined,
     );
+  });
+
+  it('omits optional subagent fields when unset', async () => {
+    const createSession = vi.fn().mockResolvedValue(createMockSession());
+    const runtime = adaptCopilotBackend(createMockBackend({ createSession }));
+
+    await runtime.createSession({
+      model: 'test-model',
+      cwd: '/test/dir',
+      addDirs: [],
+      timeout: 60,
+      heartbeatTimeout: 10,
+    });
+
+    const forwarded = createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(forwarded).not.toHaveProperty('customAgents');
+    expect(forwarded).not.toHaveProperty('defaultAgent');
+    expect(forwarded).not.toHaveProperty('excludedBuiltinAgents');
   });
 
   it('handles unavailable backend', async () => {

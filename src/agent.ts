@@ -19,6 +19,9 @@ import type {
   NodeInput,
   NodeOutput,
   PromptOutput,
+  RetryMeta,
+  RetryPolicy,
+  SessionConfig,
 } from './types';
 import { FlowAbortedError } from './types';
 import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
@@ -119,6 +122,398 @@ function formatPrompt(promptOutput: PromptOutput): string {
 }
 
 // ---------------------------------------------------------------------------
+// Model-call retry
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MAX_ATTEMPTS = 1;
+const DEFAULT_BACKOFF_BASE_MS = 5_000;
+const DEFAULT_BACKOFF_MAX_MS = 120_000;
+const TRANSIENT_ERROR_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EHOSTUNREACH',
+  'ENETDOWN', 'ENETRESET', 'ENETUNREACH', 'EPIPE', 'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+interface ErrorWithRetryMetadata extends Error {
+  readonly statusCode?: number | string;
+  readonly status?: number | string;
+  readonly errorCode?: string;
+  readonly code?: string;
+  readonly cause?: unknown;
+}
+
+interface AttemptUsage {
+  readonly usage?: Record<string, unknown>;
+  readonly subagentUsage: readonly Record<string, unknown>[];
+}
+
+interface ErrorWithAttemptUsage extends Error {
+  readonly attemptUsage?: AttemptUsage;
+}
+
+interface NodeUsageMetadata {
+  readonly attemptUsage: readonly Record<string, unknown>[];
+  readonly subagentUsage: readonly Record<string, unknown>[];
+}
+
+interface ErrorWithNodeUsage extends Error {
+  readonly nodeUsage?: NodeUsageMetadata;
+}
+
+function numericStatus(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readRetryMetadata(error: Error): Omit<RetryMeta, 'attempt'> {
+  let current: unknown = error;
+  let statusCode: number | undefined;
+  let errorCode: string | undefined;
+  const seen = new Set<unknown>();
+
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as ErrorWithRetryMetadata;
+    statusCode ??= numericStatus(candidate.statusCode ?? candidate.status);
+    errorCode ??= candidate.errorCode ?? candidate.code;
+    current = candidate.cause;
+  }
+
+  return {
+    ...(statusCode !== undefined ? { statusCode } : {}),
+    ...(errorCode !== undefined ? { errorCode } : {}),
+  };
+}
+
+function errorChain(error: Error): readonly Error[] {
+  const chain: Error[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    chain.push(current);
+    current = (current as ErrorWithRetryMetadata).cause;
+  }
+  return chain;
+}
+
+function hasPermanentMarker(message: string): boolean {
+  return /\b(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden|permission denied|invalid request|unprocessable|abort(?:ed)?|cancel(?:led|ed)?|cancellation)\b/.test(message);
+}
+
+function hasTransientTimeoutMarker(message: string): boolean {
+  return /heartbeat(?: timeout)?|idle(?: stall| timeout)|no output for \d+(?:\.\d+)?s|session timed out|request timed out|connect(?:ion)? timeout|socket timeout|etimedout/.test(message);
+}
+
+/** Default fail-closed classifier for model/session failures. */
+export function isRetriableModelError(error: Error, meta: RetryMeta): boolean {
+  if (error instanceof FlowAbortedError) return false;
+
+  const messages = errorChain(error)
+    .map((entry) => `${entry.name} ${entry.message}`.toLowerCase());
+  if (messages.some(hasPermanentMarker)) return false;
+
+  if (meta.statusCode === 400 || meta.statusCode === 401
+    || meta.statusCode === 403 || meta.statusCode === 422) {
+    return false;
+  }
+  if (meta.statusCode === 429
+    || (meta.statusCode !== undefined && meta.statusCode >= 500 && meta.statusCode <= 599)) {
+    return true;
+  }
+
+  const code = meta.errorCode?.toUpperCase();
+  if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
+  return messages.some(hasTransientTimeoutMarker);
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.trunc(value));
+}
+
+function nonNegativeFinite(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, value);
+}
+
+export function retryDelayMs(policy: RetryPolicy, failedAttempt: number): number {
+  const configuredBase = policy.backoffBaseMs;
+  const base = configuredBase !== undefined
+    && Number.isFinite(configuredBase)
+    && configuredBase > 0
+    ? configuredBase
+    : DEFAULT_BACKOFF_BASE_MS;
+  const configuredMax = policy.backoffMaxMs;
+  const max = configuredMax !== undefined
+    && Number.isFinite(configuredMax)
+    && configuredMax > 0
+    ? configuredMax
+    : DEFAULT_BACKOFF_MAX_MS;
+  const exponent = Math.min(52, Math.max(0, failedAttempt - 1));
+  const exponential = Math.min(max, base * (2 ** exponent));
+  const jittered = policy.jitter === false ? exponential : Math.random() * exponential;
+  return Math.max(100, Number.isFinite(jittered) ? jittered : 100);
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new FlowAbortedError('Aborted before retry');
+  if (delayMs <= 0) return;
+
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      reject(new FlowAbortedError('Aborted during retry backoff'));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionContext): SessionConfig {
+  const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
+  return {
+    model: config.model ?? 'claude-opus-4.6',
+    thinkingBudget: config.thinkingBudget,
+    cwd: sessionCwd,
+    addDirs: config.isolation ? [] : [input.dir],
+    timeout: config.timeout ?? 3600,
+    heartbeatTimeout: config.heartbeatTimeout ?? 120,
+    systemMessage: config.systemMessage,
+    availableTools: config.availableTools ?? (
+      config.tools && config.tools.length > 0
+        ? config.tools.map((tool) => tool.id)
+        : undefined
+    ),
+    excludedTools: config.excludedTools,
+    customAgents: config.customAgents,
+    defaultAgent: config.defaultAgent,
+    excludedBuiltinAgents: config.excludedBuiltinAgents,
+    nodeId: ctx.nodeId,
+    memberId: config.memberId,
+    artifactFilename: config.output,
+  };
+}
+
+interface SessionAttemptResult extends AttemptUsage {
+  readonly outputLines: readonly string[];
+}
+
+function attemptUsage(
+  usage: Record<string, unknown> | undefined,
+  subagentUsage: readonly Record<string, unknown>[],
+): AttemptUsage {
+  return { usage, subagentUsage: [...subagentUsage] };
+}
+
+function withAttemptUsage(error: unknown, usage: AttemptUsage): ErrorWithAttemptUsage {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  Object.assign(normalized, { attemptUsage: usage });
+  return normalized as ErrorWithAttemptUsage;
+}
+
+function withNodeUsage(
+  error: Error,
+  attemptUsage: readonly Record<string, unknown>[],
+  subagentUsage: readonly Record<string, unknown>[],
+): ErrorWithNodeUsage {
+  if (attemptUsage.length === 0 && subagentUsage.length === 0) return error;
+  Object.assign(error, {
+    nodeUsage: {
+      attemptUsage: [...attemptUsage],
+      subagentUsage: [...subagentUsage],
+    },
+  });
+  return error as ErrorWithNodeUsage;
+}
+
+async function runSessionAttempt(
+  config: AgentConfig,
+  input: NodeInput,
+  ctx: ExecutionContext,
+  prompt: string,
+): Promise<SessionAttemptResult> {
+  let session: AgentSession | null = null;
+  const outputLines: string[] = [];
+  let lastUsage: Record<string, unknown> | undefined;
+  const subagentUsage: Record<string, unknown>[] = [];
+
+  try {
+    const creation = ctx.runtime.createSession(
+      sessionConfig(config, input, ctx),
+      { signal: ctx.signal },
+    );
+    const createdSession = await new Promise<AgentSession>((resolve, reject) => {
+      const onAbort = () => reject(new FlowAbortedError('Aborted during session creation'));
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+      creation.then(
+        (created) => {
+          ctx.signal.removeEventListener('abort', onAbort);
+          if (ctx.signal.aborted) {
+            void created.abort();
+            reject(new FlowAbortedError('Aborted during session creation'));
+            return;
+          }
+          resolve(created);
+        },
+        (error: unknown) => {
+          ctx.signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
+    session = createdSession;
+
+    session.on('text', (text: string, parentToolCallId?: string) => {
+      outputLines.push(text);
+      ctx.emitOutput({
+        type: 'node:output', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        content: text, parentToolCallId, ts: Date.now(),
+      });
+    });
+    session.on('reasoning', (text: string) => {
+      ctx.emitOutput({
+        type: 'node:reasoning', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        content: text, ts: Date.now(),
+      });
+    });
+    session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>, callId?: string, parentToolCallId?: string) => {
+      ctx.emitOutput({
+        type: 'node:tool', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        tool, phase: 'start', summary: toolInput, args, toolCallId: callId,
+        parentToolCallId, ts: Date.now(),
+      });
+    });
+    session.on('tool_complete', (tool: string, output: string, callId?: string, parentToolCallId?: string) => {
+      ctx.emitOutput({
+        type: 'node:tool', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        tool, phase: 'complete', summary: output, toolCallId: callId,
+        parentToolCallId, ts: Date.now(),
+      });
+    });
+    session.on('tool_output', (tool: string, output: string, parentToolCallId?: string) => {
+      outputLines.push(output);
+      ctx.emitOutput({
+        type: 'node:output', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        content: output, tool, parentToolCallId, ts: Date.now(),
+      });
+    });
+    session.on('intent', (intent: string) => {
+      ctx.emitOutput({
+        type: 'node:intent', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        intent, ts: Date.now(),
+      });
+    });
+    session.on('usage', (data: Record<string, unknown>) => {
+      lastUsage = data;
+      ctx.emitOutput({
+        type: 'node:usage', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        inputTokens: typeof data.inputTokens === 'number' ? data.inputTokens : undefined,
+        outputTokens: typeof data.outputTokens === 'number' ? data.outputTokens : undefined,
+        totalTokens: typeof data.totalTokens === 'number' ? data.totalTokens : undefined,
+        model: typeof data.model === 'string' ? data.model : undefined,
+        ts: Date.now(),
+      });
+    });
+    session.on('tool_complete_rich', (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => {
+      const toolData = contentBlocksToToolData(contents as ReadonlyArray<ContentBlock>);
+      if (toolData) {
+        ctx.emitOutput({
+          type: 'node:tool', executionId: ctx.executionId, nodeId: ctx.nodeId,
+          tool, phase: 'complete', summary: '', toolCallId: callId,
+          toolSpecificData: toolData, ts: Date.now(),
+        });
+      }
+    });
+    session.on('subagent_start', (name: string, data: Record<string, unknown>) => {
+      ctx.emitOutput({
+        type: 'node:subagent', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        agentName: name, phase: 'start',
+        toolCallId: typeof data.toolCallId === 'string' ? data.toolCallId : undefined,
+        info: data, ts: Date.now(),
+      });
+    });
+    session.on('subagent_end', (name: string, data: Record<string, unknown>) => {
+      const totalTokens = typeof data.totalTokens === 'number' ? data.totalTokens : undefined;
+      const model = typeof data.model === 'string' ? data.model : undefined;
+      if (totalTokens !== undefined) {
+        subagentUsage.push({ totalTokens, ...(model !== undefined ? { model } : {}) });
+      }
+      ctx.emitOutput({
+        type: 'node:subagent', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        agentName: name, phase: 'end',
+        toolCallId: typeof data.toolCallId === 'string' ? data.toolCallId : undefined,
+        info: data,
+        error: typeof data.error === 'string' ? data.error : undefined,
+        ts: Date.now(),
+      });
+    });
+    session.on('permission', (data: Record<string, unknown>) => {
+      ctx.emitOutput({
+        type: 'node:permission', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        kind: typeof data.kind === 'string' ? data.kind : undefined,
+        detail: typeof data.detail === 'string' ? data.detail : undefined,
+        approved: typeof data.approved === 'boolean' ? data.approved : undefined,
+        ts: Date.now(),
+      });
+    });
+    session.on('compaction', (phase: string, summary?: string) => {
+      const message = phase === 'start'
+        ? '\n--- Context compaction started ---\n'
+        : `\n--- Context compaction complete${summary ? `: ${summary}` : ''} ---\n`;
+      outputLines.push(message);
+      ctx.emitOutput({
+        type: 'node:output', executionId: ctx.executionId, nodeId: ctx.nodeId,
+        content: message, ts: Date.now(),
+      });
+    });
+
+    const activeSession = session;
+    activeSession.send(prompt);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        activeSession.abort().then(
+          () => reject(new FlowAbortedError('Aborted during session execution')),
+          () => reject(new FlowAbortedError('Aborted during session execution')),
+        );
+      };
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+      activeSession.on('idle', () => {
+        ctx.signal.removeEventListener('abort', onAbort);
+        resolve();
+      });
+      activeSession.on('error', (error: Error) => {
+        ctx.signal.removeEventListener('abort', onAbort);
+        reject(error);
+      });
+    });
+
+    return { outputLines, usage: lastUsage, subagentUsage };
+  } catch (error) {
+    if (!ctx.signal.aborted && config.output && wasCompletedBeforeCrash(
+      input.dir, config.output, outputLines, config.completionIndicators,
+    )) {
+      return { outputLines, usage: lastUsage, subagentUsage };
+    }
+    throw withAttemptUsage(error, attemptUsage(lastUsage, subagentUsage));
+  } finally {
+    if (session) {
+      try {
+        await session.abort();
+      } catch {
+        // Session may already be closed.
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Agent factory
 // ---------------------------------------------------------------------------
 
@@ -138,278 +533,149 @@ function formatPrompt(promptOutput: PromptOutput): string {
  */
 export function agent(config: AgentConfig): NodeFn {
   return async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
-    // Abort check: bail early if already aborted
     if (ctx.signal.aborted) {
       throw new FlowAbortedError('Aborted before agent start');
     }
 
-    // Step 1: Delete stale artifact
     if (config.output) {
       const artifactPath = path.join(input.dir, config.output);
       try {
-        if (fs.existsSync(artifactPath)) {
-          fs.unlinkSync(artifactPath);
-        }
+        if (fs.existsSync(artifactPath)) fs.unlinkSync(artifactPath);
       } catch {
-        // Ignore — may not exist
+        // Ignore a stale artifact that cannot be removed.
       }
     }
 
-    // Step 2: Call setup hook (R5: runs before EVERY agent execution, R10: receives full NodeInput)
-    if (config.setup) {
-      await config.setup(input);
-    }
-
-    let session: AgentSession | null = null;
-    const outputLines: string[] = [];
-    let lastUsage: Record<string, unknown> | undefined;
+    if (config.setup) await config.setup(input);
 
     try {
-      // Step 3: Build prompt
-      const promptOutput = config.promptBuilder(input);
-      const promptStr = formatPrompt(promptOutput);
+      const prompt = formatPrompt(config.promptBuilder(input));
+      const policy = config.retry ?? {};
+      const maxAttempts = positiveInteger(policy.maxAttempts, DEFAULT_MAX_ATTEMPTS);
+      const budgetMs = policy.budgetMs === undefined
+        ? undefined
+        : nonNegativeFinite(policy.budgetMs, 0);
+      const retryDeadlineMs = ctx.retryDeadlineMs
+        ?? (budgetMs === undefined ? undefined : Date.now() + budgetMs);
+      const sharedContext: ExecutionContext = retryDeadlineMs === undefined
+        ? ctx
+        : { ...ctx, retryDeadlineMs };
+      let attempt = 1;
+      let result: SessionAttemptResult | undefined;
+      let lastFailure: Error | undefined;
+      const failedUsage: Record<string, unknown>[] = [];
+      const failedSubagentUsage: Record<string, unknown>[] = [];
 
-      // Step 4: Create session (COMP-3: cwdResolver overrides cwd for repo access)
-      const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
-      session = await ctx.runtime.createSession({
-        model: config.model ?? 'claude-opus-4.6',
-        thinkingBudget: config.thinkingBudget,
-        cwd: sessionCwd,
-        addDirs: config.isolation ? [] : [input.dir],
-        timeout: config.timeout ?? 3600,
-        heartbeatTimeout: config.heartbeatTimeout ?? 120,
-        systemMessage: config.systemMessage,
-        availableTools: config.availableTools ?? (
-          config.tools && config.tools.length > 0
-            ? config.tools.map((tool) => tool.id)
-            : undefined
-        ),
-        excludedTools: config.excludedTools,
-        nodeId: ctx.nodeId,
-        artifactFilename: config.output,
-      });
+      while (attempt <= maxAttempts) {
+        if (ctx.signal.aborted) {
+          throw withNodeUsage(
+            new FlowAbortedError('Aborted before session attempt'),
+            failedUsage,
+            failedSubagentUsage,
+          );
+        }
+        const remainingMs = retryDeadlineMs === undefined
+          ? undefined
+          : retryDeadlineMs - Date.now();
+        if (remainingMs !== undefined && remainingMs <= 0) {
+          throw withNodeUsage(
+            lastFailure ?? new Error('Retry deadline exhausted'),
+            failedUsage,
+            failedSubagentUsage,
+          );
+        }
 
-      // Abort check after session creation
-      if (ctx.signal.aborted) {
-        await session.abort();
-        throw new FlowAbortedError('Aborted after session creation');
+        const budgetController = new AbortController();
+        const budgetTimer = remainingMs === undefined
+          ? undefined
+          : setTimeout(
+            () => budgetController.abort(),
+            Math.min(remainingMs, 2_147_483_647),
+          );
+        const attemptContext: ExecutionContext = remainingMs === undefined
+          ? sharedContext
+          : {
+              ...sharedContext,
+              signal: AbortSignal.any([ctx.signal, budgetController.signal]),
+            };
+
+        try {
+          result = await runSessionAttempt(config, input, attemptContext, prompt);
+          break;
+        } catch (error) {
+          const currentError = error instanceof Error ? error : new Error(String(error));
+          const consumed = (currentError as ErrorWithAttemptUsage).attemptUsage;
+          if (consumed?.usage) failedUsage.push(consumed.usage);
+          if (consumed) failedSubagentUsage.push(...consumed.subagentUsage);
+          if (ctx.signal.aborted) {
+            throw withNodeUsage(
+              new FlowAbortedError('Aborted during session attempt'),
+              failedUsage,
+              failedSubagentUsage,
+            );
+          }
+          if (budgetController.signal.aborted) {
+            throw withNodeUsage(
+              lastFailure ?? (
+                currentError instanceof FlowAbortedError
+                  ? new Error('Retry deadline exhausted')
+                  : currentError
+              ),
+              failedUsage,
+              failedSubagentUsage,
+            );
+          }
+          if (currentError instanceof FlowAbortedError) {
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+          }
+          lastFailure = currentError;
+
+          const retryMetadata = readRetryMetadata(currentError);
+          const meta: RetryMeta = { attempt, ...retryMetadata };
+          const retriable = (policy.isRetriable ?? isRetriableModelError)(currentError, meta);
+          if (!retriable || attempt >= maxAttempts) {
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+          }
+
+          const delayMs = retryDelayMs(policy, attempt);
+          if (retryDeadlineMs !== undefined && Date.now() + delayMs >= retryDeadlineMs) {
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+          }
+
+          attempt += 1;
+          try {
+            await waitForRetry(delayMs, ctx.signal);
+            if (ctx.emitState) {
+              await ctx.emitState({
+                type: 'node:retrying',
+                executionId: ctx.executionId,
+                nodeId: ctx.nodeId,
+                attempt: ctx.nextRetryAttempt?.() ?? attempt,
+                ts: Date.now(),
+              });
+            }
+          } catch (retryError) {
+            const normalizedRetryError = retryError instanceof Error
+              ? retryError
+              : new Error(String(retryError));
+            throw withNodeUsage(
+              normalizedRetryError,
+              failedUsage,
+              failedSubagentUsage,
+            );
+          }
+        } finally {
+          if (budgetTimer !== undefined) clearTimeout(budgetTimer);
+        }
       }
 
-      // Step 5: Wire session events to emitOutput
-      session.on('text', (text: string, parentToolCallId?: string) => {
-        outputLines.push(text);
-        ctx.emitOutput({
-          type: 'node:output',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          content: text,
-          parentToolCallId,
-          ts: Date.now(),
-        });
-      });
+      if (!result) throw new Error('Agent session exhausted without a result');
 
-      session.on('reasoning', (text: string) => {
-        ctx.emitOutput({
-          type: 'node:reasoning',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          content: text,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('tool_start', (tool: string, toolInput: string, args: Record<string, unknown>, callId?: string, parentToolCallId?: string) => {
-        ctx.emitOutput({
-          type: 'node:tool',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          tool,
-          phase: 'start',
-          summary: toolInput,
-          args,
-          toolCallId: callId,
-          parentToolCallId,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('tool_complete', (tool: string, output: string, callId?: string, parentToolCallId?: string) => {
-        ctx.emitOutput({
-          type: 'node:tool',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          tool,
-          phase: 'complete',
-          summary: output,
-          toolCallId: callId,
-          parentToolCallId,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('tool_output', (tool: string, output: string, parentToolCallId?: string) => {
-        outputLines.push(output);
-        ctx.emitOutput({
-          type: 'node:output',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          content: output,
-          tool,
-          parentToolCallId,
-          ts: Date.now(),
-        });
-      });
-
-      // Rich events (SdkBackend emits these; SubprocessBackend silently accepts the on() call)
-      session.on('intent', (intent: string) => {
-        ctx.emitOutput({
-          type: 'node:intent',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          intent,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('usage', (data: Record<string, unknown>) => {
-        lastUsage = data;
-        ctx.emitOutput({
-          type: 'node:usage',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          inputTokens: typeof data.inputTokens === 'number' ? data.inputTokens : undefined,
-          outputTokens: typeof data.outputTokens === 'number' ? data.outputTokens : undefined,
-          totalTokens: typeof data.totalTokens === 'number' ? data.totalTokens : undefined,
-          model: typeof data.model === 'string' ? data.model : undefined,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('tool_complete_rich', (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => {
-        const toolData = contentBlocksToToolData(contents as ReadonlyArray<ContentBlock>);
-        if (toolData) {
-          // Emit a supplemental node:tool event with structured data
-          ctx.emitOutput({
-            type: 'node:tool',
-            executionId: ctx.executionId,
-            nodeId: ctx.nodeId,
-            tool,
-            phase: 'complete',
-            summary: '',
-            toolCallId: callId,
-            toolSpecificData: toolData,
-            ts: Date.now(),
-          });
-        }
-      });
-
-      session.on('subagent_start', (name: string, data: Record<string, unknown>) => {
-        const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
-        ctx.emitOutput({
-          type: 'node:subagent',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          agentName: name,
-          phase: 'start',
-          toolCallId,
-          info: data,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('subagent_end', (name: string, data: Record<string, unknown>) => {
-        const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
-        ctx.emitOutput({
-          type: 'node:subagent',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          agentName: name,
-          phase: 'end',
-          toolCallId,
-          info: data,
-          error: typeof data.error === 'string' ? data.error : undefined,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('permission', (data: Record<string, unknown>) => {
-        ctx.emitOutput({
-          type: 'node:permission',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          kind: typeof data.kind === 'string' ? data.kind : undefined,
-          detail: typeof data.detail === 'string' ? data.detail : undefined,
-          approved: typeof data.approved === 'boolean' ? data.approved : undefined,
-          ts: Date.now(),
-        });
-      });
-
-      session.on('compaction', (phase: string, summary?: string) => {
-        const msg = phase === 'start'
-          ? '\n--- Context compaction started ---\n'
-          : `\n--- Context compaction complete${summary ? `: ${summary}` : ''} ---\n`;
-        outputLines.push(msg);
-        ctx.emitOutput({
-          type: 'node:output',
-          executionId: ctx.executionId,
-          nodeId: ctx.nodeId,
-          content: msg,
-          ts: Date.now(),
-        });
-      });
-
-      // Step 6: Send prompt
-      session.send(promptStr);
-
-      // Step 7: Wait for completion — wrap in a Promise that resolves on idle, rejects on error
-      const result = await new Promise<'idle'>((resolve, reject) => {
-        // Listen for abort signal during session execution
-        const onAbort = () => {
-          session!.abort().then(
-            () => reject(new FlowAbortedError('Aborted during session execution')),
-            () => reject(new FlowAbortedError('Aborted during session execution')),
-          );
-        };
-        ctx.signal.addEventListener('abort', onAbort, { once: true });
-
-        session!.on('idle', () => {
-          ctx.signal.removeEventListener('abort', onAbort);
-          resolve('idle');
-        });
-
-        session!.on('error', (err: Error) => {
-          ctx.signal.removeEventListener('abort', onAbort);
-          reject(err);
-        });
-      }).catch((err: Error) => {
-        // AI-4: Don't attempt GT-3 recovery on aborted sessions
-        if (ctx.signal.aborted) {
-          throw err;
-        }
-        // Step 8: GT-3 dual-condition crash recovery
-        if (
-          config.output &&
-          wasCompletedBeforeCrash(
-            input.dir,
-            config.output,
-            outputLines,
-            config.completionIndicators,
-          )
-        ) {
-          // Treat as success — artifact was written before crash
-          return 'recovered' as const;
-        }
-        throw err;
-      });
-
-      // Step 9: Handle success (idle or recovered)
       let content: string | undefined;
       if (config.output) {
-        const artifactPath = path.join(input.dir, config.output);
         try {
-          content = fs.readFileSync(artifactPath, 'utf-8');
+          content = fs.readFileSync(path.join(input.dir, config.output), 'utf-8');
         } catch {
-          // Artifact not written — that's fine for nodes that don't always produce output
           content = undefined;
         }
       }
@@ -417,27 +683,24 @@ export function agent(config: AgentConfig): NodeFn {
       const action = config.actionParser && content
         ? config.actionParser(content)
         : 'default';
+      const metadata: Record<string, unknown> = {};
+      const usage = [...failedUsage, ...(result.usage ? [result.usage] : [])];
+      const subagentUsage = [...failedSubagentUsage, ...result.subagentUsage];
+      if (usage.length > 0) metadata.usage = usage.at(-1);
+      if (usage.length > 1) metadata.attemptUsage = usage;
+      if (subagentUsage.length > 0) metadata.subagentUsage = subagentUsage;
 
       return {
         action,
         artifact: content,
-        metadata: lastUsage ? { usage: lastUsage } : undefined,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       };
     } finally {
-      // AI-1: Close session on all paths (abort is idempotent)
-      if (session) {
-        try {
-          await session.abort();
-        } catch {
-          // Session may already be closed — ignore
-        }
-      }
-      // Step 10: Teardown (always runs, R10: receives full NodeInput)
       if (config.teardown) {
         try {
           await config.teardown(input);
         } catch {
-          // Teardown errors should not mask the primary error
+          // Teardown errors must not mask the primary result.
         }
       }
     }
