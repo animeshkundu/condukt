@@ -204,6 +204,76 @@ describe('loop-back', () => {
     expect(executed.filter(e => e === 'B').length).toBe(3);
   });
 
+  it('resumes with only the remaining legacy loop budget', async () => {
+    const executed: string[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => { executed.push('A'); return { action: 'default' }; }),
+        B: mkEntry(async () => { executed.push('B'); return { action: 'diverged' }; }),
+        C: mkEntry(async () => { executed.push('C'); return { action: 'default' }; }),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'end' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': {
+          source: 'B',
+          action: 'diverged',
+          fallbackTarget: 'C',
+          maxIterations: 3,
+        },
+      },
+    };
+    const resumeFrom = {
+      completedNodes: new Map<string, { action: string; finishedAt: number }>(),
+      firedEdges: new Map<string, Set<string>>(),
+      nodeStatuses: new Map<string, string>(),
+      loopIterations: new Map([['B:diverged', 2]]),
+    };
+
+    await run(graph, mkOpts({ resumeFrom }));
+
+    expect(executed.filter(nodeId => nodeId === 'A')).toHaveLength(2);
+    expect(executed.filter(nodeId => nodeId === 'B')).toHaveLength(2);
+    expect(executed.filter(nodeId => nodeId === 'C')).toHaveLength(1);
+  });
+
+  it('resume without loop history preserves fresh-run loop bounds', async () => {
+    let bCount = 0;
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' })),
+        B: mkEntry(async () => { bCount += 1; return { action: 'diverged' }; }),
+        C: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        A: { default: 'B' },
+        B: { diverged: 'A', converged: 'end' },
+      },
+      start: ['A'],
+      loopFallback: {
+        'B:diverged': {
+          source: 'B',
+          action: 'diverged',
+          fallbackTarget: 'C',
+          maxIterations: 2,
+        },
+      },
+    };
+    const resumeFrom = {
+      completedNodes: new Map<string, { action: string; finishedAt: number }>(),
+      firedEdges: new Map<string, Set<string>>(),
+      nodeStatuses: new Map<string, string>(),
+      loopIterations: new Map<string, number>(),
+    };
+
+    await run(graph, mkOpts({ resumeFrom }));
+
+    expect(bCount).toBe(3);
+  });
+
   // Test 12: Custom per-edge maxIterations
   it('custom per-edge maxIterations', async () => {
     let bCount = 0;

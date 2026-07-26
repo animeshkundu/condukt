@@ -695,6 +695,9 @@ export async function run(
     for (const [nodeId, status] of resumeFrom.nodeStatuses) {
       nodeStatuses.set(nodeId, status);
     }
+    for (const [loopKey, iteration] of resumeFrom.loopIterations) {
+      loopIterations.set(loopKey, iteration);
+    }
 
     // Compute frontier for resume
     pending = computeFrontier(graph, resumeFrom);

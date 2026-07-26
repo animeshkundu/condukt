@@ -176,6 +176,53 @@ describe('loop regions', () => {
     )).toHaveLength(2);
   });
 
+  it('resumes with only the remaining maxRounds budget', async () => {
+    const counts: Record<string, number> = { produce: 0, decision: 0, done: 0 };
+    const events: ExecutionEvent[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        produce: entry(async () => {
+          counts.produce += 1;
+          return { action: 'default' };
+        }),
+        decision: entry(async () => {
+          counts.decision += 1;
+          return { action: 'continue' };
+        }),
+        done: entry(async () => {
+          counts.done += 1;
+          return { action: 'default' };
+        }),
+      },
+      edges: {
+        produce: { default: 'decision' },
+        decision: { continue: 'produce', exit: 'done' },
+      },
+      start: ['produce'],
+      loops: [{
+        id: 'resumed-rounds',
+        nodes: ['produce', 'decision'],
+        entry: 'produce',
+        decision: 'decision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 3,
+      }],
+    };
+    const options = runOptions(events);
+    const resumeFrom = {
+      completedNodes: new Map<string, { action: string; finishedAt: number }>(),
+      firedEdges: new Map<string, Set<string>>(),
+      nodeStatuses: new Map<string, string>(),
+      loopIterations: new Map([['region:resumed-rounds', 2]]),
+    };
+
+    await run(graph, { ...options, resumeFrom });
+
+    expect(counts).toEqual({ produce: 1, decision: 1, done: 1 });
+    expect(events.filter(event => event.type === 'node:reset')).toHaveLength(0);
+  });
+
   it('requires exactly one loop bound and validates its range', () => {
     const neither = validationGraph([region({ maxIterations: undefined })]);
     const both = validationGraph([region({ maxRounds: 2 })]);

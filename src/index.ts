@@ -28,6 +28,8 @@ export { createHmrSingleton } from './hmr-singleton';
 export { setupOnce, clearSetupCache } from './setup-once';
 export { dryRun } from './dry-run';
 export type { DryRunOptions, DryRunResult } from './dry-run';
+export { createConsoleOutputRenderer } from './console-output';
+export type { ConsoleOutputRenderer, OutputEventSink } from './console-output';
 
 // Types
 export type {
