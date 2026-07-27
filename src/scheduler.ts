@@ -20,7 +20,12 @@ import type {
   RetryContext,
   LoopRegion,
 } from './types';
-import { FlowAbortedError, FlowValidationError, NO_OP_LOGGER } from './types';
+import {
+  DEFAULT_AGENT_TIMEOUT_SECS,
+  FlowAbortedError,
+  FlowValidationError,
+  NO_OP_LOGGER,
+} from './types';
 import type {
   GraphNodeSkeleton,
   GraphEdgeSkeleton,
@@ -864,7 +869,7 @@ export async function run(
         };
 
         const nodeStart = Date.now();
-        const timeoutSecs = entry.timeout ?? 3600;
+        const timeoutSecs = entry.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS;
 
         // Dispatch with timeout (CR3: applies to ALL node types)
         // C3 fix: clear timer when node completes to prevent leaks

@@ -15,13 +15,13 @@ export type SubagentRoster = Readonly<Record<string, SubagentRosterEntry>>;
  */
 export const DEFAULT_SUBAGENT_ROSTER: SubagentRoster = {
   // Planning should use the parent's chosen model and context, with deliberate reasoning.
-  plan: { model: 'inherit', effortLevel: 'high', contextTier: 'inherit' },
+  plan: { model: 'inherit', effortLevel: 'high', contextTier: 'long_context' },
   // Exploration benefits from low latency and a long context for broad repository reads.
   explore: { model: 'gemini-3.6-flash', effortLevel: 'high', contextTier: 'long_context' },
   // General work needs a balanced model with enough reasoning for varied implementation tasks.
-  'general-purpose': { model: 'gpt-5.6-terra', effortLevel: 'high', contextTier: 'default' },
+  'general-purpose': { model: 'gpt-5.6-terra', effortLevel: 'high', contextTier: 'long_context' },
   // Bounded delegated tasks favor the same balanced model without paying for maximum context.
-  task: { model: 'gpt-5.6-terra', effortLevel: 'medium', contextTier: 'default' },
+  task: { model: 'gpt-5.6-terra', effortLevel: 'medium', contextTier: 'long_context' },
   // Review is worth little when it shares the author's blind spots, so both review agents
   // ask the CLI for a different family than the session model rather than naming one. A
   // named model would silently become same-family whenever the session model changes.

@@ -14,6 +14,7 @@ import type {
   ToolRef,
   SubagentRosterOption,
 } from './types';
+import { DEFAULT_AGENT_TIMEOUT_SECS } from './types';
 
 export type SchemaValidationResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -66,6 +67,7 @@ export interface AgentNodeConfig<T> {
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly tools?: readonly ToolRef[] | readonly string[];
@@ -320,7 +322,7 @@ export async function produce<T>(
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
     isolation: config.isolation,
-    timeout: config.timeout,
+    timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,
     systemMessage: config.system,
     availableTools: toolIds(config.tools),
     retry: config.retry,
@@ -397,7 +399,7 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
     const retryWindowMs = retryBudgetMs === undefined
       ? config.retry === undefined
         ? undefined
-        : (config.timeout ?? 3600) * 1000
+        : (config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS) * 1000
       : Number.isFinite(retryBudgetMs)
         ? Math.max(0, retryBudgetMs)
         : 0;
@@ -451,6 +453,6 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
     output: config.output,
     reads: config.reads,
     model: config.model,
-    timeout: config.timeout,
+    timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,
   };
 }

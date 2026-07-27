@@ -65,6 +65,53 @@ describe('panelNode', () => {
     }
   });
 
+  it.each([
+    { name: 'uses the panel default', timeout: undefined, expected: 3 * 60 * 60 },
+    { name: 'preserves an explicit timeout', timeout: 37, expected: 37 },
+  ])('$name', async ({ timeout, expected }) => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const captured: SessionConfig[] = [];
+    const runtime: AgentRuntime = {
+      name: 'panel-timeout-runtime',
+      createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
+        captured.push(sessionConfig);
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) handler('done');
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = panelNode({
+      prompt: 'Review',
+      members: [{ model: 'reviewer' }],
+      reconcile: (verdicts: readonly string[]) => verdicts.join(','),
+      ...(timeout === undefined ? {} : { timeout }),
+    });
+    const context: ExecutionContext = {
+      executionId: 'panel-timeout',
+      nodeId: 'panel',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    expect(entry.timeout).toBe(expected);
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.timeout).toBe(expected);
+  });
+
   it('applies panel context and effort defaults while member values take precedence', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
