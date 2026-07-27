@@ -152,7 +152,8 @@ describe('agent factory', () => {
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
       {
         model: 'gpt-5.3',
-        thinkingBudget: undefined,
+        thinkingBudget: 'high',
+        contextTier: 'long_context',
         cwd: '/tmp/test-agent',
         addDirs: ['/tmp/test-agent'],
         timeout: 1800,
@@ -170,8 +171,35 @@ describe('agent factory', () => {
       },
       expect.objectContaining({ signal: expect.anything() }),
     );
+  });
+
+  it('lets an explicit default tier opt out of long context', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({
+      objective: 'test objective',
+      contextTier: 'default',
+      promptBuilder: () => 'test prompt',
+    })(createMockInput(), createMockContext(mockRuntime));
+
     expect(vi.mocked(mockRuntime.createSession).mock.calls[0]?.[0])
-      .not.toHaveProperty('contextTier');
+      .toMatchObject({ contextTier: 'default' });
+  });
+
+  it('defaults the producer model cross-lab from the reviewer default', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({
+      objective: 'test objective',
+      promptBuilder: () => 'test prompt',
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    expect(vi.mocked(mockRuntime.createSession).mock.calls[0]?.[0])
+      .toMatchObject({ model: 'gpt-5.6-sol', thinkingBudget: 'high' });
   });
 
   it('forwards contextTier and thinkingBudget to the session config', async () => {

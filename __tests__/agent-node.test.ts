@@ -10,6 +10,7 @@ import type {
   FlowGraph,
   NodeEntry,
   NodeInput,
+  SessionConfig,
 } from '../src/types';
 
 interface StructuredResult {
@@ -44,6 +45,52 @@ describe('agentNode', () => {
     for (const dir of dirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    { name: 'uses the agent default', timeout: undefined, expected: 5 * 60 * 60 },
+    { name: 'preserves an explicit timeout', timeout: 37, expected: 37 },
+  ])('$name', async ({ timeout, expected }) => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const captured: SessionConfig[] = [];
+    const runtime: AgentRuntime = {
+      name: 'timeout-config-runtime',
+      createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
+        captured.push(sessionConfig);
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) handler('done');
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = agentNode({
+      prompt: 'Work',
+      model: 'test-model',
+      ...(timeout === undefined ? {} : { timeout }),
+    });
+    const context: ExecutionContext = {
+      executionId: 'timeout-config',
+      nodeId: 'agent',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    expect(entry.timeout).toBe(expected);
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.timeout).toBe(expected);
   });
 
   it('forwards contextTier and thinkingBudget through the plain agent node', async () => {

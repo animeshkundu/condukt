@@ -36,7 +36,7 @@ Parameters in `AgentConfig`:
 | `reads` | `readonly string[]?` | Artifact filenames this node reads |
 | `model` | `string?` | Model name (default: `'claude-opus-4.6'`) |
 | `isolation` | `boolean?` | If true, no extra dirs passed to session |
-| `timeout` | `number?` | Hard timeout in seconds (default: 3600) |
+| `timeout` | `number?` | Hard timeout in seconds (default: `DEFAULT_AGENT_TIMEOUT_SECS`, 18000) |
 | `heartbeatTimeout` | `number?` | No-output timeout in seconds (default: 900) |
 | `cwdResolver` | `(input: NodeInput) => string?` | Override session cwd. Default: `input.dir`. Use for running in a repo dir while artifacts go to `input.dir`. |
 | `setup` | `(input: NodeInput) => void \| Promise<void>?` | Pre-execution hook |
@@ -184,7 +184,7 @@ interface NodeEntry {
   readonly output?: string;           // Artifact filename this node produces
   readonly reads?: readonly string[]; // Artifact filenames this node reads
   readonly model?: string;            // Model name (for display)
-  readonly timeout?: number;          // Per-node timeout in seconds (default: 3600)
+  readonly timeout?: number;          // Per-node timeout in seconds (default: 18000)
 }
 ```
 

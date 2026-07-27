@@ -23,7 +23,10 @@ import type {
   RetryPolicy,
   SessionConfig,
 } from './types';
-import { FlowAbortedError } from './types';
+import { DEFAULT_AGENT_TIMEOUT_SECS,
+  DEFAULT_CONTEXT_TIER,
+  DEFAULT_PRODUCER_MODEL,
+  DEFAULT_THINKING_BUDGET, FlowAbortedError } from './types';
 import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
 import type { ToolSpecificData, ImageToolData, ResourceToolData } from '../ui/tool-display/types';
 
@@ -279,14 +282,14 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void>
 function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionContext): SessionConfig {
   const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
   return {
-    model: config.model ?? 'claude-opus-4.6',
-    thinkingBudget: config.thinkingBudget,
-    ...(config.contextTier !== undefined
-      ? { contextTier: config.contextTier }
-      : {}),
+    model: config.model ?? DEFAULT_PRODUCER_MODEL,
+    thinkingBudget: config.thinkingBudget ?? DEFAULT_THINKING_BUDGET,
+    // ?? rather than a presence check: an explicit 'default' must survive, so a consumer
+    // can opt out of long context and not merely into it.
+    contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],
-    timeout: config.timeout ?? 3600,
+    timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,
     heartbeatTimeout: config.heartbeatTimeout ?? 900,
     systemMessage: config.systemMessage,
     availableTools: config.availableTools ?? (
@@ -565,7 +568,7 @@ export function agent(config: AgentConfig): NodeFn {
       const budgetMs = policy.budgetMs === undefined
         ? config.retry === undefined
           ? undefined
-          : (config.timeout ?? 3600) * 1000
+          : (config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS) * 1000
         : nonNegativeFinite(policy.budgetMs, 0);
       const retryDeadlineMs = ctx.retryDeadlineMs
         ?? (budgetMs === undefined ? undefined : Date.now() + budgetMs);

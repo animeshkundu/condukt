@@ -1,5 +1,10 @@
 import type { AgentNodeConfig, AgentNodeSchema } from './agent-node';
-import { FlowAbortedError } from './types';
+import {
+  DEFAULT_PANEL_TIMEOUT_SECS,
+  DEFAULT_CONTEXT_TIER,
+  DEFAULT_REVIEWER_MODEL,
+  FlowAbortedError,
+} from './types';
 import {
   extractJsonCandidates,
   loadReads,
@@ -28,7 +33,8 @@ import type {
 } from './types';
 
 export interface PanelMember {
-  readonly model: string;
+  /** Omit to take DEFAULT_REVIEWER_MODEL, which is cross-lab from the producer default. */
+  readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
   readonly system?: string;
@@ -60,6 +66,7 @@ export interface PanelConfig<T, V = unknown> {
   readonly fallback?: (error: Error) => T;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  /** Total wall-clock limit in seconds. Defaults to DEFAULT_PANEL_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly retry?: RetryPolicy;
@@ -87,12 +94,12 @@ async function runMember<T, V>(
   const memberOutput = `.condukt/${executionId}-${nodeId}-panel-member-${memberIndex}.json`;
   const memberConfig: AgentNodeConfig<V> = {
     prompt,
-    model: member.model,
+    model: member.model ?? DEFAULT_REVIEWER_MODEL,
     thinkingBudget: member.thinkingBudget ?? config.thinkingBudget,
-    contextTier: member.contextTier ?? config.contextTier,
+    contextTier: member.contextTier ?? config.contextTier ?? DEFAULT_CONTEXT_TIER,
     system: member.system,
     output: memberOutput,
-    timeout: config.timeout,
+    timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,
     isolation: config.isolation,
     retry: config.retry,
     customAgents: config.customAgents,
@@ -197,7 +204,7 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
     const retryWindowMs = retryBudgetMs === undefined
       ? config.retry === undefined
         ? undefined
-        : (config.timeout ?? 3600) * 1000
+        : (config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS) * 1000
       : Number.isFinite(retryBudgetMs)
         ? Math.max(0, retryBudgetMs)
         : 0;
@@ -271,7 +278,7 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
     nodeType: 'agent',
     output: config.output,
     reads: config.reads,
-    model: config.members[0]?.model ?? 'panel',
-    timeout: config.timeout,
+    model: config.members[0]?.model ?? DEFAULT_REVIEWER_MODEL,
+    timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,
   };
 }

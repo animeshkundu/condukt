@@ -14,7 +14,11 @@ import type {
   NodeInput,
   ExecutionContext,
 } from '../src/types';
-import { FlowValidationError, FlowAbortedError } from '../src/types';
+import {
+  DEFAULT_AGENT_TIMEOUT_SECS,
+  FlowValidationError,
+  FlowAbortedError,
+} from '../src/types';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
 import { run, computeFrontier, validateGraph } from '../src/scheduler';
 import { agent } from '../src/agent';
@@ -523,6 +527,49 @@ describe('scheduler', () => {
 
       const types = emittedTypes(opts);
       expect(types).toContain('run:resumed');
+    });
+
+    it.each([
+      {
+        name: 'uses the agent default for a deterministic node',
+        timeout: undefined,
+        expected: DEFAULT_AGENT_TIMEOUT_SECS,
+      },
+      {
+        name: 'preserves an explicit timeout',
+        timeout: 37,
+        expected: 37,
+      },
+    ])('$name', async ({ timeout, expected }) => {
+      vi.useFakeTimers();
+      try {
+        const blockingNode: NodeFn = async (_input, ctx) => {
+          await new Promise<void>((resolve) => {
+            ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return { action: 'default' };
+        };
+        const graph: FlowGraph = {
+          nodes: {
+            A: mockNodeEntry(blockingNode, {
+              ...(timeout === undefined ? {} : { timeout }),
+            }),
+          },
+          edges: {},
+          start: ['A'],
+        };
+        const opts = mockRunOptions();
+
+        const runPromise = run(graph, opts);
+        const resultExpectation = expect(runPromise).resolves.toMatchObject({ completed: false });
+        await vi.advanceTimersByTimeAsync(expected * 1000);
+        await resultExpectation;
+
+        const failEvent = emittedEvents(opts).find((event) => event.type === 'node:failed');
+        expect(failEvent).toMatchObject({ error: `Node timed out after ${expected}s` });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('node timeout aborts the execution context signal', async () => {

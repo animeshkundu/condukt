@@ -147,7 +147,8 @@ export interface NodeEntry {
   readonly output?: string;
   readonly reads?: readonly string[];
   readonly model?: string;
-  readonly timeout?: number; // seconds, default 3600
+  /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
+  readonly timeout?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +267,54 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   jitter: true,
 };
 
+/**
+ * Default total wall-clock limit for producer nodes, in seconds.
+ *
+ * The heartbeat independently detects dead sessions after 15 minutes without SDK
+ * events. This longer limit avoids killing healthy, productive generation while
+ * retaining a finite bound on the node's total runtime.
+ */
+export const DEFAULT_AGENT_TIMEOUT_SECS = 5 * 60 * 60;
+
+/**
+ * Default total wall-clock limit for review panels, in seconds.
+ *
+ * Review is bounded by an existing artifact rather than open-ended generation.
+ * Panel members run concurrently, so this bounds the slowest member, not their sum.
+ */
+export const DEFAULT_PANEL_TIMEOUT_SECS = 3 * 60 * 60;
+
+/**
+ * Default context tier requested when a config does not specify one.
+ *
+ * Truncation is the only silent failure in this library. A model that loses the middle
+ * of its context does not raise: it answers confidently from a partial view, and nothing
+ * downstream can tell that apart from a correct answer. Every other failure here is loud,
+ * so this one should not be the default.
+ *
+ * Safe to request unconditionally: the Copilot CLI documents long_context as "pin the
+ * session to the long-context tier WHEN SUPPORTED", so a model without a tiered context
+ * window ignores it rather than erroring. No per-model gating is needed.
+ *
+ * Set contextTier: 'default' explicitly to opt back out.
+ */
+export const DEFAULT_CONTEXT_TIER: ContextTier = 'long_context';
+
+/**
+ * Default model for the producer primitive (agent / agentNode).
+ *
+ * Producer and reviewer defaults are drawn from DIFFERENT labs on purpose. A reviewer
+ * that shares the producer's lineage shares its blind spots, so the default pairing is
+ * cross-lab and a consumer has to opt out of that rather than into it.
+ */
+export const DEFAULT_PRODUCER_MODEL = 'gpt-5.6-sol';
+
+/** Default model for the review primitive (panelNode). Cross-lab from the producer. */
+export const DEFAULT_REVIEWER_MODEL = 'claude-opus-5';
+
+/** Default reasoning effort. High is the useful floor for both producing and critiquing. */
+export const DEFAULT_THINKING_BUDGET: ThinkingBudget = 'high';
+
 /** Minimal structural MCP server configuration accepted by Copilot custom agents. */
 export interface MCPServerConfig {
   readonly type?: string;
@@ -377,8 +426,10 @@ export interface AgentConfig {
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
   readonly isolation?: boolean;
-  readonly timeout?: number;         // seconds, default 3600
-  readonly heartbeatTimeout?: number; // seconds, default 900
+  /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
+  readonly timeout?: number;
+  /** Dead-session limit in seconds without SDK events. Default: 900. */
+  readonly heartbeatTimeout?: number;
   /** Override session cwd. Default: input.dir. Use for running in repo dir while artifacts go to input.dir. */
   readonly cwdResolver?: (input: NodeInput) => string;
   readonly setup?: (input: NodeInput) => void | Promise<void>;
