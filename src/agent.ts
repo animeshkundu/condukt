@@ -281,6 +281,9 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
   return {
     model: config.model ?? 'claude-opus-4.6',
     thinkingBudget: config.thinkingBudget,
+    ...(config.contextTier !== undefined
+      ? { contextTier: config.contextTier }
+      : {}),
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],
     timeout: config.timeout ?? 3600,

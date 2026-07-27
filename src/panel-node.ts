@@ -15,6 +15,7 @@ import {
   writeOutput,
 } from './agent-node';
 import type {
+  ContextTier,
   CustomAgentConfig,
   DefaultAgentConfig,
   ExecutionContext,
@@ -23,10 +24,13 @@ import type {
   NodeOutput,
   RetryPolicy,
   SubagentRosterOption,
+  ThinkingBudget,
 } from './types';
 
 export interface PanelMember {
   readonly model: string;
+  readonly thinkingBudget?: ThinkingBudget;
+  readonly contextTier?: ContextTier;
   readonly system?: string;
   readonly id?: string;
 }
@@ -54,6 +58,8 @@ export interface PanelConfig<T, V = unknown> {
   readonly displayName?: string;
   readonly route?: (result: T) => string;
   readonly fallback?: (error: Error) => T;
+  readonly thinkingBudget?: ThinkingBudget;
+  readonly contextTier?: ContextTier;
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly retry?: RetryPolicy;
@@ -82,6 +88,8 @@ async function runMember<T, V>(
   const memberConfig: AgentNodeConfig<V> = {
     prompt,
     model: member.model,
+    thinkingBudget: member.thinkingBudget ?? config.thinkingBudget,
+    contextTier: member.contextTier ?? config.contextTier,
     system: member.system,
     output: memberOutput,
     timeout: config.timeout,

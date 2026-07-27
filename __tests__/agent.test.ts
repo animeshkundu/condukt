@@ -129,7 +129,7 @@ describe('agent factory', () => {
     );
   });
 
-  it('creates session with correct config', async () => {
+  it('creates today\'s session config when contextTier is omitted', async () => {
     const config: AgentConfig = {
       objective: 'test objective',
       model: 'gpt-5.3',
@@ -168,6 +168,30 @@ describe('agent factory', () => {
         memberId: undefined,
         artifactFilename: undefined,
       },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+    expect(vi.mocked(mockRuntime.createSession).mock.calls[0]?.[0])
+      .not.toHaveProperty('contextTier');
+  });
+
+  it('forwards contextTier and thinkingBudget to the session config', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({
+      model: 'gpt-5.6-sol',
+      contextTier: 'long_context',
+      thinkingBudget: 'xhigh',
+      promptBuilder: () => 'test prompt',
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-5.6-sol',
+        contextTier: 'long_context',
+        thinkingBudget: 'xhigh',
+      }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

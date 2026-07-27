@@ -200,11 +200,12 @@ describe('SdkBackend event mapping', () => {
       expect(classifySdkEvent(phantom), phantom).toBeUndefined();
     }
   });
-  it('forwards contextTier and configDirectory to the SDK session config', async () => {
+  it('forwards contextTier, thinkingBudget, and configDirectory to the SDK session config', async () => {
     const backend = new SdkBackend({ configDir: '/project', subagentRoster: false });
     await backend.createSession({
       model: 'test-model',
       contextTier: 'long_context',
+      thinkingBudget: 'xhigh',
       cwd: '.',
       addDirs: [],
       timeout: 3600,
@@ -214,6 +215,7 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => {
       expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
         contextTier: 'long_context',
+        reasoningEffort: 'xhigh',
         configDirectory: '/project',
       }));
     });

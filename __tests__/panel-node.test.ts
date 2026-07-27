@@ -65,6 +65,69 @@ describe('panelNode', () => {
     }
   });
 
+  it('applies panel context and effort defaults while member values take precedence', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const captured: SessionConfig[] = [];
+    const runtime: AgentRuntime = {
+      name: 'panel-config-runtime',
+      createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
+        captured.push(sessionConfig);
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) {
+              handler(sessionConfig.memberId ?? 'member');
+            }
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = panelNode({
+      prompt: 'Vote',
+      contextTier: 'long_context',
+      thinkingBudget: 'high',
+      members: [
+        { id: 'inherited', model: 'inherited-model' },
+        {
+          id: 'overridden',
+          model: 'overridden-model',
+          contextTier: 'default',
+          thinkingBudget: 'low',
+        },
+      ],
+      reconcile: (verdicts: readonly string[]) => verdicts.join(','),
+    });
+    const context: ExecutionContext = {
+      executionId: 'panel-config',
+      nodeId: 'panel',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    const byMember = new Map(captured.map((config) => [config.memberId, config]));
+    expect(byMember.get('inherited')).toEqual(expect.objectContaining({
+      model: 'inherited-model',
+      contextTier: 'long_context',
+      thinkingBudget: 'high',
+    }));
+    expect(byMember.get('overridden')).toEqual(expect.objectContaining({
+      model: 'overridden-model',
+      contextTier: 'default',
+      thinkingBudget: 'low',
+    }));
+  });
+
   it('reconciles a three-member fixture sequence, routes, and writes JSON', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
