@@ -417,22 +417,20 @@ async function resetLoopBody(
   failedNodes: Set<string>,
   emitState: (event: ExecutionEvent) => Promise<void>,
 ): Promise<void> {
+  const clearedEdges: Array<{ source: string; target: string }> = [];
+
   // Reset each target node
   for (const target of targets) {
     completed.delete(target);
     nodeStatuses.delete(target);
-    firedEdges.delete(target);
+    const firedSources = firedEdges.get(target);
+    if (firedSources) {
+      for (const source of firedSources) {
+        clearedEdges.push({ source, target });
+      }
+      firedEdges.delete(target);
+    }
     failedNodes.delete(target);
-
-    await emitState({
-      type: 'node:reset',
-      executionId,
-      nodeId: target,
-      reason: 'loop-back',
-      iteration,
-      sourceNodeId,
-      ts: Date.now(),
-    });
   }
 
   // Reset the source node
@@ -444,12 +442,29 @@ async function resetLoopBody(
   const sourceFiredSources = firedEdges.get(sourceNodeId);
   if (sourceFiredSources) {
     for (const target of targets) {
-      sourceFiredSources.delete(target);
+      if (sourceFiredSources.delete(target)) {
+        clearedEdges.push({ source: target, target: sourceNodeId });
+      }
     }
     // If no sources left, remove the entry entirely
     if (sourceFiredSources.size === 0) {
       firedEdges.delete(sourceNodeId);
     }
+  }
+
+  // Carry the complete batch delta once. Repeating this event is safe because
+  // the projection reducer only restores the listed edges to 'default'.
+  for (let index = 0; index < targets.length; index++) {
+    await emitState({
+      type: 'node:reset',
+      executionId,
+      nodeId: targets[index],
+      reason: 'loop-back',
+      iteration,
+      sourceNodeId,
+      ...(index === 0 && clearedEdges.length > 0 ? { clearedEdges } : {}),
+      ts: Date.now(),
+    });
   }
 
   await emitState({
@@ -479,6 +494,7 @@ async function resetLoopRegion(
   emitState: (event: ExecutionEvent) => Promise<void>,
 ): Promise<void> {
   const resetNodes = new Set([...region.nodes, region.decision]);
+  const clearedEdges: Array<{ source: string; target: string }> = [];
 
   for (const nodeId of resetNodes) {
     completed.delete(nodeId);
@@ -490,6 +506,7 @@ async function resetLoopRegion(
       for (const source of [...firedSources]) {
         if (resetNodes.has(source)) {
           firedSources.delete(source);
+          clearedEdges.push({ source, target: nodeId });
         }
       }
       if (firedSources.size === 0) {
@@ -503,12 +520,17 @@ async function resetLoopRegion(
   for (const target of continueTargets) {
     const firedSources = firedEdges.get(target);
     if (!firedSources) continue;
-    firedSources.delete(region.decision);
+    if (firedSources.delete(region.decision)) {
+      clearedEdges.push({ source: region.decision, target });
+    }
     if (firedSources.size === 0) {
       firedEdges.delete(target);
     }
   }
 
+  // Carry the complete batch delta once, including continuation targets outside
+  // the reset set. Subsequent reset events only carry their node state change.
+  let index = 0;
   for (const nodeId of resetNodes) {
     await emitState({
       type: 'node:reset',
@@ -517,10 +539,14 @@ async function resetLoopRegion(
       reason: 'loop-back',
       iteration,
       sourceNodeId: region.decision,
+      ...(index === 0 && clearedEdges.length > 0 ? { clearedEdges } : {}),
       ts: Date.now(),
     });
+    index += 1;
   }
 }
+
+export const _resetLoopRegionForTesting = resetLoopRegion;
 
 // ---------------------------------------------------------------------------
 // Usage attribution

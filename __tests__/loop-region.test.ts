@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { replayEvents } from '../state/reducer';
-import { run, validateGraph } from '../src/scheduler';
+import { reduce, replayEvents } from '../state/reducer';
+import { _buildResumeStateForTesting } from '../bridge/bridge';
+import { _resetLoopRegionForTesting, run, validateGraph } from '../src/scheduler';
 import { FlowValidationError } from '../src/types';
 import type {
   AgentRuntime,
@@ -337,6 +338,174 @@ describe('loop regions', () => {
     expect(events.filter(event =>
       event.type === 'node:started' && event.nodeId === 'produce'
     )).toHaveLength(2);
+  });
+
+  it('removes a previously taken legacy loop-back edge at the reset boundary', async () => {
+    let decisionRuns = 0;
+    const events: ExecutionEvent[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        entry: entry(async () => ({ action: 'default' })),
+        decision: entry(async () => {
+          decisionRuns += 1;
+          return { action: decisionRuns <= 2 ? 'continue' : 'exit' };
+        }),
+        done: entry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        entry: { default: 'decision' },
+        decision: { continue: 'entry', exit: 'done' },
+      },
+      start: ['entry'],
+      loopFallback: {
+        'decision:continue': {
+          source: 'decision',
+          action: 'continue',
+          fallbackTarget: 'done',
+          maxIterations: 3,
+        },
+      },
+    };
+    const options = runOptions(events);
+
+    await run(graph, options);
+
+    const sourceResetIndexes = events
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event.type === 'node:reset' && event.nodeId === 'decision')
+      .map(({ index }) => index);
+    const throughSecondReset = events.slice(0, sourceResetIndexes[1] + 1);
+    const projection = replayEvents(options.executionId, throughSecondReset);
+    const resumeState = _buildResumeStateForTesting(
+      projection,
+      graph,
+      throughSecondReset,
+    );
+
+    expect(sourceResetIndexes).toHaveLength(2);
+    expect(projection.graph.edges.find(edge =>
+      edge.source === 'decision' &&
+      edge.target === 'entry' &&
+      edge.action === 'continue'
+    )?.state).toBe('default');
+    expect(resumeState.firedEdges.get('entry')?.has('decision') ?? false).toBe(false);
+  });
+
+  it('reconstructs exactly the scheduler reset state while preserving external fan-in', async () => {
+    const loop = region({
+      nodes: ['produce', 'critique', 'refine'],
+      entry: 'produce',
+      decision: 'refine',
+    });
+    const graph: FlowGraph = {
+      nodes: {
+        external: entry(async () => ({ action: 'default' })),
+        produce: entry(async () => ({ action: 'default' })),
+        critique: entry(async () => ({ action: 'default' })),
+        refine: entry(async () => ({ action: 'continue' })),
+        outside: entry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        external: { default: 'produce' },
+        produce: { default: 'critique' },
+        critique: { default: 'refine' },
+        refine: { continue: ['produce', 'outside'], exit: 'end' },
+      },
+      start: ['external'],
+      loops: [loop],
+    };
+    const executionId = 'reset-equivalence';
+    const beforeResetEvents: ExecutionEvent[] = [
+      {
+        type: 'run:started',
+        executionId,
+        flowId: 'reset-equivalence',
+        params: {},
+        graph: {
+          nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+            id,
+            displayName: node.displayName,
+            nodeType: node.nodeType,
+          })),
+          edges: [
+            { source: 'external', action: 'default', target: 'produce' },
+            { source: 'produce', action: 'default', target: 'critique' },
+            { source: 'critique', action: 'default', target: 'refine' },
+            { source: 'refine', action: 'continue', target: 'produce' },
+            { source: 'refine', action: 'continue', target: 'outside' },
+            { source: 'refine', action: 'exit', target: 'end' },
+          ],
+        },
+        ts: 1,
+      },
+      { type: 'edge:traversed', executionId, source: 'external', target: 'produce', action: 'default', ts: 2 },
+      { type: 'edge:traversed', executionId, source: 'produce', target: 'critique', action: 'default', ts: 3 },
+      { type: 'edge:traversed', executionId, source: 'critique', target: 'refine', action: 'default', ts: 4 },
+      { type: 'edge:traversed', executionId, source: 'refine', target: 'produce', action: 'continue', ts: 5 },
+      { type: 'edge:traversed', executionId, source: 'refine', target: 'outside', action: 'continue', ts: 6 },
+    ];
+    const projectionBeforeReset = replayEvents(executionId, beforeResetEvents);
+    const completed = new Map([
+      ['produce', { action: 'default', finishedAt: 1 }],
+      ['critique', { action: 'default', finishedAt: 1 }],
+      ['refine', { action: 'continue', finishedAt: 1 }],
+    ]);
+    const nodeStatuses = new Map([
+      ['produce', 'completed'],
+      ['critique', 'completed'],
+      ['refine', 'completed'],
+    ]);
+    const schedulerFiredEdges = new Map<string, Set<string>>([
+      ['produce', new Set(['external', 'refine'])],
+      ['critique', new Set(['produce'])],
+      ['refine', new Set(['critique'])],
+      ['outside', new Set(['refine'])],
+    ]);
+    const resetEvents: ExecutionEvent[] = [];
+
+    await _resetLoopRegionForTesting(
+      loop,
+      ['produce', 'outside'],
+      1,
+      executionId,
+      completed,
+      nodeStatuses,
+      schedulerFiredEdges,
+      new Set(),
+      async event => {
+        resetEvents.push(event);
+      },
+    );
+
+    const projectionAfterReset = resetEvents.reduce(reduce, projectionBeforeReset);
+    const projectedResumeState = _buildResumeStateForTesting(
+      projectionAfterReset,
+      graph,
+      [...beforeResetEvents, ...resetEvents],
+    );
+    const carriers = resetEvents.filter(event =>
+      event.type === 'node:reset' && event.clearedEdges !== undefined
+    );
+
+    expect(projectedResumeState.firedEdges).toEqual(schedulerFiredEdges);
+    expect(schedulerFiredEdges).toEqual(new Map([
+      ['produce', new Set(['external'])],
+    ]));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]).toMatchObject({
+      clearedEdges: expect.arrayContaining([
+        { source: 'produce', target: 'critique' },
+        { source: 'critique', target: 'refine' },
+        { source: 'refine', target: 'produce' },
+        { source: 'refine', target: 'outside' },
+      ]),
+    });
+    expect(projectionAfterReset.graph.edges.find(edge =>
+      edge.source === 'external' && edge.target === 'produce'
+    )?.state).toBe('taken');
+
+    const replayedCarrier = reduce(projectionAfterReset, carriers[0]);
+    expect(replayedCarrier).toEqual(projectionAfterReset);
   });
 
   it('preserves external fan-in while clearing and rebuilding internal contributions', async () => {
