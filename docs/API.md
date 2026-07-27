@@ -37,7 +37,7 @@ Parameters in `AgentConfig`:
 | `model` | `string?` | Model name (default: `'claude-opus-4.6'`) |
 | `isolation` | `boolean?` | If true, no extra dirs passed to session |
 | `timeout` | `number?` | Hard timeout in seconds (default: 3600) |
-| `heartbeatTimeout` | `number?` | No-output timeout in seconds (default: 120) |
+| `heartbeatTimeout` | `number?` | No-output timeout in seconds (default: 900) |
 | `cwdResolver` | `(input: NodeInput) => string?` | Override session cwd. Default: `input.dir`. Use for running in a repo dir while artifacts go to `input.dir`. |
 | `setup` | `(input: NodeInput) => void \| Promise<void>?` | Pre-execution hook |
 | `teardown` | `(input: NodeInput) => void \| Promise<void>?` | Post-execution hook (always runs) |

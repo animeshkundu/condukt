@@ -1,10 +1,10 @@
 /**
  * Classification for the GitHub Copilot SDK session event surface.
  *
- * Unknown events are deliberately not treated as informational by callers: the
- * SdkBackend applies a failure-shaped fallback and leaves silence to its
- * heartbeat watchdog. Keep the informational shim for SubprocessBackend's
- * JSONL warning suppression.
+ * Every received SDK event is liveness evidence and refreshes SdkBackend's
+ * heartbeat before this classification is consulted. Classification remains
+ * responsible only for event semantics and unknown-event diagnostics. Keep the
+ * informational shim for SubprocessBackend's JSONL warning suppression.
  */
 
 export type SdkEventClass =
@@ -24,10 +24,11 @@ const PENDING_REQUEST = new Set([
 ]);
 
 const STREAMING_LIVENESS = new Set([
+  'model.call_start',
   'assistant.reasoning', 'assistant.reasoning_delta',
   'assistant.message', 'assistant.message_start', 'assistant.message_delta',
-  'assistant.streaming_delta', 'assistant.tool_call_delta',
-  'assistant.turn_start', 'assistant.turn_end', 'assistant.intent',
+  'assistant.server_tool_progress', 'assistant.streaming_delta', 'assistant.tool_call_delta',
+  'assistant.turn_start', 'assistant.turn_retry', 'assistant.turn_end', 'assistant.intent',
   'assistant.idle', 'assistant.usage',
   'tool.user_requested', 'tool.execution_start',
   'tool.execution_partial_result', 'tool.execution_progress',
@@ -39,6 +40,8 @@ const STREAMING_LIVENESS = new Set([
 const INFORMATIONAL = new Set([
   'session.start', 'session.resume', 'session.shutdown',
   'session.info', 'session.warning', 'session.title_changed',
+  'session.auto_mode_resolved', 'session.managed_settings_enforced',
+  'session.managed_settings_resolved', 'session.memory_changed',
   'session.context_changed', 'session.usage_info', 'session.usage_checkpoint',
   'session.model_change', 'session.mode_changed', 'session.plan_changed',
   'session.todos_changed', 'session.permissions_changed',
@@ -46,10 +49,12 @@ const INFORMATIONAL = new Set([
   'session.schedule_created', 'session.schedule_cancelled', 'session.schedule_rearmed',
   'session.autopilot_objective_changed', 'session.truncation',
   'session.snapshot_rewind', 'session.workspace_file_changed', 'session.handoff',
-  'session.background_tasks_changed', 'session.skills_loaded',
+  'session.background_tasks_changed', 'factory.run_updated', 'session.skills_loaded',
   'session.custom_agents_updated', 'session.extensions_loaded',
   'session.mcp_server_status_changed', 'session.mcp_servers_loaded',
-  'session.tools_updated', 'session.binary_asset', 'session.custom_notification',
+  'mcp.tools.list_changed', 'mcp.resources.list_changed', 'mcp.prompts.list_changed',
+  'session.tools_updated', 'tool_search.activated',
+  'session.binary_asset', 'session.custom_notification',
   'session.extensions.attachments_pushed',
   'user.message', 'pending_messages.modified', 'system.message',
   'system.notification', 'skill.invoked',

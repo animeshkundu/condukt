@@ -65,6 +65,16 @@ npm run clean         # Remove dist/
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
 9. **Follow `docs/DESIGN_LANGUAGE.md`** — all visual tokens, spacing, typography, and component patterns are codified there
+10. **Latest stable, always** — pin every dependency, GitHub Action, and Node version to the current stable release unless there is a stated reason not to. Verify the real latest before pinning (`npm view <pkg> version --registry=https://registry.npmjs.org/`, `gh api repos/actions/<name>/releases/latest -q .tag_name`); never carry a version forward by copying an existing file. Any deliberate exception must carry a comment saying why. See "Dependency policy" below.
+
+## Dependency policy
+
+Pin to the latest stable of everything unless there is a reason not to, and write the reason down where the pin lives.
+
+- **Verify, do not assume.** Versions move. Check the registry or the GitHub API at the moment you pin. Copying a version from a neighbouring file is how a repo silently rots several majors behind.
+- **The local npm registry is unreliable.** This machine's default registry is a corporate proxy that lags badly and has served a `latest` several minor versions stale. Always install with `--registry=https://registry.npmjs.org/`, and always pass `--include=dev`, because this machine otherwise prunes dev dependencies and breaks the local test setup. The lockfile already resolves to registry.npmjs.org, so this is consistent with CI.
+- **Legitimate reasons not to take latest**, each of which must be commented at the pin site: a floating transitive dependency that changes behaviour between patch releases and therefore needs an exact pin for reproducibility; a peer range that must stay wide so consumers are not forced to upgrade; a documented upstream regression.
+- **A major upgrade is a change, not a chore.** Record the failing-test baseline first, upgrade, then prove no NEW failures. Never absorb a breaking change with `any`, `@ts-ignore`, or by loosening compiler strictness.
 
 ## Test Suites
 

@@ -10,10 +10,14 @@
  * that captures event handlers and lets us simulate SDK events.
  */
 
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SdkBackend } from '../../runtimes/copilot/sdk-backend';
 import { classifySdkEvent, KNOWN_SDK_EVENT_TYPES } from '../../runtimes/copilot/lifecycle-events';
 import type { CopilotSession } from '../../runtimes/copilot/copilot-backend';
+import type { SessionConfig } from '../../src/types';
 
 // ---------------------------------------------------------------------------
 // Mock SDK types that mirror the real SDK's shape
@@ -90,7 +94,10 @@ let originalFunction: typeof globalThis.Function;
  * Creates a SdkBackend session with a mock SDK module.
  * Returns the CopilotSession and the mock so tests can simulate SDK events.
  */
-async function createTestSession(options: ConstructorParameters<typeof SdkBackend>[0] = {}): Promise<{ session: CopilotSession; mock: MockSdkSession }> {
+async function createTestSession(
+  options: ConstructorParameters<typeof SdkBackend>[0] = {},
+  config: Partial<SessionConfig> = {},
+): Promise<{ session: CopilotSession; mock: MockSdkSession }> {
   const backend = new SdkBackend(options);
   const session = await backend.createSession({
     model: 'test-model',
@@ -98,9 +105,46 @@ async function createTestSession(options: ConstructorParameters<typeof SdkBacken
     addDirs: [],
     timeout: 3600,
     heartbeatTimeout: 120,
+    ...config,
   });
 
   return { session, mock: mockSdkSession };
+}
+
+interface JsonSchemaDefinition {
+  readonly anyOf?: ReadonlyArray<{ readonly $ref?: string }>;
+  readonly properties?: { readonly type?: { readonly const?: string } };
+}
+
+interface SessionEventsSchema {
+  readonly definitions?: Readonly<Record<string, JsonSchemaDefinition>>;
+}
+
+function findSessionEventsSchema(): string {
+  const nodeModules = fileURLToPath(new URL('../../node_modules/', import.meta.url));
+  const githubPackages = join(nodeModules, '@github');
+  const schemaPath = readdirSync(githubPackages)
+    .filter(name => name.startsWith('copilot-'))
+    .map(name => join(githubPackages, name, 'schemas', 'session-events.schema.json'))
+    .find(existsSync);
+  if (!schemaPath) throw new Error('Installed Copilot CLI session-events.schema.json not found');
+  return schemaPath;
+}
+
+function authoritativeSdkEventTypes(): string[] {
+  const schema = JSON.parse(readFileSync(findSessionEventsSchema(), 'utf8')) as SessionEventsSchema;
+  const definitions = schema.definitions;
+  const variants = definitions?.SessionEvent?.anyOf;
+  if (!definitions || !variants) throw new Error('Invalid Copilot CLI session event schema');
+
+  return variants.map((variant) => {
+    const definitionName = variant.$ref?.split('/').at(-1);
+    const eventType = definitionName
+      ? definitions[definitionName]?.properties?.type?.const
+      : undefined;
+    if (!eventType) throw new Error(`Session event variant has no type discriminator: ${variant.$ref ?? '(missing ref)'}`);
+    return eventType;
+  });
 }
 
 // We need to mock the `new Function('specifier', 'return import(specifier)')` pattern.
@@ -146,46 +190,12 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('SdkBackend event mapping', () => {
-  it('classifies the authoritative SDK 1.0.6 top-level event catalog', () => {
-    const eventTypes = [
-      'abort', 'assistant.idle', 'assistant.intent', 'assistant.message_delta',
-      'assistant.message_start', 'assistant.message', 'assistant.reasoning_delta',
-      'assistant.reasoning', 'assistant.streaming_delta', 'assistant.tool_call_delta',
-      'assistant.turn_end', 'assistant.turn_start', 'assistant.usage',
-      'auto_mode_switch.completed', 'auto_mode_switch.requested', 'capabilities.changed',
-      'command.completed', 'command.execute', 'command.queued', 'commands.changed',
-      'elicitation.completed', 'elicitation.requested', 'exit_plan_mode.completed',
-      'exit_plan_mode.requested', 'external_tool.completed', 'external_tool.requested',
-      'hook.end', 'hook.progress', 'hook.start', 'mcp_app.tool_call_complete',
-      'mcp.headers_refresh_completed', 'mcp.headers_refresh_required',
-      'mcp.oauth_completed', 'mcp.oauth_required', 'model.call_failure',
-      'pending_messages.modified', 'permission.completed', 'permission.requested',
-      'sampling.completed', 'sampling.requested', 'session_limits_exhausted.completed',
-      'session_limits_exhausted.requested', 'session.autopilot_objective_changed',
-      'session.background_tasks_changed', 'session.binary_asset', 'session.canvas.closed',
-      'session.canvas.opened', 'session.canvas.recorded', 'session.canvas.registry_changed',
-      'session.canvas.removed', 'session.canvas.unavailable', 'session.compaction_complete',
-      'session.compaction_start', 'session.context_changed', 'session.custom_agents_updated',
-      'session.custom_notification', 'session.error', 'session.extensions_loaded',
-      'session.extensions.attachments_pushed', 'session.handoff', 'session.idle',
-      'session.info', 'session.mcp_server_status_changed', 'session.mcp_servers_loaded',
-      'session.mode_changed', 'session.model_change', 'session.permissions_changed',
-      'session.plan_changed', 'session.remote_steerable_changed', 'session.resume',
-      'session.schedule_cancelled', 'session.schedule_created', 'session.schedule_rearmed',
-      'session.session_limits_changed', 'session.shutdown', 'session.skills_loaded',
-      'session.snapshot_rewind', 'session.start', 'session.task_complete',
-      'session.title_changed', 'session.todos_changed', 'session.tools_updated',
-      'session.truncation', 'session.usage_checkpoint', 'session.usage_info',
-      'session.warning', 'session.workspace_file_changed', 'skill.invoked',
-      'subagent.completed', 'subagent.deselected', 'subagent.failed',
-      'subagent.selected', 'subagent.started', 'system.message', 'system.notification',
-      'tool.execution_complete', 'tool.execution_partial_result',
-      'tool.execution_progress', 'tool.execution_start', 'tool.user_requested',
-      'user_input.completed', 'user_input.requested', 'user.message',
-    ];
+  it('classifies every event in the authoritative installed SDK schema', () => {
+    const eventTypes = authoritativeSdkEventTypes();
+    const unclassified = eventTypes.filter(type => classifySdkEvent(type) === undefined);
 
-    expect(KNOWN_SDK_EVENT_TYPES.size).toBe(eventTypes.length);
-    for (const type of eventTypes) expect(classifySdkEvent(type), type).toBeDefined();
+    expect(unclassified).toEqual([]);
+    expect(KNOWN_SDK_EVENT_TYPES).toEqual(new Set(eventTypes));
     for (const phantom of ['assistant.tool_call', 'blob', 'agent_completed', 'agent_idle', 'shell_completed', 'shell_detached_completed']) {
       expect(classifySdkEvent(phantom), phantom).toBeUndefined();
     }
@@ -581,6 +591,51 @@ describe('SdkBackend event mapping', () => {
     expect(toolOutputHandler).toHaveBeenCalledWith('Read', 'new output', 'new-parent');
   });
 
+  it('keeps an active session alive when only unknown events arrive', async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      for (let eventCount = 0; eventCount < 6; eventCount += 1) {
+        await vi.advanceTimersByTimeAsync(1500);
+        mock._emit('future.progress');
+      }
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('Unknown event: future.progress'));
+      mock._emit('session.idle');
+    } finally {
+      stderr.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a long model call alive from model.call_start events', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 180 });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      for (let elapsedSeconds = 0; elapsedSeconds < 12 * 60; elapsedSeconds += 150) {
+        await vi.advanceTimersByTimeAsync(150 * 1000);
+        mock._emit('model.call_start');
+      }
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      mock._emit('session.idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fails unknown failure-shaped events instead of hanging', async () => {
     const { session, mock } = await createTestSession();
     const errorHandler = vi.fn();
@@ -593,6 +648,29 @@ describe('SdkBackend event mapping', () => {
     expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining('future.transport_fatal'),
     }));
+  });
+
+  it('still fails terminal events immediately after liveness resets', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1500);
+
+      mock._emit('model.call_failure', { errorMessage: 'upstream failed' });
+
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('upstream failed'),
+      }));
+      await vi.advanceTimersByTimeAsync(2 * 1000);
+      expect(errorHandler).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('treats error shutdown as terminal failure and routine shutdown as benign', async () => {

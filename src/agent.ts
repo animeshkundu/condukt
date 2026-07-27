@@ -284,7 +284,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],
     timeout: config.timeout ?? 3600,
-    heartbeatTimeout: config.heartbeatTimeout ?? 120,
+    heartbeatTimeout: config.heartbeatTimeout ?? 900,
     systemMessage: config.systemMessage,
     availableTools: config.availableTools ?? (
       config.tools && config.tools.length > 0
