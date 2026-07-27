@@ -109,6 +109,11 @@ export interface LoopRegion {
    * Exactly one of maxIterations or maxRounds must be set.
    */
   readonly maxRounds?: number;
+  /**
+   * Optional wall-clock budget for the whole region, measured from first entry.
+   * Before another round starts, its estimated duration must fit the remaining budget.
+   */
+  readonly budgetMs?: number;
   readonly onExhausted?: EdgeTarget;
   readonly feedback?: (
     decisionOutput: string | null,

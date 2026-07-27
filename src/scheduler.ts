@@ -90,6 +90,12 @@ export function validateGraph(graph: FlowGraph): void {
     if (region.maxRounds !== undefined && region.maxRounds < 1) {
       issues.push(`Loop region '${region.id}' maxRounds must be at least 1`);
     }
+    if (
+      region.budgetMs !== undefined
+      && (!Number.isFinite(region.budgetMs) || region.budgetMs < 0)
+    ) {
+      issues.push(`Loop region '${region.id}' budgetMs must be a non-negative finite number`);
+    }
 
     const regionNodes = new Set<string>();
     for (const nodeId of region.nodes) {
@@ -704,8 +710,17 @@ export async function run(
   const loopIterations = new Map<string, number>(); // legacy source:action or region:id → iteration count
   const loopRetryContexts = new Map<string, RetryContext>(); // nodeId → RetryContext for loop re-dispatch
   const loopRegionsByDecision = new Map<string, LoopRegion>();
+  const loopRegionsByNode = new Map<string, LoopRegion>();
+  const loopRegionTimings = new Map<string, {
+    startedAt: number;
+    roundStartedAt: number;
+    maxRoundElapsedMs: number;
+  }>();
   for (const region of graph.loops ?? []) {
     loopRegionsByDecision.set(region.decision, region);
+    if (region.budgetMs !== undefined) {
+      for (const nodeId of region.nodes) loopRegionsByNode.set(nodeId, region);
+    }
   }
 
   let pending: string[];
@@ -757,6 +772,21 @@ export async function run(
         ts: Date.now(),
       });
       throw new FlowAbortedError('Flow aborted');
+    }
+
+    // Start a budgeted region's clock at its first entry, before dispatch.
+    if (loopRegionsByNode.size > 0) {
+      const batchStartedAt = Date.now();
+      for (const nodeId of pending) {
+        const region = loopRegionsByNode.get(nodeId);
+        if (region && !loopRegionTimings.has(region.id)) {
+          loopRegionTimings.set(region.id, {
+            startedAt: batchStartedAt,
+            roundStartedAt: batchStartedAt,
+            maxRoundElapsedMs: 0,
+          });
+        }
+      }
     }
 
     // Emit node:started for all pending nodes first
@@ -1034,29 +1064,67 @@ export async function run(
         const effectiveMaxLoopBacks = region.maxRounds !== undefined
           ? region.maxRounds - 1
           : region.maxIterations!;
-        if (currentIteration > effectiveMaxLoopBacks) {
+        const countExhausted = currentIteration > effectiveMaxLoopBacks;
+        const timing = loopRegionTimings.get(region.id);
+        let timeExhaustion: {
+          reason: 'time';
+          budgetMs: number;
+          elapsedMs: number;
+          estimatedNextRoundMs: number;
+        } | undefined;
+
+        if (!countExhausted && timing && region.budgetMs !== undefined) {
+          const now = Date.now();
+          const roundElapsedMs = now - timing.roundStartedAt;
+          // The slowest completed round is deliberately conservative: a fast round
+          // cannot pull the estimate down and tempt us into work that may be killed.
+          timing.maxRoundElapsedMs = Math.max(timing.maxRoundElapsedMs, roundElapsedMs);
+          const elapsedMs = now - timing.startedAt;
+          if (elapsedMs + timing.maxRoundElapsedMs >= region.budgetMs) {
+            timeExhaustion = {
+              reason: 'time',
+              budgetMs: region.budgetMs,
+              elapsedMs,
+              estimatedNextRoundMs: timing.maxRoundElapsedMs,
+            };
+          }
+        }
+
+        if (countExhausted || timeExhaustion) {
+          const exhaustion = timeExhaustion ?? { reason: 'count' as const };
           const exhaustionTarget = region.onExhausted ?? edgeMap[region.exitOn];
           const exhaustionAction = region.onExhausted === undefined
             ? region.exitOn
             : action;
+          if (region.budgetMs !== undefined) {
+            logger.info(
+              `Loop region '${region.id}' exhausted by ${exhaustion.reason} budget`,
+              exhaustion,
+            );
+          }
           for (const target of normalizeTargets(exhaustionTarget)) {
-            if (target === 'end') continue;
-            let sources = firedEdges.get(target);
-            if (!sources) {
-              sources = new Set();
-              firedEdges.set(target, sources);
+            if (target !== 'end') {
+              let sources = firedEdges.get(target);
+              if (!sources) {
+                sources = new Set();
+                firedEdges.set(target, sources);
+              }
+              sources.add(nodeId);
+            } else if (region.budgetMs === undefined) {
+              continue;
             }
-            sources.add(nodeId);
             await emitState({
               type: 'edge:traversed',
               executionId,
               source: nodeId,
               target,
               action: exhaustionAction,
+              ...(region.budgetMs === undefined ? {} : { exhaustion }),
               ts: Date.now(),
             });
           }
         } else {
+          if (timing) timing.roundStartedAt = Date.now();
           const entryNode = graph.nodes[region.entry];
           let priorOutput: string | null = null;
           if (entryNode.output) {

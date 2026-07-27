@@ -78,6 +78,59 @@ function validationGraph(loops: readonly LoopRegion[]): FlowGraph {
   };
 }
 
+function timedLoopGraph(options: {
+  budgetMs: number;
+  maxRounds: number;
+  exitAfterRound?: number;
+}): {
+  graph: FlowGraph;
+  counts: Record<'produce' | 'decision' | 'done' | 'exhausted', number>;
+} {
+  const counts = { produce: 0, decision: 0, done: 0, exhausted: 0 };
+  const graph: FlowGraph = {
+    nodes: {
+      produce: entry(async () => {
+        counts.produce += 1;
+        vi.advanceTimersByTime(40);
+        return { action: 'default' };
+      }),
+      decision: entry(async () => {
+        counts.decision += 1;
+        vi.advanceTimersByTime(10);
+        return {
+          action: counts.decision === options.exitAfterRound ? 'exit' : 'continue',
+        };
+      }),
+      done: entry(async () => {
+        counts.done += 1;
+        return { action: 'default' };
+      }),
+      exhausted: entry(async () => {
+        counts.exhausted += 1;
+        return { action: 'default' };
+      }),
+    },
+    edges: {
+      produce: { default: 'decision' },
+      decision: { continue: 'produce', exit: 'done' },
+    },
+    start: ['produce'],
+    loops: [{
+      id: 'timed-loop',
+      nodes: ['produce', 'decision'],
+      entry: 'produce',
+      decision: 'decision',
+      continueOn: 'continue',
+      exitOn: 'exit',
+      maxRounds: options.maxRounds,
+      budgetMs: options.budgetMs,
+      onExhausted: 'exhausted',
+    }],
+  };
+
+  return { graph, counts };
+}
+
 describe('loop regions', () => {
   it('runs the three-node body N + 1 times for N loop-backs before exit', async () => {
     const counts: Record<string, number> = {
@@ -175,6 +228,104 @@ describe('loop regions', () => {
     expect(events.filter(event =>
       event.type === 'node:reset' && event.nodeId === 'produce'
     )).toHaveLength(2);
+    expect(events.find(event =>
+      event.type === 'edge:traversed' && event.target === 'done'
+    )).not.toHaveProperty('exhaustion');
+  });
+
+  it('exits through onExhausted before a round that cannot fit the time budget', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const events: ExecutionEvent[] = [];
+      const logger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const { graph, counts } = timedLoopGraph({ budgetMs: 120, maxRounds: 10 });
+
+      const result = await run(graph, { ...runOptions(events), logger });
+
+      expect(result.completed).toBe(true);
+      expect(counts).toEqual({ produce: 2, decision: 2, done: 0, exhausted: 1 });
+      const timeExhaustion = {
+        reason: 'time',
+        budgetMs: 120,
+        elapsedMs: 100,
+        estimatedNextRoundMs: 50,
+      };
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'edge:traversed',
+        source: 'decision',
+        target: 'exhausted',
+        exhaustion: timeExhaustion,
+      }));
+      expect(logger.info).toHaveBeenCalledWith(
+        "Loop region 'timed-loop' exhausted by time budget",
+        timeExhaustion,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues when the remaining budget comfortably fits another round', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const events: ExecutionEvent[] = [];
+      const { graph, counts } = timedLoopGraph({
+        budgetMs: 200,
+        maxRounds: 10,
+        exitAfterRound: 3,
+      });
+
+      const result = await run(graph, runOptions(events));
+
+      expect(result.completed).toBe(true);
+      expect(counts).toEqual({ produce: 3, decision: 3, done: 1, exhausted: 0 });
+      expect(events.some(event =>
+        event.type === 'edge:traversed' && event.exhaustion !== undefined
+      )).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses whichever loop bound trips first and records count exhaustion distinctly', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const countEvents: ExecutionEvent[] = [];
+      const countFirst = timedLoopGraph({ budgetMs: 1_000, maxRounds: 2 });
+      await run(countFirst.graph, runOptions(countEvents));
+
+      expect(countFirst.counts).toEqual({
+        produce: 2,
+        decision: 2,
+        done: 0,
+        exhausted: 1,
+      });
+      expect(countEvents).toContainEqual(expect.objectContaining({
+        type: 'edge:traversed',
+        exhaustion: { reason: 'count' },
+      }));
+
+      vi.setSystemTime(2_000);
+      const timeEvents: ExecutionEvent[] = [];
+      const timeFirst = timedLoopGraph({ budgetMs: 120, maxRounds: 10 });
+      await run(timeFirst.graph, runOptions(timeEvents));
+
+      expect(timeFirst.counts.produce).toBe(2);
+      expect(timeEvents).toContainEqual(expect.objectContaining({
+        type: 'edge:traversed',
+        exhaustion: expect.objectContaining({ reason: 'time' }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resumes with only the remaining maxRounds budget', async () => {
@@ -231,6 +382,7 @@ describe('loop regions', () => {
       region({ maxIterations: undefined, maxRounds: 0 }),
     ]);
     const invalidIterations = validationGraph([region({ maxIterations: -1 })]);
+    const invalidBudget = validationGraph([region({ budgetMs: Number.NaN })]);
 
     for (const graph of [neither, both]) {
       expect(() => validateGraph(graph)).toThrow(
@@ -242,6 +394,9 @@ describe('loop regions', () => {
     );
     expect(() => validateGraph(invalidIterations)).toThrow(
       "Loop region 'review-loop' maxIterations must be at least 0",
+    );
+    expect(() => validateGraph(invalidBudget)).toThrow(
+      "Loop region 'review-loop' budgetMs must be a non-negative finite number",
     );
   });
 
