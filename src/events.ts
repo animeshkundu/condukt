@@ -203,8 +203,20 @@ export type ExecutionEvent =
   | NodeResetEvent;
 
 // ---------------------------------------------------------------------------
-// Output events (3 types — streamed, NOT persisted in event log)
+// Output events (streamed, NOT persisted in event log)
 // ---------------------------------------------------------------------------
+
+export interface NodePromptEvent {
+  readonly type: 'node:prompt';
+  readonly executionId: string;
+  readonly nodeId: string;
+  /** Human-readable role for the model turn. */
+  readonly role: string;
+  readonly model: string;
+  /** Complete request sent to the model. */
+  readonly content: string;
+  readonly ts: number;
+}
 
 export interface NodeOutputEvent {
   readonly type: 'node:output';
@@ -288,6 +300,7 @@ export interface NodePermissionEvent {
 
 /** Discriminated union of output events (streamed, not persisted). */
 export type OutputEvent =
+  | NodePromptEvent
   | NodeOutputEvent
   | NodeToolEvent
   | NodeReasoningEvent

@@ -126,6 +126,10 @@ condukt is split into sub-path exports so you only pull in what you need.
 | `condukt/theme` | Tailwind preset, `STATUS_COLORS`, design tokens |
 | `condukt/utils` | Shared utilities |
 
+### Bridge console output
+
+`createBridge` logs complete model requests and responses plus compact, redacted tool calls by default. Raw tool results are hidden. Set `renderPrompts: false` to omit requests, choose `toolOutputMode: 'preview' | 'full'` for tool diagnostics, and tune the 200-character compact preview with `toolPreviewMaxChars`. Tool completion events stay quiet because printing both start and completion would double per-call noise without adding the actionable call input.
+
 ## Node types
 
 | Factory | Purpose | Example |

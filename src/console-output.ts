@@ -1,7 +1,14 @@
-import type { OutputEvent } from './events';
+import type {
+  NodeOutputEvent,
+  NodePromptEvent,
+  NodeReasoningEvent,
+  NodeToolEvent,
+  OutputEvent,
+} from './events';
 
 export type OutputEventSink = (event: OutputEvent) => void;
 export type OutputRedactor = (value: string) => string;
+export type ToolOutputMode = 'hidden' | 'preview' | 'full';
 
 export interface ConsoleOutputOptions {
   /** Literal values known by the consumer to be secrets. */
@@ -10,6 +17,15 @@ export interface ConsoleOutputOptions {
   readonly redactor?: OutputRedactor;
   /** Render node:reasoning events. Defaults to false. */
   readonly renderReasoning?: boolean;
+  /** Render complete model requests. Defaults to true. */
+  readonly renderPrompts?: boolean;
+  /**
+   * Raw tool-result rendering. Defaults to hidden because the compact tool call
+   * already carries the useful signal. Use preview or full for tool debugging.
+   */
+  readonly toolOutputMode?: ToolOutputMode;
+  /** Maximum redacted tool-call or tool-output preview length. Defaults to 200. */
+  readonly toolPreviewMaxChars?: number;
 }
 
 export interface ConsoleOutputRenderer {
@@ -19,17 +35,17 @@ export interface ConsoleOutputRenderer {
   readonly flush: () => void;
 }
 
-type RenderableOutputEvent = Extract<
-  OutputEvent,
-  { readonly type: 'node:output' | 'node:reasoning' }
->;
+type StreamedOutputEvent = NodePromptEvent | NodeOutputEvent | NodeReasoningEvent;
 
 type PendingLine = {
+  readonly nodeId: string;
   readonly content: string;
+  readonly prefix: string;
   readonly privateKey?: boolean;
 };
 
 const REDACTED = '[REDACTED]';
+const DEFAULT_TOOL_PREVIEW_MAX_CHARS = 200;
 const PRIVATE_KEY_BEGIN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/u;
 const PRIVATE_KEY_END = /-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/u;
 const PRIVATE_KEY_BLOCK =
@@ -93,20 +109,51 @@ function safeEmissionBoundary(
   return safeBoundary;
 }
 
+function safeStringify(value: Readonly<Record<string, unknown>> | undefined): string {
+  if (!value) return '';
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function compact(value: string): string {
+  return value.replace(/\s+/gu, ' ').trim();
+}
+
+function streamKey(...parts: readonly string[]): string {
+  return JSON.stringify(parts);
+}
+
+function label(value: string): string {
+  return value.replace(/[\r\n]+/gu, ' ');
+}
+
+function previewLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_TOOL_PREVIEW_MAX_CHARS;
+  return Math.max(1, Math.trunc(value));
+}
+
 /**
- * Creates a plain-text OutputEvent renderer that writes attributed lines to stdout.
- * Call flushNode at a node lifecycle boundary, or flush after the run, to write any
- * final unterminated line.
+ * Creates a plain-text OutputEvent renderer for readable request/response logs.
+ * Model prose is line-buffered and complete, tool calls are compact, raw tool
+ * results are hidden by default, and all text is redacted before truncation.
  */
 export function createConsoleOutputRenderer(
   options: ConsoleOutputOptions = {},
 ): ConsoleOutputRenderer {
   const buffers = new Map<string, Map<string, PendingLine>>();
+  const subagents = new Map<string, Map<string, string>>();
+  const activeTurns = new Map<string, Set<string>>();
   const useBuiltInRedactor = options.redactor === undefined;
   const redact = options.redactor ?? redactConsoleOutput;
   const knownSecrets = options.knownSecrets ?? [];
+  const toolOutputMode = options.toolOutputMode ?? 'hidden';
+  const maxToolPreviewChars = previewLimit(options.toolPreviewMaxChars);
 
-  function safeWrite(value: string): void {
+  // Keep all writes on one guarded path so rendering failures stay isolated.
+  function writeStdout(value: string): void {
     try {
       process.stdout.write(value);
     } catch {
@@ -114,17 +161,31 @@ export function createConsoleOutputRenderer(
     }
   }
 
-  function writeLine(nodeId: string, content: string): void {
+  function redactText(value: string): string | undefined {
     try {
-      const safeNodeId = nodeId.replace(/[\r\n]/g, ' ');
-      const attributed = `[${safeNodeId}] ${content}`;
-      // Redact every byte destined for stdout before any subsequent slicing.
-      const redacted = redactKnownSecrets(redact(attributed), knownSecrets);
-      const normalized = redacted.endsWith('\r') ? redacted.slice(0, -1) : redacted;
-      safeWrite(`${normalized}\n`);
+      return redactKnownSecrets(redact(value), knownSecrets);
     } catch {
-      // Output rendering must never interrupt an execution.
+      return undefined;
     }
+  }
+
+  function writeLine(prefix: string, content: string): void {
+    const redacted = redactText(`${prefix}${content}`);
+    if (redacted === undefined) return;
+    const normalized = redacted.endsWith('\r') ? redacted.slice(0, -1) : redacted;
+    writeStdout(`${normalized}\n`);
+  }
+
+  function writeCompactLine(prefix: string, content: string): void {
+    const redacted = redactText(`${prefix}${content}`);
+    if (redacted === undefined) return;
+    const indentation = prefix.match(/^\s+/u)?.[0] ?? '';
+    const compacted = compact(redacted);
+    const maximum = compact(prefix).length + maxToolPreviewChars;
+    const preview = compacted.length > maximum
+      ? `${compacted.slice(0, Math.max(0, maximum - 1))}…`
+      : compacted;
+    writeStdout(`${indentation}${preview}\n`);
   }
 
   function getNodeBuffers(executionId: string): Map<string, PendingLine> {
@@ -136,16 +197,41 @@ export function createConsoleOutputRenderer(
     return nodeBuffers;
   }
 
-  function flushPendingLine(executionId: string, nodeId: string): void {
+  function nestedLabel(
+    executionId: string,
+    nodeId: string,
+    parentToolCallId: string | undefined,
+  ): string | undefined {
+    if (!parentToolCallId) return undefined;
+    return subagents.get(executionId)?.get(streamKey(nodeId, parentToolCallId))
+      ?? `subagent:${label(parentToolCallId)}`;
+  }
+
+  function linePrefix(
+    executionId: string,
+    nodeId: string,
+    parentToolCallId?: string,
+  ): string {
+    const agentName = nestedLabel(executionId, nodeId, parentToolCallId);
+    if (agentName) return `[${label(nodeId)}/${label(agentName)}] `;
+    if (activeTurns.get(executionId)?.has(nodeId)) return '   ';
+    return `[${label(nodeId)}] `;
+  }
+
+  function outputStreamKey(nodeId: string, parentToolCallId?: string): string {
+    return streamKey('output', nodeId, parentToolCallId ?? '');
+  }
+
+  function flushPendingLine(executionId: string, streamKey: string): void {
     const nodeBuffers = buffers.get(executionId);
-    const pending = nodeBuffers?.get(nodeId);
+    const pending = nodeBuffers?.get(streamKey);
     if (!nodeBuffers || !pending) return;
 
-    nodeBuffers.delete(nodeId);
+    nodeBuffers.delete(streamKey);
     if (nodeBuffers.size === 0) buffers.delete(executionId);
 
     if (pending.privateKey) {
-      writeLine(nodeId, REDACTED);
+      writeLine(pending.prefix, REDACTED);
       return;
     }
 
@@ -153,16 +239,20 @@ export function createConsoleOutputRenderer(
     if (useBuiltInRedactor) content = redactConsoleOutput(content);
     let newlineIndex = content.indexOf('\n');
     while (newlineIndex >= 0) {
-      writeLine(nodeId, content.slice(0, newlineIndex));
+      writeLine(pending.prefix, content.slice(0, newlineIndex));
       content = content.slice(newlineIndex + 1);
       newlineIndex = content.indexOf('\n');
     }
-    if (content.length > 0) writeLine(nodeId, content);
+    if (content.length > 0) writeLine(pending.prefix, content);
   }
 
-  function render(event: RenderableOutputEvent): void {
+  function renderStream(
+    event: StreamedOutputEvent,
+    streamKey: string,
+    prefix: string,
+  ): void {
     const nodeBuffers = getNodeBuffers(event.executionId);
-    const pending = nodeBuffers.get(event.nodeId);
+    const pending = nodeBuffers.get(streamKey);
     let content = (pending?.content ?? '') + event.content;
     let privateKey = pending?.privateKey === true;
     const boundary = safeEmissionBoundary(content, knownSecrets, useBuiltInRedactor);
@@ -171,12 +261,12 @@ export function createConsoleOutputRenderer(
     let newlineIndex = emitted.indexOf('\n');
 
     while (newlineIndex >= 0) {
-      let line = emitted.slice(0, newlineIndex);
+      const line = emitted.slice(0, newlineIndex);
       emitted = emitted.slice(newlineIndex + 1);
 
       if (useBuiltInRedactor && privateKey) {
         if (PRIVATE_KEY_END.test(line)) {
-          writeLine(event.nodeId, REDACTED);
+          writeLine(prefix, REDACTED);
           privateKey = false;
         }
       } else if (
@@ -186,7 +276,7 @@ export function createConsoleOutputRenderer(
       ) {
         privateKey = true;
       } else {
-        writeLine(event.nodeId, line);
+        writeLine(prefix, line);
       }
 
       newlineIndex = emitted.indexOf('\n');
@@ -194,20 +284,122 @@ export function createConsoleOutputRenderer(
 
     const currentNodeBuffers = getNodeBuffers(event.executionId);
     if (content.length > 0 || privateKey) {
-      currentNodeBuffers.set(event.nodeId, { content, privateKey });
+      currentNodeBuffers.set(streamKey, {
+        nodeId: event.nodeId,
+        content,
+        prefix,
+        privateKey,
+      });
     } else {
-      currentNodeBuffers.delete(event.nodeId);
+      currentNodeBuffers.delete(streamKey);
       if (currentNodeBuffers.size === 0) buffers.delete(event.executionId);
     }
   }
 
+  function flushOutputStream(
+    executionId: string,
+    nodeId: string,
+    parentToolCallId?: string,
+  ): void {
+    flushPendingLine(executionId, outputStreamKey(nodeId, parentToolCallId));
+  }
+
+  function renderPrompt(event: NodePromptEvent): void {
+    flushNode(event.executionId, event.nodeId);
+    writeLine('', `\n── ${label(event.nodeId)} · ${label(event.role)} · ${label(event.model)} ──`);
+    if (options.renderPrompts !== false) {
+      writeLine('', '   REQUEST');
+      const requestKey = streamKey('prompt', event.nodeId, String(event.ts));
+      renderStream(event, requestKey, '   ');
+      flushPendingLine(event.executionId, requestKey);
+    }
+    writeLine('', '   RESPONSE');
+
+    let nodes = activeTurns.get(event.executionId);
+    if (!nodes) {
+      nodes = new Set<string>();
+      activeTurns.set(event.executionId, nodes);
+    }
+    nodes.add(event.nodeId);
+  }
+
+  function renderTool(event: NodeToolEvent): void {
+    if (event.phase === 'complete') return;
+    flushOutputStream(event.executionId, event.nodeId, event.parentToolCallId);
+    const source = event.summary.trim().length > 0 ? event.summary : safeStringify(event.args);
+    const prefix = `${linePrefix(
+      event.executionId,
+      event.nodeId,
+      event.parentToolCallId,
+    )}→ ${label(event.tool)}${source.trim().length > 0 ? ' ' : ''}`;
+    writeCompactLine(prefix, source);
+  }
+
+  function renderToolOutput(event: NodeOutputEvent): void {
+    if (!event.tool || toolOutputMode === 'hidden') return;
+    flushOutputStream(event.executionId, event.nodeId, event.parentToolCallId);
+    const prefix = `${linePrefix(
+      event.executionId,
+      event.nodeId,
+      event.parentToolCallId,
+    )}← ${label(event.tool)}${event.content.length > 0 ? ' ' : ''}`;
+
+    if (toolOutputMode === 'preview') {
+      writeCompactLine(prefix, event.content);
+      return;
+    }
+
+    const key = streamKey(
+      'tool-output',
+      event.nodeId,
+      event.parentToolCallId ?? '',
+      event.tool,
+    );
+    renderStream(event, key, prefix);
+  }
+
+  function rememberSubagent(event: Extract<OutputEvent, { readonly type: 'node:subagent' }>): void {
+    if (!event.toolCallId) return;
+    let executionSubagents = subagents.get(event.executionId);
+    if (!executionSubagents) {
+      executionSubagents = new Map<string, string>();
+      subagents.set(event.executionId, executionSubagents);
+    }
+    executionSubagents.set(streamKey(event.nodeId, event.toolCallId), event.agentName);
+  }
+
   const emitOutput: OutputEventSink = (event) => {
     try {
-      if (
-        event.type === 'node:output'
-        || (event.type === 'node:reasoning' && options.renderReasoning === true)
-      ) {
-        render(event);
+      switch (event.type) {
+        case 'node:prompt':
+          renderPrompt(event);
+          break;
+        case 'node:subagent':
+          rememberSubagent(event);
+          break;
+        case 'node:tool':
+          renderTool(event);
+          break;
+        case 'node:output':
+          if (event.tool) {
+            renderToolOutput(event);
+          } else {
+            const streamKey = outputStreamKey(event.nodeId, event.parentToolCallId);
+            renderStream(
+              event,
+              streamKey,
+              linePrefix(event.executionId, event.nodeId, event.parentToolCallId),
+            );
+          }
+          break;
+        case 'node:reasoning':
+          if (options.renderReasoning === true) {
+            const streamKey = outputStreamKey(event.nodeId);
+            renderStream(event, streamKey, linePrefix(event.executionId, event.nodeId));
+          }
+          break;
+        default:
+          break;
       }
     } catch {
       // Output rendering must never interrupt an execution.
@@ -216,7 +408,11 @@ export function createConsoleOutputRenderer(
 
   const flushNode = (executionId: string, nodeId: string): void => {
     try {
-      flushPendingLine(executionId, nodeId);
+      const nodeBuffers = buffers.get(executionId);
+      if (!nodeBuffers) return;
+      for (const [streamKey, pending] of [...nodeBuffers.entries()]) {
+        if (pending.nodeId === nodeId) flushPendingLine(executionId, streamKey);
+      }
     } catch {
       // Output rendering must never interrupt an execution.
     }
@@ -225,25 +421,33 @@ export function createConsoleOutputRenderer(
   const flushExecution = (executionId: string): void => {
     try {
       const nodeBuffers = buffers.get(executionId);
-      if (!nodeBuffers) return;
-
-      for (const nodeId of [...nodeBuffers.keys()]) {
-        flushPendingLine(executionId, nodeId);
+      if (nodeBuffers) {
+        for (const streamKey of [...nodeBuffers.keys()]) {
+          flushPendingLine(executionId, streamKey);
+        }
       }
     } catch {
       // Output rendering must never interrupt an execution.
       buffers.delete(executionId);
+    } finally {
+      subagents.delete(executionId);
+      activeTurns.delete(executionId);
     }
   };
 
   const flush = (): void => {
     try {
-      for (const executionId of [...buffers.keys()]) {
-        flushExecution(executionId);
-      }
+      const executionIds = new Set([
+        ...buffers.keys(),
+        ...subagents.keys(),
+        ...activeTurns.keys(),
+      ]);
+      for (const executionId of executionIds) flushExecution(executionId);
     } catch {
       // Output rendering must never interrupt an execution.
       buffers.clear();
+      subagents.clear();
+      activeTurns.clear();
     }
   };
 

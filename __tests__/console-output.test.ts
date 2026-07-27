@@ -366,6 +366,205 @@ describe('console output renderer', () => {
     expect(renderOutput(`${sha} ${uuid}\n`)).toBe(`[worker] ${sha} ${uuid}\n`);
   });
 
+  it('renders model prose in full without truncating a long single line', () => {
+    const prose = 'complete-response-'.repeat(80);
+
+    expect(renderOutput(`${prose}\n`)).toBe(`[worker] ${prose}\n`);
+  });
+
+  it('hides tool output by default, with compact and full diagnostic modes', () => {
+    const hiddenStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const hiddenRenderer = createConsoleOutputRenderer();
+    hiddenRenderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'shell',
+      content: 'raw tool output',
+      ts: 1,
+    });
+    expect(hiddenStdout).not.toHaveBeenCalled();
+
+    hiddenStdout.mockRestore();
+    const compactStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const compactRenderer = createConsoleOutputRenderer({ toolOutputMode: 'preview' });
+    compactRenderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'shell',
+      content: `first line\n${'x'.repeat(400)}\nlast line`,
+      ts: 1,
+    });
+
+    const compact = writtenOutput(compactStdout);
+    expect(compact.split('\n').filter(Boolean)).toHaveLength(1);
+    expect(compact).toContain('[worker] ← shell first line ');
+    expect(compact).not.toContain('last line');
+    expect(compact.trim().length).toBeLessThanOrEqual('[worker] ← shell'.length + 200);
+
+    compactStdout.mockRestore();
+    const orderedStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const orderedRenderer = createConsoleOutputRenderer({
+      redactor: (value) => value.replaceAll('secret\nvalue', '[REDACTED]'),
+      toolOutputMode: 'preview',
+    });
+    orderedRenderer.emitOutput({
+      type: 'node:output', executionId: 'exec', nodeId: 'worker', tool: 'shell',
+      content: `prefix ${'x'.repeat(220)} secret\nvalue`, ts: 1,
+    });
+    expect(writtenOutput(orderedStdout)).not.toContain('secret value');
+
+    orderedStdout.mockRestore();
+    const fullStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const fullRenderer = createConsoleOutputRenderer({ toolOutputMode: 'full' });
+    fullRenderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'shell',
+      content: 'first line\nsecond line\n',
+      ts: 1,
+    });
+
+    expect(writtenOutput(fullStdout)).toBe(
+      '[worker] ← shell first line\n[worker] ← shell second line\n',
+    );
+  });
+
+  it('renders a tool call as one compact line and omits completion noise', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const renderer = createConsoleOutputRenderer();
+    renderer.emitOutput({
+      type: 'node:tool',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'read_file',
+      phase: 'start',
+      summary: '  /tmp/input.txt\nwith extra detail  ',
+      args: { path: '/tmp/input.txt' },
+      toolCallId: 'call-1',
+      ts: 1,
+    });
+    renderer.emitOutput({
+      type: 'node:tool',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'read_file',
+      phase: 'complete',
+      summary: 'large completion output',
+      toolCallId: 'call-1',
+      ts: 2,
+    });
+
+    expect(writtenOutput(stdout)).toBe(
+      '[worker] → read_file /tmp/input.txt with extra detail\n',
+    );
+  });
+
+  it('attributes nested output and tools to the subagent that produced them', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const renderer = createConsoleOutputRenderer();
+    renderer.emitOutput({
+      type: 'node:subagent',
+      executionId: 'exec',
+      nodeId: 'worker',
+      agentName: 'researcher',
+      phase: 'start',
+      toolCallId: 'subagent-1',
+      ts: 1,
+    });
+    renderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      content: 'complete finding\n',
+      parentToolCallId: 'subagent-1',
+      ts: 2,
+    });
+    renderer.emitOutput({
+      type: 'node:tool',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'search',
+      phase: 'start',
+      summary: 'query',
+      parentToolCallId: 'subagent-1',
+      ts: 3,
+    });
+
+    expect(writtenOutput(stdout)).toBe(
+      '[worker/researcher] complete finding\n[worker/researcher] → search query\n',
+    );
+  });
+
+  it('renders the complete prompt once per turn with request and response delimiters', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const renderer = createConsoleOutputRenderer();
+    const prompt = `complete request\n${'p'.repeat(1_000)}`;
+    renderer.emitOutput({
+      type: 'node:prompt',
+      executionId: 'exec',
+      nodeId: 'worker',
+      role: 'reviewer',
+      model: 'model-x',
+      content: prompt,
+      ts: 1,
+    });
+    renderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      content: 'complete response',
+      ts: 2,
+    });
+    renderer.flush();
+
+    const written = writtenOutput(stdout);
+    expect(written).toContain('── worker · reviewer · model-x ──');
+    expect(written).toContain(`   REQUEST\n   complete request\n   ${'p'.repeat(1_000)}\n   RESPONSE\n`);
+    expect(written).toContain('   complete response\n');
+    expect(written.match(/   REQUEST/gu)).toHaveLength(1);
+  });
+
+  it('redacts prose, prompts, and tool previews before truncating', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const renderer = createConsoleOutputRenderer({ toolOutputMode: 'preview' });
+    const token = `ghp_${'a'.repeat(36)}`;
+    renderer.emitOutput({
+      type: 'node:prompt', executionId: 'exec', nodeId: 'worker', role: 'agent',
+      model: 'model-x', content: `request ${token}`, ts: 1,
+    });
+    renderer.emitOutput({
+      type: 'node:output', executionId: 'exec', nodeId: 'worker',
+      content: `response ${token}\n`, ts: 2,
+    });
+    renderer.emitOutput({
+      type: 'node:output', executionId: 'exec', nodeId: 'worker', tool: 'shell',
+      content: `${'x'.repeat(140)} ${token} trailing tool output`, ts: 3,
+    });
+
+    const written = writtenOutput(stdout);
+    expect(written).not.toContain(token);
+    expect(written).not.toContain('ghp_');
+    expect(written.match(/\[REDACTED\]/gu)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('bounds line volume for a large multiline tool result', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const renderer = createConsoleOutputRenderer({ toolOutputMode: 'preview' });
+    renderer.emitOutput({
+      type: 'node:output',
+      executionId: 'exec',
+      nodeId: 'worker',
+      tool: 'test_runner',
+      content: Array.from({ length: 5_000 }, (_, index) => `test ${index} passed`).join('\n'),
+      ts: 1,
+    });
+
+    expect(writtenOutput(stdout).split('\n').filter(Boolean)).toHaveLength(1);
+  });
+
   it('does not render reasoning by default', () => {
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const renderer = createConsoleOutputRenderer();
@@ -528,8 +727,11 @@ describe('bridge output sink', () => {
     const secret = 'consumer-secret';
     const bridge = createBridge(createMockRuntime(), stateRuntime, {
       knownSecrets: [secret],
-      outputRedactor: (value) => value.replace('visible', 'custom'),
+      outputRedactor: (value) => value.replaceAll('visible', 'custom'),
       renderReasoning: true,
+      renderPrompts: false,
+      toolOutputMode: 'full',
+      toolPreviewMaxChars: 80,
     });
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-output-'));
     tempDirs.push(dir);
@@ -542,13 +744,27 @@ describe('bridge output sink', () => {
         content: 'visible reasoning\n',
         ts: Date.now(),
       });
+      ctx.emitOutput({
+        type: 'node:output',
+        executionId: ctx.executionId,
+        nodeId: ctx.nodeId,
+        tool: 'shell',
+        content: 'visible tool output\nsecond line',
+        ts: Date.now(),
+      });
     });
 
     await bridge.launch({ executionId: 'redacted-output', graph, dir, params: {} });
     await waitForCompletion(bridge, 'redacted-output');
 
     const written = stdout.mock.calls.map(call => String(call[0])).join('');
-    expect(written).toBe('[worker] custom [REDACTED]\n[worker] custom reasoning\n');
+    expect(written).toBe([
+      '[worker] custom [REDACTED]',
+      '[worker] custom reasoning',
+      '[worker] ← shell custom tool output',
+      '[worker] ← shell second line',
+      '',
+    ].join('\n'));
   });
 
   it('uses a consumer sink instead of stdout and still captures state', async () => {

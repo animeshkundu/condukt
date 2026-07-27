@@ -58,6 +58,10 @@ export interface RetryContext {
 export interface ExecutionContext {
   readonly executionId: string;
   readonly nodeId: string;
+  /** Display name of the currently executing graph node, when scheduler-owned. */
+  readonly nodeDisplayName?: string;
+  /** Configured model of the currently executing graph node, when available. */
+  readonly nodeModel?: string;
   readonly runtime: AgentRuntime;
   readonly emitOutput: (event: OutputEvent) => void;
   /** Scheduler-owned state channel used by agent() for observable session retries. */

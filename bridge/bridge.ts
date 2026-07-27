@@ -27,6 +27,7 @@ import {
   createConsoleOutputRenderer,
   type OutputEventSink,
   type OutputRedactor,
+  type ToolOutputMode,
 } from '../src/console-output';
 import type { StateRuntime } from '../state/state-runtime';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
@@ -68,6 +69,15 @@ export interface BridgeOptions {
   readonly outputRedactor?: OutputRedactor;
   /** Render node:reasoning events to stdout. Defaults to false. */
   readonly renderReasoning?: boolean;
+  /** Render complete model requests to stdout. Defaults to true. */
+  readonly renderPrompts?: boolean;
+  /**
+   * Raw tool-result rendering: hidden (default), a compact preview, or full.
+   * Tool calls always render as one compact line.
+   */
+  readonly toolOutputMode?: ToolOutputMode;
+  /** Maximum redacted tool-call or tool-output preview length. Defaults to 200. */
+  readonly toolPreviewMaxChars?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +94,9 @@ export function createBridge(
       knownSecrets: options?.knownSecrets,
       redactor: options?.outputRedactor,
       renderReasoning: options?.renderReasoning,
+      renderPrompts: options?.renderPrompts,
+      toolOutputMode: options?.toolOutputMode,
+      toolPreviewMaxChars: options?.toolPreviewMaxChars,
     })
     : null;
   const outputSink = options?.emitOutput === undefined

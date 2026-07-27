@@ -476,6 +476,12 @@ async function runSessionAttempt(
     });
 
     const activeSession = session;
+    ctx.emitOutput({
+      type: 'node:prompt', executionId: ctx.executionId, nodeId: ctx.nodeId,
+      role: config.memberId ?? ctx.nodeDisplayName ?? 'agent',
+      model: config.model ?? ctx.nodeModel ?? 'claude-opus-4.6',
+      content: prompt, ts: Date.now(),
+    });
     activeSession.send(prompt);
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => {
