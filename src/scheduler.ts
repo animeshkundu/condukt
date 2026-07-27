@@ -851,6 +851,8 @@ export async function run(
         const execCtx: ExecutionContext = {
           executionId,
           nodeId,
+          nodeDisplayName: entry.displayName,
+          nodeModel: entry.model,
           runtime,
           emitOutput,
           emitState,

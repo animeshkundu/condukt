@@ -34,6 +34,7 @@ export type {
   ConsoleOutputRenderer,
   OutputEventSink,
   OutputRedactor,
+  ToolOutputMode,
 } from './console-output';
 
 // Types
@@ -65,6 +66,6 @@ export type {
   GateResolvedEvent, NodeRetryingEvent, EdgeTraversedEvent,
   ArtifactWrittenEvent, CostRecordedEvent, MetadataEvent,
   NodeResetEvent,
-  NodeOutputEvent, NodeToolEvent, NodeReasoningEvent,
+  NodePromptEvent, NodeOutputEvent, NodeToolEvent, NodeReasoningEvent,
   GraphNodeSkeleton, GraphEdgeSkeleton,
 } from './events';

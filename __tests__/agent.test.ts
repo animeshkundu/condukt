@@ -318,19 +318,26 @@ describe('agent factory', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const events = emitCalls.map((c: any[]) => c[0] as OutputEvent);
 
-    // Should have: 1 text output + 1 tool start + 1 tool complete = 3 events
-    expect(events).toHaveLength(3);
+    // Prompt is emitted once immediately before the streamed response and tools.
+    expect(events).toHaveLength(4);
     expect(events[0]).toMatchObject({
+      type: 'node:prompt',
+      content: 'go',
+      role: 'agent',
+      model: 'claude-opus-4.6',
+      nodeId: 'node-1',
+    });
+    expect(events[1]).toMatchObject({
       type: 'node:output',
       content: 'Hello world',
       nodeId: 'node-1',
     });
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: 'node:tool',
       tool: 'read_file',
       phase: 'start',
     });
-    expect(events[2]).toMatchObject({
+    expect(events[3]).toMatchObject({
       type: 'node:tool',
       tool: 'read_file',
       phase: 'complete',
@@ -528,8 +535,8 @@ describe('agent factory', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const events = emitCalls.map((c: any[]) => c[0] as OutputEvent);
 
-    // Should have: 2 reasoning + 1 text = 3 events
-    expect(events).toHaveLength(3);
+    // Should have: 1 prompt + 2 reasoning + 1 text = 4 events
+    expect(events).toHaveLength(4);
 
     const reasoningEvents = events.filter(e => e.type === 'node:reasoning');
     expect(reasoningEvents).toHaveLength(2);
