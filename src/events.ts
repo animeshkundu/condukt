@@ -128,6 +128,15 @@ export interface EdgeTraversedEvent {
   readonly source: string;
   readonly target: string;
   readonly action: string;
+  /** Present when a loop region takes its graceful exhaustion path. */
+  readonly exhaustion?:
+    | { readonly reason: 'count' }
+    | {
+        readonly reason: 'time';
+        readonly budgetMs: number;
+        readonly elapsedMs: number;
+        readonly estimatedNextRoundMs: number;
+      };
   readonly ts: number;
 }
 
