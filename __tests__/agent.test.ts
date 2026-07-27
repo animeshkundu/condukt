@@ -113,6 +113,22 @@ describe('agent factory', () => {
     mockRuntime = createMockRuntime(mockSession);
   });
 
+  it('defaults the heartbeat timeout to 15 minutes', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({ promptBuilder: () => 'test prompt' })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    );
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ heartbeatTimeout: 900 }),
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
   it('creates session with correct config', async () => {
     const config: AgentConfig = {
       objective: 'test objective',

@@ -770,12 +770,14 @@ class SdkSession implements CopilotSession {
     // --- Session idle (agent finished all work) ---
     sdkSession.on('session.idle', () => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
+      this.resetHeartbeat();
       this.settleIdle();
     });
 
     // --- task_complete → idle (some models fire this instead of session.idle) ---
     sdkSession.on('session.task_complete', () => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
+      this.resetHeartbeat();
       this.settleIdle();
     });
 
@@ -783,6 +785,7 @@ class SdkSession implements CopilotSession {
     // terminal event is lost, fail quickly rather than waiting for heartbeat.
     sdkSession.on('abort', (e: SdkEvent) => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
+      this.resetHeartbeat();
       if (this.intentionalAborts.delete(sdkSession)) return;
       if (this.abortGraceTimer) clearTimeout(this.abortGraceTimer);
       this.abortGraceTimer = setTimeout(() => {
@@ -796,13 +799,11 @@ class SdkSession implements CopilotSession {
     // --- Session/model errors ---
     sdkSession.on('session.error', (e: SdkEvent) => {
       if (!isActive()) return;
+      this.resetHeartbeat();
       // A rate-limit error eligible for automatic model switching is followed by
       // auto_mode_switch.requested. Let the headless policy resolve that request
       // instead of tearing down the session before it can recover.
-      if (e.data?.eligibleForAutoSwitch === true) {
-        this.resetHeartbeat();
-        return;
-      }
+      if (e.data?.eligibleForAutoSwitch === true) return;
       const msg = typeof e.data?.message === 'string' ? e.data.message : 'Unknown session error';
       this.fail(new Error(msg), 'session.error', e.data);
     });
@@ -813,6 +814,7 @@ class SdkSession implements CopilotSession {
     // condukt session immediately instead of waiting for its heartbeat timeout.
     sdkSession.on('model.call_failure', (e: SdkEvent) => {
       if (!isActive()) return;
+      this.resetHeartbeat();
       const data = e.data;
       const detail = typeof data?.errorMessage === 'string'
         ? data.errorMessage
@@ -836,6 +838,7 @@ class SdkSession implements CopilotSession {
     // (not reset) to prevent killing the session. Hard timeout remains as safety net.
     sdkSession.on('session.compaction_start', () => {
       if (!isActive()) return;
+      this.resetHeartbeat();
       this.compactionInProgress = true;
       // SUSPEND heartbeat — compaction silence is expected
       if (this.heartbeatTimer) {
@@ -1092,7 +1095,9 @@ class SdkSession implements CopilotSession {
   }
 
   private dispatchClassEvent(sdkSession: SdkSessionHandle, e: SdkEvent): void {
-    if (!e || typeof e.type !== 'string' || NAMED_SDK_EVENTS.has(e.type)) return;
+    if (!e || typeof e.type !== 'string') return;
+    this.resetHeartbeat();
+    if (NAMED_SDK_EVENTS.has(e.type)) return;
     const eventClass = classifySdkEvent(e.type);
     if (e.type === 'session.shutdown' && e.data?.shutdownType === 'error') {
       const reason = typeof e.data.errorReason === 'string'
@@ -1109,12 +1114,8 @@ class SdkSession implements CopilotSession {
       this.fail(new Error(`SDK terminal failure: ${e.type}`), e.type, e.data);
       return;
     }
-    if (eventClass === 'streaming-liveness') {
-      this.resetHeartbeat();
-      return;
-    }
+    if (eventClass === 'streaming-liveness') return;
     if (eventClass === 'pending-request') {
-      this.resetHeartbeat();
       void this.resolvePendingRequest(sdkSession, e);
       return;
     }
@@ -1190,7 +1191,7 @@ class SdkSession implements CopilotSession {
   }
 
   private resetHeartbeat(): void {
-    if (this.aborted || this.turnSettled || !this._sdkSession) return;
+    if (this.aborted || this.turnSettled || this.compactionInProgress || !this._sdkSession) return;
     const sdkSession = this._sdkSession;
     if (this.heartbeatTimer) {
       clearTimeout(this.heartbeatTimer);

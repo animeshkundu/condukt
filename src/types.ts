@@ -366,7 +366,7 @@ export interface AgentConfig {
   readonly thinkingBudget?: ThinkingBudget;
   readonly isolation?: boolean;
   readonly timeout?: number;         // seconds, default 3600
-  readonly heartbeatTimeout?: number; // seconds, default 120
+  readonly heartbeatTimeout?: number; // seconds, default 900
   /** Override session cwd. Default: input.dir. Use for running in repo dir while artifacts go to input.dir. */
   readonly cwdResolver?: (input: NodeInput) => string;
   readonly setup?: (input: NodeInput) => void | Promise<void>;

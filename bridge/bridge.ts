@@ -26,6 +26,7 @@ import { resolveGate } from '../src/nodes';
 import {
   createConsoleOutputRenderer,
   type OutputEventSink,
+  type OutputRedactor,
 } from '../src/console-output';
 import type { StateRuntime } from '../state/state-runtime';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
@@ -61,6 +62,12 @@ export interface BridgeOptions {
    * plain-text stdout renderer. Pass false to silence bridge console output.
    */
   readonly emitOutput?: OutputEventSink | false;
+  /** Literal values scrubbed from default stdout output. */
+  readonly knownSecrets?: readonly string[];
+  /** Replaces the built-in stdout redactor. Known secrets are still scrubbed afterward. */
+  readonly outputRedactor?: OutputRedactor;
+  /** Render node:reasoning events to stdout. Defaults to false. */
+  readonly renderReasoning?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +80,11 @@ export function createBridge(
   options?: BridgeOptions,
 ): BridgeApi {
   const consoleRenderer = options?.emitOutput === undefined
-    ? createConsoleOutputRenderer()
+    ? createConsoleOutputRenderer({
+      knownSecrets: options?.knownSecrets,
+      redactor: options?.outputRedactor,
+      renderReasoning: options?.renderReasoning,
+    })
     : null;
   const outputSink = options?.emitOutput === undefined
     ? consoleRenderer?.emitOutput
