@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { agent } from './agent';
 import type {
+  ContextTier,
   ExecutionContext,
   NodeEntry,
   NodeInput,
@@ -64,6 +65,7 @@ export interface AgentNodeConfig<T> {
   readonly reads?: readonly string[];
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
+  readonly contextTier?: ContextTier;
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly tools?: readonly ToolRef[] | readonly string[];
@@ -316,6 +318,7 @@ export async function produce<T>(
     output: config.output,
     model: config.model,
     thinkingBudget: config.thinkingBudget,
+    contextTier: config.contextTier,
     isolation: config.isolation,
     timeout: config.timeout,
     systemMessage: config.system,

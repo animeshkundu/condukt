@@ -46,6 +46,53 @@ describe('agentNode', () => {
     }
   });
 
+  it('forwards contextTier and thinkingBudget through the plain agent node', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const runtime: AgentRuntime = {
+      name: 'config-capture-runtime',
+      createSession: vi.fn().mockImplementation(async () => {
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) handler('done');
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = agentNode({
+      prompt: 'Work',
+      model: 'gpt-5.6-sol',
+      contextTier: 'long_context',
+      thinkingBudget: 'xhigh',
+    });
+    const context: ExecutionContext = {
+      executionId: 'config-capture',
+      nodeId: 'agent',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(runtime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-5.6-sol',
+        contextTier: 'long_context',
+        thinkingBudget: 'xhigh',
+      }),
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
   it('validates, routes, writes canonical JSON, and exposes it to downstream reads', async () => {
     const dir = createTmpDir();
     dirs.push(dir);

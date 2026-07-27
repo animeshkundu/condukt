@@ -228,6 +228,7 @@ export interface AgentRuntime {
 }
 
 export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+export type ContextTier = 'default' | 'long_context';
 
 export interface RetryMeta {
   readonly attempt: number;
@@ -302,7 +303,7 @@ export interface SessionConfig {
   readonly timeout: number;      // seconds
   readonly heartbeatTimeout: number; // seconds
   /** Context-window tier to request (SdkBackend only). */
-  readonly contextTier?: 'default' | 'long_context';
+  readonly contextTier?: ContextTier;
   /** System message to append to the agent's context (SdkBackend only). */
   readonly systemMessage?: string;
   /** Tool allow-list: only these tools are available (SdkBackend only). */
@@ -373,6 +374,8 @@ export interface AgentConfig {
   readonly reads?: readonly string[];
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
+  /** Context-window tier to request (SdkBackend only). */
+  readonly contextTier?: ContextTier;
   readonly isolation?: boolean;
   readonly timeout?: number;         // seconds, default 3600
   readonly heartbeatTimeout?: number; // seconds, default 900

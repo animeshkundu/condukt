@@ -42,7 +42,7 @@ export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
-  AgentRuntime, AgentSession, SessionConfig, SessionCreationOptions, ThinkingBudget, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, AgentSession, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, ToolRef, AgentConfig, PromptOutput,
   RetryPolicy, RetryMeta, MCPServerConfig, CustomAgentConfig, DefaultAgentConfig, SubagentRosterOption,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
