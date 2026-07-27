@@ -166,6 +166,11 @@ export interface NodeResetEvent {
   readonly reason: 'loop-back';
   readonly iteration: number;
   readonly sourceNodeId: string;
+  /** Exact fired-edge contributions removed by this reset batch. */
+  readonly clearedEdges?: readonly {
+    readonly source: string;
+    readonly target: string;
+  }[];
   readonly ts: number;
 }
 

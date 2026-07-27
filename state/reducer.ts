@@ -79,6 +79,30 @@ function updateEdge(
   return { ...state, graph: { ...state.graph, edges } };
 }
 
+function clearEdgeContributions(
+  state: ExecutionProjection,
+  clearedEdges: readonly { readonly source: string; readonly target: string }[] | undefined,
+): ExecutionProjection {
+  if (!clearedEdges?.length) return state;
+
+  const clearedTargetsBySource = new Map<string, Set<string>>();
+  for (const edge of clearedEdges) {
+    let targets = clearedTargetsBySource.get(edge.source);
+    if (!targets) {
+      targets = new Set();
+      clearedTargetsBySource.set(edge.source, targets);
+    }
+    targets.add(edge.target);
+  }
+
+  const edges = state.graph.edges.map((edge) =>
+    clearedTargetsBySource.get(edge.source)?.has(edge.target)
+      ? { ...edge, state: 'default' as const }
+      : edge,
+  );
+  return { ...state, graph: { ...state.graph, edges } };
+}
+
 // ---------------------------------------------------------------------------
 // Reducer
 // ---------------------------------------------------------------------------
@@ -263,8 +287,8 @@ export function reduce(
       };
     }
 
-    case 'node:reset':
-      return updateNode(state, event.nodeId, (n) => ({
+    case 'node:reset': {
+      const updated = updateNode(state, event.nodeId, (n) => ({
         ...n,
         status: 'pending',
         iteration: event.iteration,
@@ -273,6 +297,8 @@ export function reduce(
         elapsedMs: undefined,
         error: undefined,
       }));
+      return clearEdgeContributions(updated, event.clearedEdges);
+    }
 
     default: {
       // Exhaustiveness check — if this errors, a new event type was added without a case

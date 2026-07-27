@@ -373,8 +373,10 @@ describe('integration: convergence loops', () => {
         A: mkEntry(async () => {
           aRunCount++;
           if (aRunCount === 2) {
-            // Simulate crash on second iteration by aborting
+            // Simulate interrupted work: abort and reject instead of recording
+            // a completion whose outgoing edge was never traversed.
             ac.abort();
+            throw new Error('simulated crash');
           }
           return { action: 'default' };
         }),
