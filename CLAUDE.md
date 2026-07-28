@@ -26,7 +26,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 | File | Purpose |
 |------|---------|
 | `src/types.ts` | All type definitions: NodeFn, FlowGraph, EdgeTarget, LoopFallbackEntry, ExecutionProjection, AgentRuntime |
-| `src/events.ts` | 16 execution events + 2 output events (discriminated unions) |
+| `src/events.ts` | 17 execution events + 2 output events (discriminated unions) |
 | `src/scheduler.ts` | Graph walker: fan-in, fan-out, bounded loop-back, parallel dispatch, per-node timeout, abort, resume |
 | `src/agent.ts` | LLM agent factory with GT-3 crash recovery, setup/teardown hooks |
 | `src/nodes.ts` | deterministic() + gate() factories, resolveGate() |
@@ -48,7 +48,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 ## Commands
 
 ```bash
-npm test              # Run all tests (659 across 50 suites)
+npm test              # Run all tests (853 across 57 suites)
 npm run typecheck     # tsc --noEmit
 npm run build         # Build to dist/
 npm run clean         # Remove dist/
@@ -60,7 +60,7 @@ npm run clean         # Remove dist/
 2. **Zero `any` types** — use generic types, branded types, or explicit `unknown`
 3. **Readonly by default** — all interface fields are `readonly`
 4. **Discriminated unions for events** — every event has a `type` field
-5. **Tests must pass** — 659 tests across 50 suites, all must pass before commit
+5. **Tests must pass** — 853 tests across 57 suites, all must pass before commit
 6. **Plain text default** — output renderer defaults to plain text, ANSI is opt-in (ADR-001)
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
@@ -128,7 +128,7 @@ Pin to the latest stable of everything unless there is a reason not to, and writ
 | ANSI Dim | `__tests__/ui/ansi-dim.test.ts` | 4 |
 | useAutoSelectNode | `__tests__/ui/use-auto-select-node.test.ts` | 8 |
 | useNodeNavigation | `__tests__/ui/use-node-navigation.test.ts` | 9 |
-| **Total** | **48 suites** | **596** |
+| **Total** | **57 suites** | **853** |
 
 ## Architecture
 
