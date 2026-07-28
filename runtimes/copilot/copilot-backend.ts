@@ -46,6 +46,8 @@ export interface SessionConfig {
   readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh';
   /** Context-window tier to request from the Copilot SDK. */
   readonly contextTier?: 'default' | 'long_context';
+  /** MCP server configurations for the root session, or false to disable them. */
+  readonly mcpServers?: Readonly<Record<string, MCPServerConfig>> | false;
   /** Working directory for the agent (repo root) */
   readonly cwd: string;
   /** Additional directories the agent can access. [] = isolation (step 2a) */

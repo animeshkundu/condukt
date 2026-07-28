@@ -10,10 +10,20 @@
  * that captures event handlers and lets us simulate SDK events.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { agent } from '../../src/agent';
+import { adaptCopilotBackend } from '../../runtimes/copilot/copilot-adapter';
 import { SdkBackend } from '../../runtimes/copilot/sdk-backend';
 import { classifySdkEvent, KNOWN_SDK_EVENT_TYPES } from '../../runtimes/copilot/lifecycle-events';
 import type { CopilotSession } from '../../runtimes/copilot/copilot-backend';
@@ -219,6 +229,207 @@ describe('SdkBackend event mapping', () => {
         configDirectory: '/project',
       }));
     });
+  });
+
+  it('merges backend MCP file servers with session servers, favoring the session', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        fileOnly: { command: 'file-server' },
+        shared: { command: 'file-version' },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession(
+        { mcpConfigPath },
+        {
+          mcpServers: {
+            shared: { command: 'session-version', tools: ['read'] },
+            sessionOnly: { command: 'session-server' },
+          },
+        },
+      );
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            fileOnly: {
+              type: 'local',
+              command: 'file-server',
+              tools: ['*'],
+            },
+            shared: {
+              type: 'local',
+              command: 'session-version',
+              tools: ['read'],
+            },
+            sessionOnly: {
+              type: 'local',
+              command: 'session-server',
+            },
+          },
+        }));
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not load backend MCP file servers when the session disables MCP', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: { configured: { command: 'file-server' } },
+    }));
+
+    try {
+      const { session } = await createTestSession({ mcpConfigPath }, { mcpServers: false });
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalled();
+      });
+      expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('mcpServers');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('runs an agent node when an MCP server reports a startup failure', async () => {
+    const backend = new SdkBackend();
+    const node = agent({
+      model: 'test-model',
+      mcpServers: {
+        broken: {
+          command: '__missing_mcp_executable__',
+          tools: ['*'],
+          timeout: 1_000,
+        },
+      },
+      promptBuilder: () => 'test prompt',
+    });
+    const run = node(
+      { dir: '.', params: {}, artifactPaths: {} },
+      {
+        executionId: 'mcp-failure',
+        nodeId: 'agent',
+        runtime: adaptCopilotBackend(backend),
+        emitOutput: vi.fn(),
+        signal: new AbortController().signal,
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        mcpServers: {
+          broken: {
+            type: 'local',
+            command: '__missing_mcp_executable__',
+            tools: ['*'],
+            timeout: 1_000,
+          },
+        },
+      }));
+    });
+
+    mockSdkSession._emit('session.mcp_server_status_changed', {
+      serverName: 'broken',
+      status: 'failed',
+      error: 'spawn ENOENT',
+    });
+    mockSdkSession._emit('assistant.message', { content: 'done' });
+    mockSdkSession._emit('session.idle');
+
+    await expect(run).resolves.toMatchObject({ action: 'default' });
+  });
+
+  it('resolves MCP secrets from the environment without retaining placeholders', async () => {
+    vi.stubEnv('CONDUKT_TEST_MCP_TOKEN', 'test-token');
+    try {
+      const backend = new SdkBackend();
+      const session = await backend.createSession({
+        model: 'test-model',
+        cwd: '.',
+        addDirs: [],
+        timeout: 3600,
+        heartbeatTimeout: 120,
+        mcpServers: {
+          remote: {
+            type: 'http',
+            url: 'https://example.test/mcp',
+            headers: { Authorization: 'Bearer ${CONDUKT_TEST_MCP_TOKEN}' },
+          },
+          local: {
+            command: 'local-mcp',
+            env: {
+              TOKEN: '${CONDUKT_TEST_MCP_TOKEN}',
+              MISSING: '${CONDUKT_MISSING_MCP_TOKEN}',
+            },
+          },
+        },
+      });
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            remote: {
+              type: 'http',
+              url: 'https://example.test/mcp',
+              headers: { Authorization: 'Bearer test-token' },
+            },
+            local: {
+              type: 'local',
+              command: 'local-mcp',
+              env: { TOKEN: 'test-token' },
+            },
+          },
+        }));
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('omits a GitHub authorization header when its environment token is absent', async () => {
+    const previous = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    try {
+      const backend = new SdkBackend();
+      const session = await backend.createSession({
+        model: 'test-model',
+        cwd: '.',
+        addDirs: [],
+        timeout: 3600,
+        heartbeatTimeout: 120,
+        mcpServers: {
+          github: {
+            type: 'http',
+            url: 'https://api.githubcopilot.com/mcp/',
+            headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}' },
+          },
+        },
+      });
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            github: {
+              type: 'http',
+              url: 'https://api.githubcopilot.com/mcp/',
+              headers: undefined,
+            },
+          },
+        }));
+      });
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+      else process.env.GITHUB_PERSONAL_ACCESS_TOKEN = previous;
+    }
   });
 
   it('forwards subagent configuration to the SDK session', async () => {

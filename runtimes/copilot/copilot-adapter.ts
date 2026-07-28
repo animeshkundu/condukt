@@ -59,6 +59,9 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.contextTier !== undefined
           ? { contextTier: config.contextTier }
           : {}),
+        ...(config.mcpServers !== undefined
+          ? { mcpServers: config.mcpServers }
+          : {}),
         ...(config.systemMessage !== undefined
           ? { systemMessage: config.systemMessage }
           : {}),

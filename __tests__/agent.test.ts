@@ -13,6 +13,7 @@ import type {
   SessionConfig,
 } from '../src/types';
 import type { OutputEvent } from '../src/events';
+import { DEFAULT_MCP_SERVERS } from '../src';
 import { DEFAULT_RETRY_POLICY, FlowAbortedError } from '../src/types';
 import {
   agent,
@@ -20,6 +21,23 @@ import {
   retryDelayMs,
   wasCompletedBeforeCrash,
 } from '../src/agent';
+
+const EXPECTED_DEFAULT_MCP_SERVERS = {
+  playwright: {
+    type: 'local',
+    command: 'npx',
+    args: ['@playwright/mcp@latest'],
+    tools: ['*'],
+    timeout: 30_000,
+  },
+  github: {
+    type: 'http',
+    url: 'https://api.githubcopilot.com/mcp/',
+    headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}' },
+    tools: ['*'],
+    timeout: 30_000,
+  },
+} as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,6 +179,7 @@ describe('agent factory', () => {
         systemMessage: undefined,
         availableTools: undefined,
         excludedTools: undefined,
+        mcpServers: EXPECTED_DEFAULT_MCP_SERVERS,
         customAgents: undefined,
         subagentRoster: undefined,
         defaultAgent: undefined,
@@ -171,6 +190,46 @@ describe('agent factory', () => {
       },
       expect.objectContaining({ signal: expect.anything() }),
     );
+  });
+
+  it('uses default MCP servers and lets consumers replace, extend, or disable them', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({ promptBuilder: () => 'defaults' })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    );
+    await agent({
+      mcpServers: {
+        custom: { command: 'custom-server', args: ['--stdio'] },
+      },
+      promptBuilder: () => 'replacement',
+    })(createMockInput(), createMockContext(mockRuntime));
+    await agent({
+      mcpServers: {
+        ...DEFAULT_MCP_SERVERS,
+        custom: { command: 'custom-server' },
+      },
+      promptBuilder: () => 'extension',
+    })(createMockInput(), createMockContext(mockRuntime));
+    await agent({
+      mcpServers: false,
+      promptBuilder: () => 'disabled',
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    const calls = vi.mocked(mockRuntime.createSession).mock.calls;
+    expect(DEFAULT_MCP_SERVERS).toEqual(EXPECTED_DEFAULT_MCP_SERVERS);
+    expect(calls[0]?.[0].mcpServers).toBe(DEFAULT_MCP_SERVERS);
+    expect(calls[1]?.[0].mcpServers).toEqual({
+      custom: { command: 'custom-server', args: ['--stdio'] },
+    });
+    expect(calls[2]?.[0].mcpServers).toEqual({
+      ...EXPECTED_DEFAULT_MCP_SERVERS,
+      custom: { command: 'custom-server' },
+    });
+    expect(calls[3]?.[0].mcpServers).toBe(false);
   });
 
   it('lets an explicit default tier opt out of long context', async () => {

@@ -315,7 +315,7 @@ export const DEFAULT_REVIEWER_MODEL = 'claude-opus-5';
 /** Default reasoning effort. High is the useful floor for both producing and critiquing. */
 export const DEFAULT_THINKING_BUDGET: ThinkingBudget = 'high';
 
-/** Minimal structural MCP server configuration accepted by Copilot custom agents. */
+/** Minimal structural MCP server configuration accepted by Copilot sessions and custom agents. */
 export interface MCPServerConfig {
   readonly type?: string;
   readonly command?: string;
@@ -327,6 +327,33 @@ export interface MCPServerConfig {
   readonly timeout?: number;
   readonly [key: string]: unknown;
 }
+
+/** A replacement MCP server set, or false to make the session MCP-free. */
+export type MCPServersOption = Readonly<Record<string, MCPServerConfig>> | false;
+
+/**
+ * Default MCP tools for browser automation and GitHub access.
+ *
+ * SdkBackend resolves GitHub authentication from the consumer's
+ * GITHUB_PERSONAL_ACCESS_TOKEN environment variable. No credential is retained here.
+ * A consumer-provided record replaces this set; spread this constant to extend it.
+ */
+export const DEFAULT_MCP_SERVERS: Readonly<Record<string, MCPServerConfig>> = {
+  playwright: {
+    type: 'local',
+    command: 'npx',
+    args: ['@playwright/mcp@latest'],
+    tools: ['*'],
+    timeout: 30_000,
+  },
+  github: {
+    type: 'http',
+    url: 'https://api.githubcopilot.com/mcp/',
+    headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}' },
+    tools: ['*'],
+    timeout: 30_000,
+  },
+};
 
 export interface CustomAgentConfig {
   readonly name: string;
@@ -353,6 +380,8 @@ export interface SessionConfig {
   readonly heartbeatTimeout: number; // seconds
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
+  /** Session MCP servers, or false to disable runtime-level MCP configuration. */
+  readonly mcpServers?: MCPServersOption;
   /** System message to append to the agent's context (SdkBackend only). */
   readonly systemMessage?: string;
   /** Tool allow-list: only these tools are available (SdkBackend only). */
@@ -425,6 +454,11 @@ export interface AgentConfig {
   readonly thinkingBudget?: ThinkingBudget;
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
+  /**
+   * Session MCP servers. A record replaces DEFAULT_MCP_SERVERS; spread the
+   * default into a record to extend it. Set false to disable MCP entirely.
+   */
+  readonly mcpServers?: MCPServersOption;
   readonly isolation?: boolean;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
   readonly timeout?: number;

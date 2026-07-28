@@ -24,6 +24,7 @@ import type {
   CustomAgentConfig,
   DefaultAgentConfig,
   ExecutionContext,
+  MCPServersOption,
   NodeEntry,
   NodeInput,
   NodeOutput,
@@ -37,6 +38,8 @@ export interface PanelMember {
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  /** Replaces the panel MCP set for this member; false disables MCP. */
+  readonly mcpServers?: MCPServersOption;
   readonly system?: string;
   readonly id?: string;
 }
@@ -66,6 +69,8 @@ export interface PanelConfig<T, V = unknown> {
   readonly fallback?: (error: Error) => T;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  /** Replaces DEFAULT_MCP_SERVERS; members may override or disable it. */
+  readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_PANEL_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
@@ -97,6 +102,7 @@ async function runMember<T, V>(
     model: member.model ?? DEFAULT_REVIEWER_MODEL,
     thinkingBudget: member.thinkingBudget ?? config.thinkingBudget,
     contextTier: member.contextTier ?? config.contextTier ?? DEFAULT_CONTEXT_TIER,
+    mcpServers: member.mcpServers ?? config.mcpServers,
     system: member.system,
     output: memberOutput,
     timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,

@@ -112,7 +112,7 @@ describe('panelNode', () => {
     expect(captured[0]?.timeout).toBe(expected);
   });
 
-  it('applies panel context and effort defaults while member values take precedence', async () => {
+  it('applies panel context, effort, and MCP defaults while member values take precedence', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const captured: SessionConfig[] = [];
@@ -141,6 +141,9 @@ describe('panelNode', () => {
       prompt: 'Vote',
       contextTier: 'long_context',
       thinkingBudget: 'high',
+      mcpServers: {
+        panel: { command: 'panel-mcp' },
+      },
       members: [
         { id: 'inherited', model: 'inherited-model' },
         {
@@ -148,6 +151,14 @@ describe('panelNode', () => {
           model: 'overridden-model',
           contextTier: 'default',
           thinkingBudget: 'low',
+          mcpServers: {
+            member: { command: 'member-mcp' },
+          },
+        },
+        {
+          id: 'disabled',
+          model: 'disabled-model',
+          mcpServers: false,
         },
       ],
       reconcile: (verdicts: readonly string[]) => verdicts.join(','),
@@ -167,12 +178,15 @@ describe('panelNode', () => {
       model: 'inherited-model',
       contextTier: 'long_context',
       thinkingBudget: 'high',
+      mcpServers: { panel: { command: 'panel-mcp' } },
     }));
     expect(byMember.get('overridden')).toEqual(expect.objectContaining({
       model: 'overridden-model',
       contextTier: 'default',
       thinkingBudget: 'low',
+      mcpServers: { member: { command: 'member-mcp' } },
     }));
+    expect(byMember.get('disabled')?.mcpServers).toBe(false);
   });
 
   it('reconciles a three-member fixture sequence, routes, and writes JSON', async () => {
