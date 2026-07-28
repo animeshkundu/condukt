@@ -103,6 +103,31 @@ function clearEdgeContributions(
   return { ...state, graph: { ...state.graph, edges } };
 }
 
+function resetNodes(
+  state: ExecutionProjection,
+  nodeIds: readonly string[],
+  iteration: number,
+): ExecutionProjection {
+  const resetNodeIds = new Set(nodeIds);
+  const nodes = state.graph.nodes.map((node) =>
+    resetNodeIds.has(node.id)
+      ? {
+          ...node,
+          status: 'pending',
+          iteration,
+          action: undefined,
+          finishedAt: undefined,
+          elapsedMs: undefined,
+          error: undefined,
+        }
+      : node,
+  );
+  const activeNodes = nodes
+    .filter((node) => node.status === 'running' || node.status === 'gated' || node.status === 'retrying')
+    .map((node) => node.id);
+  return { ...state, graph: { ...state.graph, nodes, activeNodes } };
+}
+
 // ---------------------------------------------------------------------------
 // Reducer
 // ---------------------------------------------------------------------------
@@ -258,6 +283,14 @@ export function reduce(
         finishedAt: undefined,
         elapsedMs: undefined,
       }));
+
+    case 'route:resolved':
+      return event.loop
+        ? clearEdgeContributions(
+            resetNodes(state, event.loop.resetNodes, event.loop.iteration),
+            event.loop.clearedEdges,
+          )
+        : state;
 
     case 'edge:traversed':
       return updateEdge(state, event.source, event.target, 'taken');

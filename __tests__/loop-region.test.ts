@@ -186,6 +186,16 @@ describe('loop regions', () => {
     expect(events.filter(event =>
       event.type === 'node:reset' && event.nodeId === 'produce'
     )).toHaveLength(2);
+    expect(events.filter(event =>
+      event.type === 'route:resolved' &&
+      event.source === 'refine' &&
+      event.loop?.key === 'region:review-loop'
+    )).toHaveLength(2);
+    expect(events.filter(event =>
+      event.type === 'edge:traversed' &&
+      event.source === 'refine' &&
+      event.target === 'produce'
+    )).toHaveLength(0);
   });
 
   it('limits total body executions with maxRounds', async () => {
@@ -543,7 +553,7 @@ describe('loop regions', () => {
       edge.target === 'entry' &&
       edge.action === 'continue'
     )?.state).toBe('default');
-    expect(resumeState.firedEdges.get('entry')?.has('decision') ?? false).toBe(false);
+    expect(resumeState.firedEdges.get('entry')?.has('decision') ?? false).toBe(true);
   });
 
   it('reconstructs exactly the scheduler reset state while preserving external fan-in', async () => {

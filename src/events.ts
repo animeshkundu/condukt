@@ -1,8 +1,8 @@
 /**
  * Flow framework events — the complete event contract.
  *
- * 15 execution events (persisted to JSONL event log).
- * 7 output events (streamed, not persisted in event log).
+ * 17 execution events (persisted to JSONL event log).
+ * 8 output events (streamed, not persisted in event log).
  *
  * All events carry executionId + ts. Zero domain types.
  */
@@ -28,7 +28,7 @@ export interface GraphEdgeSkeleton {
 }
 
 // ---------------------------------------------------------------------------
-// Execution events (15 types — persisted to JSONL)
+// Execution events (17 types — persisted to JSONL)
 // ---------------------------------------------------------------------------
 
 export interface RunStartedEvent {
@@ -70,6 +70,8 @@ export interface NodeCompletedEvent {
   readonly nodeId: string;
   readonly action: string;
   readonly elapsedMs: number;
+  /** New-format logs require a following atomic route:resolved event. */
+  readonly routingExpected?: true;
   readonly ts: number;
 }
 
@@ -122,6 +124,37 @@ export interface NodeRetryingEvent {
   readonly ts: number;
 }
 
+export type RouteExhaustion =
+  | { readonly reason: 'count' }
+  | {
+      readonly reason: 'time';
+      readonly budgetMs: number;
+      readonly elapsedMs: number;
+      readonly estimatedNextRoundMs: number;
+    };
+
+export interface RouteResolvedEvent {
+  readonly type: 'route:resolved';
+  readonly executionId: string;
+  readonly source: string;
+  readonly action: string;
+  readonly targets: readonly string[]; // includes 'end' when it is the resolved destination
+  readonly loop?: {
+    readonly key: string;
+    readonly iteration: number;
+    readonly resetNodes: readonly string[];
+    readonly readyTargets: readonly string[];
+    readonly firedTargets: readonly string[];
+    readonly clearedEdges: readonly {
+      readonly source: string;
+      readonly target: string;
+    }[];
+  };
+  /** Present when a loop region takes its graceful exhaustion path. */
+  readonly exhaustion?: RouteExhaustion;
+  readonly ts: number;
+}
+
 export interface EdgeTraversedEvent {
   readonly type: 'edge:traversed';
   readonly executionId: string;
@@ -129,14 +162,7 @@ export interface EdgeTraversedEvent {
   readonly target: string;
   readonly action: string;
   /** Present when a loop region takes its graceful exhaustion path. */
-  readonly exhaustion?:
-    | { readonly reason: 'count' }
-    | {
-        readonly reason: 'time';
-        readonly budgetMs: number;
-        readonly elapsedMs: number;
-        readonly estimatedNextRoundMs: number;
-      };
+  readonly exhaustion?: RouteExhaustion;
   readonly ts: number;
 }
 
@@ -196,6 +222,7 @@ export type ExecutionEvent =
   | NodeGatedEvent
   | GateResolvedEvent
   | NodeRetryingEvent
+  | RouteResolvedEvent
   | EdgeTraversedEvent
   | ArtifactWrittenEvent
   | CostRecordedEvent

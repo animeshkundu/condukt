@@ -30,6 +30,7 @@ import type {
   GraphNodeSkeleton,
   GraphEdgeSkeleton,
   ExecutionEvent,
+  RouteExhaustion,
 } from './events';
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,90 @@ import type {
 export function normalizeTargets(target: EdgeTarget): string[] {
   if (typeof target === 'string') return [target];
   return [...target];
+}
+
+interface ResolvedLoopRoute {
+  readonly key: string;
+  readonly iteration: number;
+  readonly resetNodes: readonly string[];
+  readonly readyTargets: readonly string[];
+  readonly firedTargets: readonly string[];
+  readonly clearedEdges: readonly {
+    readonly source: string;
+    readonly target: string;
+  }[];
+}
+
+async function emitResolvedRoute(
+  executionId: string,
+  source: string,
+  action: string,
+  targets: readonly string[],
+  emitState: RunOptions['emitState'],
+  options?: {
+    readonly exhaustion?: RouteExhaustion;
+    readonly loop?: ResolvedLoopRoute;
+  },
+): Promise<void> {
+  await emitState({
+    type: 'route:resolved',
+    executionId,
+    source,
+    action,
+    targets,
+    ...(options?.exhaustion ? { exhaustion: options.exhaustion } : {}),
+    ...(options?.loop ? { loop: options.loop } : {}),
+    ts: Date.now(),
+  });
+}
+
+async function emitTraversedEdges(
+  executionId: string,
+  source: string,
+  action: string,
+  targets: readonly string[],
+  emitState: RunOptions['emitState'],
+  exhaustion?: RouteExhaustion,
+): Promise<void> {
+  // Preserve per-edge events for existing consumers. Resume treats the preceding
+  // route:resolved event as authoritative, so interruption here is safe.
+  for (const target of targets) {
+    await emitState({
+      type: 'edge:traversed',
+      executionId,
+      source,
+      target,
+      action,
+      ...(exhaustion ? { exhaustion } : {}),
+      ts: Date.now(),
+    });
+  }
+}
+
+async function emitResolvedRouteWithCompatibility(
+  executionId: string,
+  source: string,
+  action: string,
+  targets: readonly string[],
+  emitState: RunOptions['emitState'],
+  exhaustion?: RouteExhaustion,
+): Promise<void> {
+  await emitResolvedRoute(
+    executionId,
+    source,
+    action,
+    targets,
+    emitState,
+    exhaustion ? { exhaustion } : undefined,
+  );
+  await emitTraversedEdges(
+    executionId,
+    source,
+    action,
+    targets.filter(target => target !== 'end'),
+    emitState,
+    exhaustion,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -304,9 +389,15 @@ export function computeFrontier(
   const frontier: string[] = [];
   const completedSet = new Set(state.completedNodes.keys());
 
+  for (const nodeId of state.readyNodes ?? []) {
+    if (!completedSet.has(nodeId) && !frontier.includes(nodeId)) {
+      frontier.push(nodeId);
+    }
+  }
+
   // Start nodes that haven't completed
   for (const startId of graph.start) {
-    if (!completedSet.has(startId)) {
+    if (!completedSet.has(startId) && !frontier.includes(startId)) {
       frontier.push(startId);
     }
   }
@@ -405,6 +496,55 @@ function resolveArtifactPaths(
 // ---------------------------------------------------------------------------
 // Loop-back reset
 // ---------------------------------------------------------------------------
+
+type EdgeContribution = {
+  readonly source: string;
+  readonly target: string;
+};
+
+function loopBodyClearedEdges(
+  targets: readonly string[],
+  sourceNodeId: string,
+  firedEdges: ReadonlyMap<string, ReadonlySet<string>>,
+): readonly EdgeContribution[] {
+  const clearedEdges: EdgeContribution[] = [];
+  for (const target of targets) {
+    for (const source of firedEdges.get(target) ?? []) {
+      clearedEdges.push({ source, target });
+    }
+  }
+  const sourceContributions = firedEdges.get(sourceNodeId);
+  if (sourceContributions) {
+    for (const target of targets) {
+      if (sourceContributions.has(target)) {
+        clearedEdges.push({ source: target, target: sourceNodeId });
+      }
+    }
+  }
+  return clearedEdges;
+}
+
+function loopRegionClearedEdges(
+  region: LoopRegion,
+  continueTargets: readonly string[],
+  firedEdges: ReadonlyMap<string, ReadonlySet<string>>,
+): readonly EdgeContribution[] {
+  const resetNodes = new Set([...region.nodes, region.decision]);
+  const clearedEdges: EdgeContribution[] = [];
+  for (const nodeId of resetNodes) {
+    for (const source of firedEdges.get(nodeId) ?? []) {
+      if (resetNodes.has(source)) {
+        clearedEdges.push({ source, target: nodeId });
+      }
+    }
+  }
+  for (const target of continueTargets) {
+    if (firedEdges.get(target)?.has(region.decision)) {
+      clearedEdges.push({ source: region.decision, target });
+    }
+  }
+  return clearedEdges;
+}
 
 /**
  * Reset the loop body: clear target nodes + source node from completed/nodeStatuses/firedEdges.
@@ -913,6 +1053,7 @@ export async function run(
             nodeId,
             action: output.action,
             elapsedMs,
+            routingExpected: true,
             ts: Date.now(),
           });
         }
@@ -948,6 +1089,7 @@ export async function run(
           nodeId,
           action: output.action,
           elapsedMs,
+          routingExpected: true,
           ts: Date.now(),
         });
 
@@ -1051,16 +1193,23 @@ export async function run(
     // contribution fired by body nodes that completed in the same batch.
     for (const { nodeId, output } of edgeCompletions) {
       const edgeMap = graph.edges[nodeId];
-      if (!edgeMap) continue; // terminal node, no outgoing edges
-
       const action = output.action;
+      if (!edgeMap) {
+        await emitResolvedRoute(executionId, nodeId, action, [], emitState);
+        continue;
+      }
+
       let edgeTarget = edgeMap[action];
       if (!edgeTarget) {
         edgeTarget = edgeMap['default'];
       }
-      if (!edgeTarget) continue;
+      if (!edgeTarget) {
+        await emitResolvedRoute(executionId, nodeId, action, [], emitState);
+        continue;
+      }
 
-      const targets = normalizeTargets(edgeTarget).filter(t => t !== 'end');
+      const resolvedTargets = normalizeTargets(edgeTarget);
+      const targets = resolvedTargets.filter(t => t !== 'end');
       const region = loopRegionsByDecision.get(nodeId);
 
       if (region && action === region.continueOn) {
@@ -1103,33 +1252,40 @@ export async function run(
           const exhaustionAction = region.onExhausted === undefined
             ? region.exitOn
             : action;
+          const exhaustionTargets = normalizeTargets(exhaustionTarget);
           if (region.budgetMs !== undefined) {
             logger.info(
               `Loop region '${region.id}' exhausted by ${exhaustion.reason} budget`,
               exhaustion,
             );
           }
-          for (const target of normalizeTargets(exhaustionTarget)) {
-            if (target !== 'end') {
-              let sources = firedEdges.get(target);
-              if (!sources) {
-                sources = new Set();
-                firedEdges.set(target, sources);
-              }
-              sources.add(nodeId);
-            } else if (region.budgetMs === undefined) {
-              continue;
+          for (const target of exhaustionTargets) {
+            if (target === 'end') continue;
+            let sources = firedEdges.get(target);
+            if (!sources) {
+              sources = new Set();
+              firedEdges.set(target, sources);
             }
-            await emitState({
-              type: 'edge:traversed',
-              executionId,
-              source: nodeId,
-              target,
-              action: exhaustionAction,
-              ...(region.budgetMs === undefined ? {} : { exhaustion }),
-              ts: Date.now(),
-            });
+            sources.add(nodeId);
           }
+          await emitResolvedRoute(
+            executionId,
+            nodeId,
+            exhaustionAction,
+            exhaustionTargets,
+            emitState,
+            { exhaustion },
+          );
+          await emitTraversedEdges(
+            executionId,
+            nodeId,
+            exhaustionAction,
+            region.budgetMs === undefined
+              ? exhaustionTargets.filter(target => target !== 'end')
+              : exhaustionTargets,
+            emitState,
+            region.budgetMs === undefined ? undefined : exhaustion,
+          );
         } else {
           if (timing) timing.roundStartedAt = Date.now();
           const entryNode = graph.nodes[region.entry];
@@ -1148,6 +1304,26 @@ export async function run(
             ? region.feedback(output.artifact ?? null, currentIteration)
             : `iteration ${currentIteration}`;
           loopRetryContexts.set(region.entry, { priorOutput, feedback });
+
+          const resetNodes = [...new Set([...region.nodes, region.decision])];
+          const clearedEdges = loopRegionClearedEdges(region, targets, firedEdges);
+          await emitResolvedRoute(
+            executionId,
+            nodeId,
+            action,
+            resolvedTargets,
+            emitState,
+            {
+              loop: {
+                key: loopKey,
+                iteration: currentIteration,
+                resetNodes,
+                readyTargets: [region.entry],
+                firedTargets: [],
+                clearedEdges,
+              },
+            },
+          );
 
           await resetLoopRegion(
             region,
@@ -1181,26 +1357,25 @@ export async function run(
 
         if (currentIteration > maxIter) {
           // Max iterations exceeded — route to fallback
-          if (fallbackEntry) {
-            const fallbackTargets = normalizeTargets(fallbackEntry.fallbackTarget);
-            for (const fbTarget of fallbackTargets) {
-              if (fbTarget === 'end') continue;
-              let sources = firedEdges.get(fbTarget);
-              if (!sources) {
-                sources = new Set();
-                firedEdges.set(fbTarget, sources);
-              }
-              sources.add(nodeId);
-              await emitState({
-                type: 'edge:traversed',
-                executionId,
-                source: nodeId,
-                target: fbTarget,
-                action,
-                ts: Date.now(),
-              });
+          const fallbackTargets = fallbackEntry
+            ? normalizeTargets(fallbackEntry.fallbackTarget)
+            : [];
+          for (const fbTarget of fallbackTargets) {
+            if (fbTarget === 'end') continue;
+            let sources = firedEdges.get(fbTarget);
+            if (!sources) {
+              sources = new Set();
+              firedEdges.set(fbTarget, sources);
             }
+            sources.add(nodeId);
           }
+          await emitResolvedRouteWithCompatibility(
+            executionId,
+            nodeId,
+            action,
+            fallbackTargets,
+            emitState,
+          );
           // If no fallback entry (shouldn't happen with validation), flow just stops here
         } else {
           // Reset loop body and re-dispatch
@@ -1225,6 +1400,30 @@ export async function run(
             loopRetryContexts.set(target, { priorOutput, feedback });
           }
 
+          const nonLoopBackTargets = targets.filter(t => !loopBackTargets.includes(t));
+          const clearedEdges = loopBodyClearedEdges(
+            loopBackTargets,
+            nodeId,
+            firedEdges,
+          );
+          await emitResolvedRoute(
+            executionId,
+            nodeId,
+            action,
+            resolvedTargets,
+            emitState,
+            {
+              loop: {
+                key: loopKey,
+                iteration: currentIteration,
+                resetNodes: [...loopBackTargets, nodeId],
+                readyTargets: loopBackTargets,
+                firedTargets: [...loopBackTargets, ...nonLoopBackTargets],
+                clearedEdges,
+              },
+            },
+          );
+
           await resetLoopBody(
             loopBackTargets,
             nodeId,
@@ -1246,36 +1445,25 @@ export async function run(
             }
             sources.add(nodeId);
 
-            await emitState({
-              type: 'edge:traversed',
-              executionId,
-              source: nodeId,
-              target,
-              action,
-              ts: Date.now(),
-            });
-
             loopResets.push(target);
           }
 
           // Also fire non-loop-back targets normally
-          for (const target of targets.filter(t => !loopBackTargets.includes(t))) {
+          for (const target of nonLoopBackTargets) {
             let sources = firedEdges.get(target);
             if (!sources) {
               sources = new Set();
               firedEdges.set(target, sources);
             }
             sources.add(nodeId);
-
-            await emitState({
-              type: 'edge:traversed',
-              executionId,
-              source: nodeId,
-              target,
-              action,
-              ts: Date.now(),
-            });
           }
+          await emitTraversedEdges(
+            executionId,
+            nodeId,
+            action,
+            targets,
+            emitState,
+          );
         }
       } else {
         // Normal edge firing (no loop-back)
@@ -1286,16 +1474,14 @@ export async function run(
             firedEdges.set(target, sources);
           }
           sources.add(nodeId);
-
-          await emitState({
-            type: 'edge:traversed',
-            executionId,
-            source: nodeId,
-            target,
-            action,
-            ts: Date.now(),
-          });
         }
+        await emitResolvedRouteWithCompatibility(
+          executionId,
+          nodeId,
+          action,
+          resolvedTargets,
+          emitState,
+        );
       }
     }
 

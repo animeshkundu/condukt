@@ -436,10 +436,53 @@ function buildResumeState(
   const completedNodes = new Map<string, { action: string; finishedAt: number }>();
   const firedEdges = new Map<string, Set<string>>();
   const nodeStatuses = new Map<string, string>();
+  const readyNodes = new Set<string>();
+  const atomicSources = new Set<string>();
+  const pendingAtomicRoutes = new Set<string>();
+  const routedGateAttempts = new Set<string>();
+  const legacyCompletedAttempts = new Set<string>();
+
+  if (events) {
+    for (const event of events) {
+      if (event.type === 'node:started' || event.type === 'node:gated') {
+        routedGateAttempts.delete(event.nodeId);
+        legacyCompletedAttempts.delete(event.nodeId);
+      } else if (event.type === 'gate:resolved') {
+        // The bridge persists this after unblocking the gate but before the
+        // scheduler records completion. A crash in that window must re-open the
+        // gate rather than treating an unactioned resolution as a routed node.
+        // Ignore late audit events after an atomic or legacy completion.
+        if (
+          !routedGateAttempts.has(event.nodeId)
+          && !legacyCompletedAttempts.has(event.nodeId)
+        ) {
+          pendingAtomicRoutes.add(event.nodeId);
+        }
+      } else if (event.type === 'node:completed') {
+        if (event.routingExpected) {
+          pendingAtomicRoutes.add(event.nodeId);
+        } else {
+          // Legacy completions predate atomic routing records.
+          pendingAtomicRoutes.delete(event.nodeId);
+          legacyCompletedAttempts.add(event.nodeId);
+        }
+      } else if (event.type === 'route:resolved') {
+        atomicSources.add(event.source);
+        pendingAtomicRoutes.delete(event.source);
+        routedGateAttempts.add(event.source);
+      } else if (event.type === 'node:reset') {
+        pendingAtomicRoutes.delete(event.nodeId);
+        routedGateAttempts.delete(event.nodeId);
+        legacyCompletedAttempts.delete(event.nodeId);
+      }
+    }
+  }
 
   for (const node of projection.graph.nodes) {
-    nodeStatuses.set(node.id, node.status);
-    if (node.status === 'completed' && node.finishedAt) {
+    const mustRerun = pendingAtomicRoutes.has(node.id);
+    nodeStatuses.set(node.id, mustRerun ? 'pending' : node.status);
+    if (mustRerun) readyNodes.add(node.id);
+    if (!mustRerun && node.status === 'completed' && node.finishedAt) {
       completedNodes.set(node.id, {
         action: node.action ?? 'default',
         finishedAt: node.finishedAt,
@@ -447,9 +490,79 @@ function buildResumeState(
     }
   }
 
-  // Reconstruct firedEdges from taken edges
+  if (events) {
+    for (const event of events) {
+      if (event.type === 'node:completed') {
+        if (pendingAtomicRoutes.has(event.nodeId)) {
+          completedNodes.delete(event.nodeId);
+          nodeStatuses.set(event.nodeId, 'pending');
+          readyNodes.add(event.nodeId);
+        } else {
+          readyNodes.delete(event.nodeId);
+          completedNodes.set(event.nodeId, {
+            action: event.action,
+            finishedAt: event.ts,
+          });
+          nodeStatuses.set(event.nodeId, 'completed');
+        }
+        continue;
+      }
+      if (event.type === 'node:reset') {
+        completedNodes.delete(event.nodeId);
+        nodeStatuses.set(event.nodeId, 'pending');
+        continue;
+      }
+      if (event.type !== 'route:resolved') continue;
+
+      for (const sources of firedEdges.values()) {
+        sources.delete(event.source);
+      }
+      for (const [target, sources] of firedEdges) {
+        if (sources.size === 0) firedEdges.delete(target);
+      }
+
+      if (event.loop) {
+        for (const edge of event.loop.clearedEdges) {
+          const sources = firedEdges.get(edge.target);
+          sources?.delete(edge.source);
+          if (sources?.size === 0) firedEdges.delete(edge.target);
+        }
+        for (const nodeId of event.loop.resetNodes) {
+          completedNodes.delete(nodeId);
+          nodeStatuses.set(nodeId, 'pending');
+        }
+        for (const target of event.loop.readyTargets) {
+          readyNodes.add(target);
+        }
+      }
+      for (const target of event.loop?.firedTargets ?? event.targets) {
+        if (target === 'end') continue;
+        let sources = firedEdges.get(target);
+        if (!sources) {
+          sources = new Set();
+          firedEdges.set(target, sources);
+        }
+        sources.add(event.source);
+      }
+    }
+  }
+
+  // A torn latest route supersedes earlier attempts by the same source. Do not
+  // revive an old loop/fan-out contribution while the source is being rerun.
+  if (pendingAtomicRoutes.size > 0) {
+    for (const [target, sources] of firedEdges) {
+      for (const source of pendingAtomicRoutes) sources.delete(source);
+      if (sources.size === 0) firedEdges.delete(target);
+    }
+  }
+
+  // Old logs have no route:resolved events, so retain their per-edge projection state.
   for (const edge of projection.graph.edges) {
-    if (edge.state === 'taken') {
+    if (
+      edge.state === 'taken'
+      && !atomicSources.has(edge.source)
+      && !pendingAtomicRoutes.has(edge.source)
+    ) {
       if (!firedEdges.has(edge.target)) {
         firedEdges.set(edge.target, new Set());
       }
@@ -457,17 +570,20 @@ function buildResumeState(
     }
   }
 
-  // Reconstruct loopIterations from node:reset events.
-  // Loop regions key by region:id; legacy loops key by source:action.
+  // Reconstruct loopIterations from atomic loop routes, with node:reset fallback for old logs.
   const loopIterations = new Map<string, number>();
   if (events) {
     const loopRegionsByDecision = new Map(
       (graph.loops ?? []).map(region => [region.decision, region] as const),
     );
-    // Build a map of (source, target) → action from edge:traversed events
     const edgeActions = new Map<string, string>();
     for (const event of events) {
-      if (event.type === 'edge:traversed') {
+      if (event.type === 'route:resolved' && event.loop) {
+        const current = loopIterations.get(event.loop.key) ?? 0;
+        if (event.loop.iteration > current) {
+          loopIterations.set(event.loop.key, event.loop.iteration);
+        }
+      } else if (event.type === 'edge:traversed') {
         edgeActions.set(`${event.source}:${event.target}`, event.action);
       }
     }
@@ -491,7 +607,7 @@ function buildResumeState(
     }
   }
 
-  return { completedNodes, firedEdges, nodeStatuses, loopIterations };
+  return { completedNodes, firedEdges, nodeStatuses, loopIterations, readyNodes };
 }
 
 export const _buildResumeStateForTesting = buildResumeState;

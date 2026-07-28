@@ -209,6 +209,7 @@ export interface ResumeState {
   readonly firedEdges: Map<string, Set<string>>; // target → sources that routed there
   readonly nodeStatuses: Map<string, string>;
   readonly loopIterations: Map<string, number>; // source:action → iteration count
+  readonly readyNodes?: ReadonlySet<string>; // loop reset targets dispatched without a completed source
 }
 
 // ---------------------------------------------------------------------------

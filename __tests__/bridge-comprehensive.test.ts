@@ -17,9 +17,17 @@ import { _buildResumeStateForTesting, createBridge } from '../bridge/bridge';
 import { StateRuntime } from '../state/state-runtime';
 import { MemoryStorage } from '../state/storage-memory';
 import { resolveGate, _getGateRegistryForTesting } from '../src/nodes';
-import { validateGraph } from '../src/scheduler';
+import { computeFrontier, run, validateGraph } from '../src/scheduler';
+import { replayEvents } from '../state/reducer';
 import { cicdFlow } from '../examples/counter-test/cicd';
-import type { FlowGraph, AgentRuntime, ExecutionProjection, NodeEntry } from '../src/types';
+import type { ExecutionEvent } from '../src/events';
+import type {
+  FlowGraph,
+  AgentRuntime,
+  ExecutionProjection,
+  NodeEntry,
+  RunOptions,
+} from '../src/types';
 
 function createMockRuntime(): AgentRuntime {
   return {
@@ -281,6 +289,693 @@ describe('bridge — resume', () => {
 
     const finalProj = stateRuntime.getProjection('resume-test');
     expect(finalProj!.status).toBe('completed');
+  });
+
+  it('recovers all fan-out targets from one atomic route when compatibility edges are truncated', async () => {
+    const executionId = 'atomic-fan-out';
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' })),
+        B: mkEntry(async () => ({ action: 'default' })),
+        C: mkEntry(async () => ({ action: 'default' })),
+        D: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { A: { default: ['B', 'C', 'D'] } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [];
+    await run(graph, {
+      executionId,
+      dir: tmpDir,
+      params: {},
+      runtime: createMockRuntime(),
+      emitState: async event => {
+        events.push(event);
+      },
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    });
+    const firstCompatibilityEdge = events.findIndex(event =>
+      event.type === 'edge:traversed' && event.source === 'A'
+    );
+    const truncated = events.slice(0, firstCompatibilityEdge + 1);
+    truncated.push({
+      type: 'run:completed',
+      executionId,
+      status: 'crashed',
+      ts: Date.now(),
+    });
+    const projection = replayEvents(executionId, truncated);
+    const state = _buildResumeStateForTesting(projection, graph, truncated);
+
+    expect(computeFrontier(graph, state).sort()).toEqual(['B', 'C', 'D']);
+    expect(state.firedEdges).toEqual(new Map([
+      ['B', new Set(['A'])],
+      ['C', new Set(['A'])],
+      ['D', new Set(['A'])],
+    ]));
+  });
+
+  it('reruns a completed node when its atomic route record is missing', () => {
+    const executionId = 'missing-atomic-route';
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' })),
+        B: mkEntry(async () => ({ action: 'default' })),
+        C: mkEntry(async () => ({ action: 'default' })),
+        D: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { A: { default: ['B', 'C', 'D'] } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'A', action: 'default', target: 'B' },
+          { source: 'A', action: 'default', target: 'C' },
+          { source: 'A', action: 'default', target: 'D' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'A',
+      action: 'default',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 2,
+    }, {
+      type: 'edge:traversed',
+      executionId,
+      source: 'A',
+      target: 'B',
+      action: 'default',
+      ts: 3,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, state)).toEqual(['A']);
+    expect(state.firedEdges).toEqual(new Map());
+  });
+
+  it('drops an earlier atomic route when a later attempt tears before routing', () => {
+    const executionId = 'later-route-torn';
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'new' })),
+        old: mkEntry(async () => ({ action: 'default' })),
+        next: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { A: { old: 'old', new: 'next' } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'A', action: 'old', target: 'old' },
+          { source: 'A', action: 'new', target: 'next' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'A',
+      action: 'old',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 2,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'A',
+      action: 'old',
+      targets: ['old'],
+      ts: 3,
+    }, {
+      type: 'node:reset',
+      executionId,
+      nodeId: 'A',
+      reason: 'loop-back',
+      iteration: 1,
+      sourceNodeId: 'old',
+      ts: 4,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'A',
+      action: 'new',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 5,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, state)).toEqual(['A']);
+    expect(state.firedEdges).toEqual(new Map());
+  });
+
+  it('survives two interrupted resumes without losing or partially scheduling fan-out', async () => {
+    const executionId = 'chained-atomic-resume';
+    const calls = new Map<string, number>();
+    const countedEntry = (nodeId: string): NodeEntry => mkEntry(async () => {
+      calls.set(nodeId, (calls.get(nodeId) ?? 0) + 1);
+      return { action: 'default' };
+    });
+    const graph: FlowGraph = {
+      nodes: {
+        A: countedEntry('A'),
+        B: countedEntry('B'),
+        C: countedEntry('C'),
+        D: countedEntry('D'),
+      },
+      edges: { A: { default: ['B', 'C', 'D'] } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [];
+    const baseOptions = {
+      executionId,
+      dir: tmpDir,
+      params: {},
+      runtime: createMockRuntime(),
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+    const firstEmit: RunOptions['emitState'] = async event => {
+      events.push(event);
+      if (event.type === 'edge:traversed' && event.source === 'A') {
+        throw new Error('first interruption');
+      }
+    };
+
+    await expect(run(graph, { ...baseOptions, emitState: firstEmit }))
+      .rejects.toThrow('first interruption');
+    const firstProjection = replayEvents(executionId, events);
+    const firstResume = _buildResumeStateForTesting(firstProjection, graph, events);
+    expect(computeFrontier(graph, firstResume).sort()).toEqual(['B', 'C', 'D']);
+
+    const secondEmit: RunOptions['emitState'] = async event => {
+      events.push(event);
+      if (event.type === 'route:resolved' && event.source === 'B') {
+        throw new Error('second interruption');
+      }
+    };
+    await expect(run(graph, {
+      ...baseOptions,
+      emitState: secondEmit,
+      resumeFrom: firstResume,
+    })).rejects.toThrow('second interruption');
+    const secondProjection = replayEvents(executionId, events);
+    const secondResume = _buildResumeStateForTesting(secondProjection, graph, events);
+    expect(computeFrontier(graph, secondResume).sort()).toEqual(['C', 'D']);
+
+    await run(graph, {
+      ...baseOptions,
+      emitState: async event => { events.push(event); },
+      resumeFrom: secondResume,
+    });
+    const finalProjection = replayEvents(executionId, events);
+
+    expect(finalProjection.status).toBe('completed');
+    expect(Object.fromEntries(calls)).toEqual({ A: 1, B: 1, C: 2, D: 2 });
+  });
+
+  it('reruns a resolved gate when the scheduler completion did not persist', () => {
+    const executionId = 'resolved-gate-crash';
+    const graph: FlowGraph = {
+      nodes: {
+        gate: mkEntry(async () => ({ action: 'approved' }), { nodeType: 'gate' }),
+        next: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { gate: { approved: 'next', rejected: 'end' } },
+      start: ['gate'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'gate', action: 'approved', target: 'next' },
+          { source: 'gate', action: 'rejected', target: 'end' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:gated',
+      executionId,
+      nodeId: 'gate',
+      gateType: 'approval',
+      ts: 2,
+    }, {
+      type: 'gate:resolved',
+      executionId,
+      nodeId: 'gate',
+      resolution: 'approved',
+      ts: 3,
+    }, {
+      type: 'run:completed',
+      executionId,
+      status: 'crashed',
+      ts: 4,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(projection.graph.nodes.find(node => node.id === 'gate')?.status).toBe('completed');
+    expect(state.completedNodes.has('gate')).toBe(false);
+    expect(state.nodeStatuses.get('gate')).toBe('pending');
+    expect(computeFrontier(graph, state)).toEqual(['gate']);
+  });
+
+  it('ignores a late gate audit event after that gate attempt already routed', () => {
+    const executionId = 'late-gate-audit';
+    const graph: FlowGraph = {
+      nodes: {
+        gate: mkEntry(async () => ({ action: 'approved' }), { nodeType: 'gate' }),
+        next: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { gate: { approved: 'next' } },
+      start: ['gate'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [{ source: 'gate', action: 'approved', target: 'next' }],
+      },
+      ts: 1,
+    }, {
+      type: 'node:started',
+      executionId,
+      nodeId: 'gate',
+      ts: 2,
+    }, {
+      type: 'node:gated',
+      executionId,
+      nodeId: 'gate',
+      gateType: 'approval',
+      ts: 3,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'gate',
+      action: 'approved',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 4,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'gate',
+      action: 'approved',
+      targets: ['next'],
+      ts: 5,
+    }, {
+      type: 'gate:resolved',
+      executionId,
+      nodeId: 'gate',
+      resolution: 'approved',
+      ts: 6,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(state.completedNodes.has('gate')).toBe(true);
+    expect(computeFrontier(graph, state)).toEqual(['next']);
+  });
+
+  it('keeps a legacy completion when its gate audit event was persisted afterward', () => {
+    const executionId = 'legacy-late-gate-audit';
+    const graph: FlowGraph = {
+      nodes: {
+        gate: mkEntry(async () => ({ action: 'approved' }), { nodeType: 'gate' }),
+        next: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { gate: { approved: 'next' } },
+      start: ['gate'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [{ source: 'gate', action: 'approved', target: 'next' }],
+      },
+      ts: 1,
+    }, {
+      type: 'node:started',
+      executionId,
+      nodeId: 'gate',
+      ts: 2,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'gate',
+      action: 'approved',
+      elapsedMs: 1,
+      ts: 3,
+    }, {
+      type: 'edge:traversed',
+      executionId,
+      source: 'gate',
+      target: 'next',
+      action: 'approved',
+      ts: 4,
+    }, {
+      type: 'gate:resolved',
+      executionId,
+      nodeId: 'gate',
+      resolution: 'approved',
+      ts: 5,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(state.completedNodes.has('gate')).toBe(true);
+    expect(computeFrontier(graph, state)).toEqual(['next']);
+  });
+
+  it('keeps per-edge reconstruction for legacy logs', () => {
+    const executionId = 'legacy-per-edge';
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'default' })),
+        B: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { A: { default: 'B' } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [{ source: 'A', action: 'default', target: 'B' }],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'A',
+      action: 'default',
+      elapsedMs: 1,
+      ts: 2,
+    }, {
+      type: 'edge:traversed',
+      executionId,
+      source: 'A',
+      target: 'B',
+      action: 'default',
+      ts: 3,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, state)).toEqual(['B']);
+  });
+
+  it('round-trips conditional actions from the atomic route', () => {
+    const executionId = 'atomic-conditional';
+    const graph: FlowGraph = {
+      nodes: {
+        A: mkEntry(async () => ({ action: 'foo' })),
+        foo: mkEntry(async () => ({ action: 'default' })),
+        bar: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: { A: { foo: 'foo', bar: 'bar' } },
+      start: ['A'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'A', action: 'foo', target: 'foo' },
+          { source: 'A', action: 'bar', target: 'bar' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'A',
+      action: 'foo',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 2,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'A',
+      action: 'foo',
+      targets: ['foo'],
+      ts: 3,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, state)).toEqual(['foo']);
+    expect(state.firedEdges.has('bar')).toBe(false);
+  });
+
+  it.each([
+    {
+      name: 'exitOn count exhaustion',
+      action: 'exit',
+      targets: ['done'],
+      exhaustion: { reason: 'count' as const },
+      expected: ['done'],
+    },
+    {
+      name: 'onExhausted count exhaustion',
+      action: 'continue',
+      targets: ['exhausted'],
+      exhaustion: { reason: 'count' as const },
+      expected: ['exhausted'],
+    },
+    {
+      name: 'onExhausted time exhaustion',
+      action: 'continue',
+      targets: ['timed-out'],
+      exhaustion: {
+        reason: 'time' as const,
+        budgetMs: 100,
+        elapsedMs: 80,
+        estimatedNextRoundMs: 30,
+      },
+      expected: ['timed-out'],
+    },
+    {
+      name: 'legacy loop fallback',
+      action: 'continue',
+      targets: ['fallback'],
+      exhaustion: undefined,
+      expected: ['fallback'],
+    },
+  ])('round-trips $name from the atomic record', ({
+    action,
+    targets,
+    exhaustion,
+    expected,
+  }) => {
+    const executionId = `atomic-${expected[0]}`;
+    const graph: FlowGraph = {
+      nodes: {
+        decision: mkEntry(async () => ({ action: 'continue' })),
+        entry: mkEntry(async () => ({ action: 'default' })),
+        done: mkEntry(async () => ({ action: 'default' })),
+        exhausted: mkEntry(async () => ({ action: 'default' })),
+        'timed-out': mkEntry(async () => ({ action: 'default' })),
+        fallback: mkEntry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        decision: { continue: 'entry', exit: 'done' },
+      },
+      start: ['decision'],
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'decision', action: 'continue', target: 'entry' },
+          { source: 'decision', action: 'exit', target: 'done' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'decision',
+      action: 'continue',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 2,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'decision',
+      action,
+      targets,
+      ...(exhaustion ? { exhaustion } : {}),
+      ts: 3,
+    }];
+    const projection = replayEvents(executionId, events);
+    const state = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, state)).toEqual(expected);
+  });
+
+  it('reconstructs a loop reset frontier and iteration without per-edge events', () => {
+    const executionId = 'atomic-loop-reset';
+    const graph: FlowGraph = {
+      nodes: {
+        entry: mkEntry(async () => ({ action: 'default' })),
+        decision: mkEntry(async () => ({ action: 'continue' })),
+      },
+      edges: {
+        entry: { default: 'decision' },
+        decision: { continue: 'entry', exit: 'end' },
+      },
+      start: ['entry'],
+      loopFallback: {
+        'decision:continue': {
+          source: 'decision',
+          action: 'continue',
+          fallbackTarget: 'end',
+          maxIterations: 3,
+        },
+      },
+    };
+    const events: ExecutionEvent[] = [{
+      type: 'run:started',
+      executionId,
+      flowId: '',
+      params: {},
+      graph: {
+        nodes: Object.entries(graph.nodes).map(([id, node]) => ({
+          id,
+          displayName: node.displayName,
+          nodeType: node.nodeType,
+        })),
+        edges: [
+          { source: 'entry', action: 'default', target: 'decision' },
+          { source: 'decision', action: 'continue', target: 'entry' },
+          { source: 'decision', action: 'exit', target: 'end' },
+        ],
+      },
+      ts: 1,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'entry',
+      action: 'default',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 2,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'entry',
+      action: 'default',
+      targets: ['decision'],
+      ts: 3,
+    }, {
+      type: 'node:completed',
+      executionId,
+      nodeId: 'decision',
+      action: 'continue',
+      elapsedMs: 1,
+      routingExpected: true,
+      ts: 4,
+    }, {
+      type: 'route:resolved',
+      executionId,
+      source: 'decision',
+      action: 'continue',
+      targets: ['entry'],
+      loop: {
+        key: 'decision:continue',
+        iteration: 1,
+        resetNodes: ['entry', 'decision'],
+        readyTargets: ['entry'],
+        firedTargets: ['entry'],
+        clearedEdges: [
+          { source: 'entry', target: 'decision' },
+          { source: 'decision', target: 'entry' },
+        ],
+      },
+      ts: 5,
+    }];
+    const projection = replayEvents(executionId, events);
+    const first = _buildResumeStateForTesting(projection, graph, events);
+    const second = _buildResumeStateForTesting(projection, graph, events);
+
+    expect(computeFrontier(graph, first)).toEqual(['entry']);
+    expect(computeFrontier(graph, second)).toEqual(['entry']);
+    expect(first.loopIterations).toEqual(new Map([['decision:continue', 1]]));
+    expect(second).toEqual(first);
   });
 
   it('reconstructs legacy and LoopRegion iteration keys', async () => {
