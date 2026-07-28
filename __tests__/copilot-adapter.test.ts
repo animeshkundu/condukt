@@ -110,6 +110,7 @@ describe('adaptCopilotBackend', () => {
       timeout: 3600,
       heartbeatTimeout: 120,
       contextTier: 'long_context',
+      mcpServers: { browser: { command: 'browser-mcp' } },
       systemMessage: 'You are a reviewer. Respond with JSON.',
       availableTools: ['view', 'glob'],
       excludedTools: ['apply_patch'],
@@ -134,6 +135,7 @@ describe('adaptCopilotBackend', () => {
     expect(createSession).toHaveBeenCalledWith(
       expect.objectContaining({
         contextTier: 'long_context',
+        mcpServers: { browser: { command: 'browser-mcp' } },
         systemMessage: 'You are a reviewer. Respond with JSON.',
         availableTools: ['view', 'glob'],
         excludedTools: ['apply_patch'],

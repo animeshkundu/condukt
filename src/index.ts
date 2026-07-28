@@ -43,7 +43,7 @@ export type {
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
   AgentRuntime, AgentSession, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, ToolRef, AgentConfig, PromptOutput,
-  RetryPolicy, RetryMeta, MCPServerConfig, CustomAgentConfig, DefaultAgentConfig, SubagentRosterOption,
+  RetryPolicy, RetryMeta, MCPServerConfig, MCPServersOption, CustomAgentConfig, DefaultAgentConfig, SubagentRosterOption,
   ExecutionProjection, ProjectionNode, ProjectionEdge,
   StorageEngine, OutputPage,
   ExecutionId,
@@ -52,6 +52,7 @@ export type {
 export {
   DEFAULT_AGENT_TIMEOUT_SECS,
   DEFAULT_CONTEXT_TIER,
+  DEFAULT_MCP_SERVERS,
   DEFAULT_THINKING_BUDGET,
   DEFAULT_REVIEWER_MODEL,
   DEFAULT_PRODUCER_MODEL,

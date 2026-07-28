@@ -43,7 +43,7 @@ import type { SubagentRoster } from './subagents';
 // ---------------------------------------------------------------------------
 
 export interface SdkBackendOptions {
-  /** Path to .copilot/mcp.json for MCP server configuration. */
+  /** .copilot/mcp.json servers merged beneath session servers unless MCP is disabled. */
   readonly mcpConfigPath?: string;
   /** Extra directories to add to PATH (e.g. .tools/bin). */
   readonly extraPathDirs?: readonly string[];
@@ -247,14 +247,90 @@ function parseMcpConfig(configPath: string): Record<string, CopilotMcpServerConf
   }
 }
 
+const ENV_REFERENCE = /^\$\{([A-Z_][A-Z0-9_]*(?:\|[A-Z_][A-Z0-9_]*)*)\}$/;
+
+/**
+ * Resolves ${NAME} and ${NAME|FALLBACK|...}, taking the first variable that is set.
+ *
+ * The fallback chain exists because there is no single conventional name for a GitHub
+ * token: the Copilot CLI itself reads COPILOT_GITHUB_TOKEN, then GH_TOKEN, then
+ * GITHUB_TOKEN. A default that insisted on one spelling would silently ship an
+ * unauthenticated server in any environment that chose a different one.
+ */
+function resolveMcpEnvironmentValue(value: string): string | undefined {
+  const match = ENV_REFERENCE.exec(value);
+  if (!match) return value;
+  for (const name of match[1]!.split('|')) {
+    const resolved = process.env[name];
+    if (resolved !== undefined && resolved !== '') return resolved;
+  }
+  return undefined;
+}
+
+function resolveMcpEnvironmentRecord(
+  values: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (values === undefined) return undefined;
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    const environmentValue = resolveMcpEnvironmentValue(value);
+    if (environmentValue !== undefined) resolved[key] = environmentValue;
+  }
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+function resolveMcpHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (headers === undefined) return undefined;
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const references = [...value.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)];
+    let resolvedValue = value;
+    let complete = true;
+    for (const reference of references) {
+      const environmentValue = process.env[reference[1]];
+      if (environmentValue === undefined) {
+        complete = false;
+        break;
+      }
+      resolvedValue = resolvedValue.replace(reference[0], environmentValue);
+    }
+    if (complete) resolved[key] = resolvedValue;
+  }
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+function toSdkMcpServers(
+  servers: false,
+): false;
 function toSdkMcpServers(
   servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | undefined,
-): Record<string, CopilotMcpServerConfig> | undefined {
-  if (servers === undefined) return undefined;
+): Record<string, CopilotMcpServerConfig> | undefined;
+function toSdkMcpServers(
+  servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | false | undefined,
+): Record<string, CopilotMcpServerConfig> | false | undefined;
+function toSdkMcpServers(
+  servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | false | undefined,
+): Record<string, CopilotMcpServerConfig> | false | undefined {
+  if (servers === undefined || servers === false) return servers;
   const converted: Record<string, CopilotMcpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
     const parsed = parseMcpServer(server);
-    if (parsed) converted[name] = parsed;
+    if (!parsed) continue;
+    if ('url' in parsed) {
+      const headers = resolveMcpHeaders(parsed.headers);
+      converted[name] = {
+        ...parsed,
+        ...(headers !== undefined ? { headers } : { headers: undefined }),
+      };
+    } else {
+      const env = resolveMcpEnvironmentRecord(parsed.env);
+      converted[name] = {
+        ...parsed,
+        ...(env !== undefined ? { env } : { env: undefined }),
+      };
+    }
   }
   return converted;
 }
@@ -478,9 +554,18 @@ class SdkSession implements CopilotSession {
     // ---------------------------------------------------------------
     // Parse MCP config
     // ---------------------------------------------------------------
-    const mcpServers = this.mcpConfigPath
+    const configuredMcpServers = toSdkMcpServers(this.config.mcpServers);
+    const fileMcpServers = this.mcpConfigPath
       ? parseMcpConfig(this.mcpConfigPath)
       : null;
+    // Backend-level file servers remain available when authoring-layer defaults
+    // are present. A session entry with the same name is the more specific value;
+    // false is the explicit kill switch for both layers.
+    const mcpServers = configuredMcpServers === false
+      ? undefined
+      : configuredMcpServers !== undefined || fileMcpServers !== null
+        ? { ...(fileMcpServers ?? {}), ...(configuredMcpServers ?? {}) }
+        : undefined;
 
     // ---------------------------------------------------------------
     // Create CopilotClient (process-per-session: new client each time)
@@ -552,7 +637,7 @@ class SdkSession implements CopilotSession {
       ...(this.config.excludedBuiltinAgents !== undefined
         ? { excludedBuiltinAgents: [...this.config.excludedBuiltinAgents] }
         : {}),
-      ...(mcpServers !== null ? { mcpServers } : {}),
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
       // Enable infinite sessions with automatic context compaction.
       // Without this, GPT models can go silent when the context window fills.
       infiniteSessions: {

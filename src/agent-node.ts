@@ -9,6 +9,7 @@ import type {
   NodeOutput,
   CustomAgentConfig,
   DefaultAgentConfig,
+  MCPServersOption,
   RetryPolicy,
   ThinkingBudget,
   ToolRef,
@@ -67,6 +68,8 @@ export interface AgentNodeConfig<T> {
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
+  readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
@@ -321,6 +324,7 @@ export async function produce<T>(
     model: config.model,
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
+    mcpServers: config.mcpServers,
     isolation: config.isolation,
     timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,
     systemMessage: config.system,

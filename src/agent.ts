@@ -23,10 +23,14 @@ import type {
   RetryPolicy,
   SessionConfig,
 } from './types';
-import { DEFAULT_AGENT_TIMEOUT_SECS,
+import {
+  DEFAULT_AGENT_TIMEOUT_SECS,
   DEFAULT_CONTEXT_TIER,
+  DEFAULT_MCP_SERVERS,
   DEFAULT_PRODUCER_MODEL,
-  DEFAULT_THINKING_BUDGET, FlowAbortedError } from './types';
+  DEFAULT_THINKING_BUDGET,
+  FlowAbortedError,
+} from './types';
 import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
 import type { ToolSpecificData, ImageToolData, ResourceToolData } from '../ui/tool-display/types';
 
@@ -281,12 +285,14 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void>
 
 function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionContext): SessionConfig {
   const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
+  const mcpServers = config.mcpServers ?? DEFAULT_MCP_SERVERS;
   return {
     model: config.model ?? DEFAULT_PRODUCER_MODEL,
     thinkingBudget: config.thinkingBudget ?? DEFAULT_THINKING_BUDGET,
     // ?? rather than a presence check: an explicit 'default' must survive, so a consumer
     // can opt out of long context and not merely into it.
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
+    ...(mcpServers !== undefined ? { mcpServers } : {}),
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],
     timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,

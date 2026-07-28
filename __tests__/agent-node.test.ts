@@ -93,7 +93,7 @@ describe('agentNode', () => {
     expect(captured[0]?.timeout).toBe(expected);
   });
 
-  it('forwards contextTier and thinkingBudget through the plain agent node', async () => {
+  it('forwards contextTier, thinkingBudget, and MCP servers through the plain agent node', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const runtime: AgentRuntime = {
@@ -119,6 +119,9 @@ describe('agentNode', () => {
       model: 'gpt-5.6-sol',
       contextTier: 'long_context',
       thinkingBudget: 'xhigh',
+      mcpServers: {
+        node: { command: 'node-mcp', args: ['--stdio'] },
+      },
     });
     const context: ExecutionContext = {
       executionId: 'config-capture',
@@ -135,6 +138,9 @@ describe('agentNode', () => {
         model: 'gpt-5.6-sol',
         contextTier: 'long_context',
         thinkingBudget: 'xhigh',
+        mcpServers: {
+          node: { command: 'node-mcp', args: ['--stdio'] },
+        },
       }),
       expect.objectContaining({ signal: expect.anything() }),
     );
