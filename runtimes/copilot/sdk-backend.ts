@@ -643,10 +643,19 @@ class SdkSession implements CopilotSession {
       coauthorEnabled: false,
       // Enable infinite sessions with automatic context compaction.
       // Without this, GPT models can go silent when the context window fills.
+      //
+      // These fractions are of a window the SDK believes it requested, which is not the window
+      // the provider enforces: a long_context session asks for 1,000,000 and gets rejected at
+      // 922,000. At the SDK's own defaults the blocking threshold lands at 950,000 — already
+      // past the real ceiling. Even at 0.90 it lands at 900,000, leaving 22,000 tokens, and a
+      // four-hour run died when one oversized tool result crossed that gap in a single turn.
+      // 0.75 blocks at 750,000 against the same assumed window, so roughly 170,000 tokens of
+      // headroom survive whichever window the fraction is really applied to. The cost is more
+      // frequent compaction, which is cheap next to losing the run at the end.
       infiniteSessions: {
         enabled: true,
-        backgroundCompactionThreshold: 0.75,
-        bufferExhaustionThreshold: 0.90,
+        backgroundCompactionThreshold: 0.60,
+        bufferExhaustionThreshold: 0.75,
       },
       // Registered before createSession issues its RPC, closing the early-event
       // gap for session.start and *_loaded events.
