@@ -19,6 +19,8 @@ import type {
   CopilotSession as CopilotSdkSession,
   CustomAgentConfig as CopilotSdkCustomAgentConfig,
   MCPServerConfig as CopilotMcpServerConfig,
+  ModelCapabilitiesOverride as CopilotSdkModelCapabilitiesOverride,
+  ModelInfo as CopilotSdkModelInfo,
   SessionConfig as CopilotSdkSessionConfig,
   approveAll as approveAllPermissions,
   RuntimeConnection as CopilotRuntimeConnection,
@@ -66,6 +68,12 @@ interface CopilotSdkModule {
 
 type SdkClient = CopilotSdkClient;
 type SdkSessionHandle = CopilotSdkSession;
+
+type ModelLimitSource = 'max_prompt_tokens' | 'max_context_window_tokens';
+
+interface ModelCapabilityResolution {
+  readonly modelCapabilities?: CopilotSdkModelCapabilitiesOverride;
+}
 
 interface SdkEvent {
   readonly type?: string;
@@ -186,6 +194,10 @@ function nonNegativeFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function parseMcpServer(
@@ -383,6 +395,11 @@ export class SdkBackend implements CopilotBackend {
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
   private readonly logger: Logger;
+  private modelListPromise: Promise<readonly CopilotSdkModelInfo[] | undefined> | undefined;
+  private readonly modelCapabilityResolutions = new Map<
+    string,
+    Promise<ModelCapabilityResolution>
+  >();
 
   constructor(options: SdkBackendOptions = {}) {
     this.mcpConfigPath = options.mcpConfigPath;
@@ -405,6 +422,109 @@ export class SdkBackend implements CopilotBackend {
     }
   }
 
+  private resolveModelCapabilities(
+    client: SdkClient,
+    model: string,
+  ): Promise<ModelCapabilityResolution> {
+    const cached = this.modelCapabilityResolutions.get(model);
+    if (cached) return cached;
+
+    const resolution = this.resolveModelCapabilitiesUncached(client, model).catch((err: unknown) => {
+      this.logger.warn('Copilot model capability resolution failed; using proportional compaction thresholds only', {
+        model,
+        reason: 'capability_resolution_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return {};
+    });
+    this.modelCapabilityResolutions.set(model, resolution);
+    return resolution;
+  }
+
+  private async resolveModelCapabilitiesUncached(
+    client: SdkClient,
+    model: string,
+  ): Promise<ModelCapabilityResolution> {
+    const models = await this.listModels(client);
+    if (!models) return {};
+
+    const selected = models.find(candidate => candidate.id === model);
+    if (!selected) {
+      this.logger.warn('Copilot model capability lookup failed; using proportional compaction thresholds only', {
+        model,
+        reason: 'model_not_found',
+      });
+      return {};
+    }
+
+    const limits = selected.capabilities?.limits;
+    const promptLimit = limits?.max_prompt_tokens;
+    const contextWindowLimit = limits?.max_context_window_tokens;
+    const source: ModelLimitSource | undefined = isPositiveFiniteNumber(promptLimit)
+      ? 'max_prompt_tokens'
+      : promptLimit === undefined && isPositiveFiniteNumber(contextWindowLimit)
+        ? 'max_context_window_tokens'
+        : undefined;
+    const discoveredLimit = source === 'max_prompt_tokens'
+      ? promptLimit
+      : source === 'max_context_window_tokens'
+        ? contextWindowLimit
+        : undefined;
+
+    if (source === undefined || discoveredLimit === undefined) {
+      this.logger.warn('Copilot model capability lookup returned no usable token limit; using proportional compaction thresholds only', {
+        model,
+        reason: 'invalid_limit',
+        maxPromptTokens: promptLimit,
+        maxContextWindowTokens: contextWindowLimit,
+      });
+      return {};
+    }
+
+    const promptTokenCeiling = Math.floor(discoveredLimit * 0.80);
+    if (!isPositiveFiniteNumber(promptTokenCeiling)) {
+      this.logger.warn('Copilot model capability lookup produced no usable prompt-token ceiling; using proportional compaction thresholds only', {
+        model,
+        reason: 'invalid_computed_ceiling',
+        discoveredLimit,
+        limitSource: source,
+      });
+      return {};
+    }
+
+    this.logger.info('Resolved Copilot model prompt-token ceiling', {
+      model,
+      discoveredLimit,
+      limitSource: source,
+      promptTokenCeiling,
+    });
+    return {
+      modelCapabilities: {
+        limits: {
+          max_prompt_tokens: promptTokenCeiling,
+        },
+      },
+    };
+  }
+
+  private listModels(client: SdkClient): Promise<readonly CopilotSdkModelInfo[] | undefined> {
+    if (this.modelListPromise) return this.modelListPromise;
+
+    this.modelListPromise = (async () => {
+      try {
+        await client.start();
+        return await client.listModels();
+      } catch (err) {
+        this.logger.warn('Copilot model capability discovery failed; using proportional compaction thresholds only', {
+          reason: 'list_models_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    })();
+    return this.modelListPromise;
+  }
+
   async createSession(
     config: SessionConfig,
     options?: SessionCreationOptions,
@@ -420,6 +540,7 @@ export class SdkBackend implements CopilotBackend {
       this.extraPathDirs,
       this.pathTools,
       this.logger,
+      (client, model) => this.resolveModelCapabilities(client, model),
     );
   }
 }
@@ -449,6 +570,10 @@ class SdkSession implements CopilotSession {
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
   private readonly logger: Logger;
+  private readonly resolveModelCapabilities: (
+    client: SdkClient,
+    model: string,
+  ) => Promise<ModelCapabilityResolution>;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private compactionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -492,6 +617,10 @@ class SdkSession implements CopilotSession {
     extraPathDirs: readonly string[],
     pathTools: readonly string[],
     logger: Logger,
+    resolveModelCapabilities: (
+      client: SdkClient,
+      model: string,
+    ) => Promise<ModelCapabilityResolution>,
   ) {
     this.config = config;
     this.mcpConfigPath = mcpConfigPath;
@@ -500,6 +629,7 @@ class SdkSession implements CopilotSession {
     this.extraPathDirs = extraPathDirs;
     this.pathTools = pathTools;
     this.logger = logger;
+    this.resolveModelCapabilities = resolveModelCapabilities;
   }
 
   /**
@@ -601,9 +731,14 @@ class SdkSession implements CopilotSession {
       roster = this.backendRoster;
     }
 
+    const { modelCapabilities } = await this.resolveModelCapabilities(client, this.config.model);
+
     const sessionConfig: CopilotSdkSessionConfig = {
       model: this.config.model,
       streaming: true,
+      // This applies only to the parent session. The installed SDK's subagent
+      // settings surface cannot carry a capability override to child sessions.
+      ...(modelCapabilities !== undefined ? { modelCapabilities } : {}),
       onPermissionRequest: approveAll,
       workingDirectory: this.config.cwd,
       reasoningEffort: this.config.thinkingBudget,
@@ -641,17 +776,10 @@ class SdkSession implements CopilotSession {
       // The SDK defaults this on, so every commit an agent composes carries a
       // Co-authored-by trailer. Output should read as the repository owner's work.
       coauthorEnabled: false,
-      // Enable infinite sessions with automatic context compaction.
-      // Without this, GPT models can go silent when the context window fills.
-      //
-      // These fractions are of a window the SDK believes it requested, which is not the window
-      // the provider enforces: a long_context session asks for 1,000,000 and gets rejected at
-      // 922,000. At the SDK's own defaults the blocking threshold lands at 950,000 — already
-      // past the real ceiling. Even at 0.90 it lands at 900,000, leaving 22,000 tokens, and a
-      // four-hour run died when one oversized tool result crossed that gap in a single turn.
-      // 0.75 blocks at 750,000 against the same assumed window, so roughly 170,000 tokens of
-      // headroom survive whichever window the fraction is really applied to. The cost is more
-      // frequent compaction, which is cheap next to losing the run at the end.
+      // Layer proportional compaction over the discovered absolute pre-send ceiling.
+      // For gpt-5.6-sol, the SDK's 1,050,000-token denominator starts background
+      // compaction at 630,000 (60%), while 80% of the provider's 922,000 prompt
+      // limit caps pre-send prompts at 737,600 before the 787,500 blocking fraction.
       infiniteSessions: {
         enabled: true,
         backgroundCompactionThreshold: 0.60,
