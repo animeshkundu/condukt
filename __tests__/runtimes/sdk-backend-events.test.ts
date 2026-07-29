@@ -35,6 +35,21 @@ import type { SessionConfig } from '../../src/types';
 
 type SdkEventHandler = (e: { type?: string; data?: Record<string, unknown> }) => void;
 
+interface MockModelInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly capabilities: {
+    readonly supports: {
+      readonly vision: boolean;
+      readonly reasoningEffort: boolean;
+    };
+    readonly limits: {
+      readonly max_prompt_tokens?: number;
+      readonly max_context_window_tokens: number;
+    };
+  };
+}
+
 interface MockSdkSession {
   send: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
@@ -98,6 +113,10 @@ function createMockSdkSession(): MockSdkSession {
 let mockSdkSession: MockSdkSession;
 let mockSdkSessions: MockSdkSession[];
 let mockCreateSession: ReturnType<typeof vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>>;
+let mockStart: ReturnType<typeof vi.fn<() => Promise<void>>>;
+let mockListModels: ReturnType<typeof vi.fn<() => Promise<MockModelInfo[]>>>;
+let mockStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
+let mockForceStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let originalFunction: typeof globalThis.Function;
 
 /**
@@ -119,6 +138,15 @@ async function createTestSession(
   });
 
   return { session, mock: mockSdkSession };
+}
+
+function createMockLogger() {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
 }
 
 interface JsonSchemaDefinition {
@@ -164,6 +192,20 @@ beforeEach(() => {
   mockSdkSessions = [mockSdkSession];
   mockCreateSession = vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>()
     .mockImplementation(async () => mockSdkSessions.shift() ?? mockSdkSession);
+  mockStart = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  mockStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  mockForceStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  mockListModels = vi.fn<() => Promise<MockModelInfo[]>>().mockResolvedValue([{
+    id: 'test-model',
+    name: 'Test Model',
+    capabilities: {
+      supports: { vision: false, reasoningEffort: true },
+      limits: {
+        max_prompt_tokens: 922_000,
+        max_context_window_tokens: 1_050_000,
+      },
+    },
+  }]);
   originalFunction = globalThis.Function;
 
   // Replace Function constructor so that when SdkBackend creates its dynamic import
@@ -175,13 +217,15 @@ beforeEach(() => {
           forStdio: vi.fn(() => ({ kind: 'stdio' as const })),
         },
         CopilotClient: class MockCopilotClient {
+          start() { return mockStart(); }
+          listModels() { return mockListModels(); }
           async createSession(config: Record<string, unknown>) {
             const onEvent = config.onEvent as SdkEventHandler | undefined;
             onEvent?.({ type: 'session.start', data: { early: true } });
             return mockCreateSession(config);
           }
-          stop() { return Promise.resolve(); }
-          forceStop() { return Promise.resolve(); }
+          stop() { return mockStop(); }
+          forceStop() { return mockForceStop(); }
         },
         approveAll: () => ({}),
       });
@@ -210,6 +254,235 @@ describe('SdkBackend event mapping', () => {
       expect(classifySdkEvent(phantom), phantom).toBeUndefined();
     }
   });
+  it('applies 80% of the discovered prompt limit as an absolute ceiling', async () => {
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        modelCapabilities: {
+          limits: { max_prompt_tokens: 737_600 },
+        },
+        infiniteSessions: {
+          enabled: true,
+          backgroundCompactionThreshold: 0.60,
+          bufferExhaustionThreshold: 0.75,
+        },
+      }));
+    });
+    expect(mockStart.mock.invocationCallOrder[0]).toBeLessThan(mockListModels.mock.invocationCallOrder[0]!);
+    expect(logger.info).toHaveBeenCalledWith('Resolved Copilot model prompt-token ceiling', {
+      model: 'test-model',
+      discoveredLimit: 922_000,
+      limitSource: 'max_prompt_tokens',
+      promptTokenCeiling: 737_600,
+    });
+  });
+
+  it('falls back to 80% of the context window when the prompt limit is absent', async () => {
+    mockListModels.mockResolvedValueOnce([{
+      id: 'test-model',
+      name: 'Test Model',
+      capabilities: {
+        supports: { vision: false, reasoningEffort: true },
+        limits: { max_context_window_tokens: 400_000 },
+      },
+    }]);
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        modelCapabilities: {
+          limits: { max_prompt_tokens: 320_000 },
+        },
+      }));
+    });
+    expect(logger.info).toHaveBeenCalledWith('Resolved Copilot model prompt-token ceiling', {
+      model: 'test-model',
+      discoveredLimit: 400_000,
+      limitSource: 'max_context_window_tokens',
+      promptTokenCeiling: 320_000,
+    });
+  });
+
+  it('degrades safely when the selected model has malformed capabilities', async () => {
+    mockListModels.mockResolvedValueOnce([{
+      id: 'test-model',
+      name: 'Test Model',
+    } as MockModelInfo]);
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability lookup returned no usable token limit; using proportional compaction thresholds only',
+      {
+        model: 'test-model',
+        reason: 'invalid_limit',
+        maxPromptTokens: undefined,
+        maxContextWindowTokens: undefined,
+      },
+    );
+  });
+
+  it('omits a computed prompt-token ceiling that rounds down to zero', async () => {
+    mockListModels.mockResolvedValueOnce([{
+      id: 'test-model',
+      name: 'Test Model',
+      capabilities: {
+        supports: { vision: false, reasoningEffort: true },
+        limits: {
+          max_prompt_tokens: 0.5,
+          max_context_window_tokens: 400_000,
+        },
+      },
+    }]);
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability lookup produced no usable prompt-token ceiling; using proportional compaction thresholds only',
+      {
+        model: 'test-model',
+        reason: 'invalid_computed_ceiling',
+        discoveredLimit: 0.5,
+        limitSource: 'max_prompt_tokens',
+      },
+    );
+  });
+
+  it('does not substitute the context window for an invalid reported prompt limit', async () => {
+    mockListModels.mockResolvedValueOnce([{
+      id: 'test-model',
+      name: 'Test Model',
+      capabilities: {
+        supports: { vision: false, reasoningEffort: true },
+        limits: {
+          max_prompt_tokens: 0,
+          max_context_window_tokens: 400_000,
+        },
+      },
+    }]);
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability lookup returned no usable token limit; using proportional compaction thresholds only',
+      {
+        model: 'test-model',
+        reason: 'invalid_limit',
+        maxPromptTokens: 0,
+        maxContextWindowTokens: 400_000,
+      },
+    );
+  });
+
+  it('creates sessions without an absolute ceiling when model listing fails', async () => {
+    mockListModels.mockRejectedValueOnce(new Error('models unavailable'));
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
+    expect(mockCreateSession.mock.calls[0]?.[0]).toMatchObject({
+      infiniteSessions: {
+        enabled: true,
+        backgroundCompactionThreshold: 0.60,
+        bufferExhaustionThreshold: 0.75,
+      },
+    });
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability discovery failed; using proportional compaction thresholds only',
+      { reason: 'list_models_failed', error: 'models unavailable' },
+    );
+  });
+
+  it('creates sessions without an absolute ceiling when the model is absent', async () => {
+    mockListModels.mockResolvedValueOnce([]);
+    const logger = createMockLogger();
+    const { session } = await createTestSession({ logger });
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability lookup failed; using proportional compaction thresholds only',
+      { model: 'test-model', reason: 'model_not_found' },
+    );
+  });
+
+  it('lists models and logs resolution once across concurrent sessions on the same backend', async () => {
+    let resolveModels!: (models: MockModelInfo[]) => void;
+    mockListModels.mockReturnValueOnce(new Promise(resolve => { resolveModels = resolve; }));
+    const logger = createMockLogger();
+    const backend = new SdkBackend({ logger });
+    const createConfig = (): SessionConfig => ({
+      model: 'test-model',
+      cwd: '.',
+      addDirs: [],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+    });
+    const first = await backend.createSession(createConfig());
+    const second = await backend.createSession(createConfig());
+    first.send('first prompt');
+    second.send('second prompt');
+
+    await vi.waitFor(() => expect(mockListModels).toHaveBeenCalledOnce());
+    resolveModels([{
+      id: 'test-model',
+      name: 'Test Model',
+      capabilities: {
+        supports: { vision: false, reasoningEffort: true },
+        limits: {
+          max_prompt_tokens: 922_000,
+          max_context_window_tokens: 1_050_000,
+        },
+      },
+    }]);
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledTimes(2));
+    expect(mockStart).toHaveBeenCalledOnce();
+    expect(mockListModels).toHaveBeenCalledOnce();
+    expect(logger.info).toHaveBeenCalledOnce();
+  });
+
+  it('logs a shared listing failure once across multiple sessions', async () => {
+    mockListModels.mockRejectedValueOnce(new Error('models unavailable'));
+    const logger = createMockLogger();
+    const backend = new SdkBackend({ logger });
+    const createConfig = (): SessionConfig => ({
+      model: 'test-model',
+      cwd: '.',
+      addDirs: [],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+    });
+    const first = await backend.createSession(createConfig());
+    const second = await backend.createSession(createConfig());
+    first.send('first prompt');
+    second.send('second prompt');
+
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledTimes(2));
+    expect(mockStart).toHaveBeenCalledOnce();
+    expect(mockListModels).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledOnce();
+  });
+
   it('forwards contextTier, thinkingBudget, and configDirectory to the SDK session config', async () => {
     const backend = new SdkBackend({ configDir: '/project', subagentRoster: false });
     await backend.createSession({
@@ -758,6 +1031,19 @@ describe('SdkBackend event mapping', () => {
     secondMock._emit('session.idle');
 
     expect(idleHandler).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans up the SDK client when SDK session creation fails', async () => {
+    mockCreateSession.mockRejectedValueOnce(new Error('creation failed'));
+    const { session } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+
+    session.send('test prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mockStop).toHaveBeenCalledOnce());
+    expect(mockForceStop).toHaveBeenCalledOnce();
   });
 
   it('clears timers and emits one error when SDK send rejects asynchronously', async () => {
