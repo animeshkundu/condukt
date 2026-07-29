@@ -638,6 +638,9 @@ class SdkSession implements CopilotSession {
         ? { excludedBuiltinAgents: [...this.config.excludedBuiltinAgents] }
         : {}),
       ...(mcpServers !== undefined ? { mcpServers } : {}),
+      // The SDK defaults this on, so every commit an agent composes carries a
+      // Co-authored-by trailer. Output should read as the repository owner's work.
+      coauthorEnabled: false,
       // Enable infinite sessions with automatic context compaction.
       // Without this, GPT models can go silent when the context window fills.
       infiniteSessions: {
