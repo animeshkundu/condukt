@@ -350,7 +350,12 @@ export const DEFAULT_MCP_SERVERS: Readonly<Record<string, MCPServerConfig>> = {
   github: {
     type: 'http',
     url: 'https://api.githubcopilot.com/mcp/',
-    headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}' },
+    headers: {
+      // The remote server requires a GitHub PAT; use the first conventional token variable available.
+      Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}',
+      // GitHub otherwise exposes only its default toolsets, which exclude tools such as web_search.
+      'X-MCP-Toolsets': 'all',
+    },
     tools: ['*'],
     timeout: 30_000,
   },

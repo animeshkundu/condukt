@@ -33,7 +33,10 @@ const EXPECTED_DEFAULT_MCP_SERVERS = {
   github: {
     type: 'http',
     url: 'https://api.githubcopilot.com/mcp/',
-    headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}' },
+    headers: {
+      Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN|COPILOT_GITHUB_TOKEN}',
+      'X-MCP-Toolsets': 'all',
+    },
     tools: ['*'],
     timeout: 30_000,
   },
