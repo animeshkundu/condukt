@@ -291,18 +291,32 @@ function resolveMcpEnvironmentRecord(
   return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
 
+// Embedded references, so `Bearer ${A|B}` resolves rather than only a bare `${A|B}`. The
+// fallback alternatives must be part of the pattern: a reference matcher without them finds
+// nothing in `${A|B}`, leaves the value untouched, and emits the placeholder as a literal
+// header — an unauthenticated server that reports no error and simply returns no tools.
+const HEADER_ENV_REFERENCE = /\$\{([A-Z_][A-Z0-9_]*(?:\|[A-Z_][A-Z0-9_]*)*)\}/g;
+
 function resolveMcpHeaders(
   headers: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
   if (headers === undefined) return undefined;
   const resolved: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    const references = [...value.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)];
+    const references = [...value.matchAll(HEADER_ENV_REFERENCE)];
     let resolvedValue = value;
     let complete = true;
     for (const reference of references) {
-      const environmentValue = process.env[reference[1]];
+      const names = reference[1]!.split('|');
+      const environmentValue = names
+        .map((name) => process.env[name])
+        .find((candidate) => candidate !== undefined && candidate !== '');
       if (environmentValue === undefined) {
+        // Dropping the header is deliberate — a missing credential must not abort a run — but
+        // it is invisible at the server, which just answers with nothing.
+        try {
+          process.stderr.write(`[SdkBackend] MCP header ${key} dropped: none of ${names.join(', ')} is set\n`);
+        } catch { /* diagnostics must not break configuration */ }
         complete = false;
         break;
       }

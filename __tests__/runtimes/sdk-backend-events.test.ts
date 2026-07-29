@@ -504,6 +504,36 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
+  it('resolves a fallback-chain env reference embedded in an MCP header', async () => {
+    // The default GitHub header is `Bearer ${A|B|C}`. A matcher without the alternatives finds
+    // no reference, leaves the value untouched, and ships the placeholder as a literal bearer
+    // token: the server answers 401 and simply returns no tools, with nothing logged.
+    vi.stubEnv('GITHUB_PERSONAL_ACCESS_TOKEN', '');
+    vi.stubEnv('GITHUB_TOKEN', '');
+    vi.stubEnv('GH_TOKEN', 'gh-token-value');
+
+    const { session } = await createTestSession({}, {
+      mcpServers: {
+        remote: {
+          type: 'http',
+          url: 'https://example.test/mcp/',
+          headers: { Authorization: 'Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_TOKEN|GH_TOKEN}' },
+          tools: ['*'],
+        },
+      },
+    });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      const config = mockCreateSession.mock.calls.at(-1)?.[0] as {
+        mcpServers?: Record<string, { headers?: Record<string, string> }>;
+      };
+      const authorization = config?.mcpServers?.remote?.headers?.Authorization;
+      expect(authorization).toBe('Bearer gh-token-value');
+      expect(authorization).not.toContain('${');
+    });
+  });
+
   it('merges backend MCP file servers with session servers, favoring the session', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
     const mcpConfigPath = join(directory, 'mcp.json');
