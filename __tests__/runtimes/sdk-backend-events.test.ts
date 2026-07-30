@@ -1626,7 +1626,10 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
-  it('session.task_complete emits idle and cleans up', async () => {
+  it.each([
+    ['success true', { success: true }],
+    ['success absent', {}],
+  ])('session.task_complete with %s emits idle and cleans up', async (_label, data) => {
     const { session, mock } = await createTestSession();
 
     const idleHandler = vi.fn();
@@ -1635,9 +1638,34 @@ describe('SdkBackend event mapping', () => {
 
     await new Promise(r => setTimeout(r, 50));
 
-    mock._emit('session.task_complete');
+    mock._emit('session.task_complete', data);
 
     expect(idleHandler).toHaveBeenCalledOnce();
+  });
+
+  it('session.task_complete with success false leaves the session active and logs visibly', async () => {
+    const logger = createMockLogger();
+    const { session, mock } = await createTestSession({ logger });
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+    await new Promise(r => setTimeout(r, 50));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    mock._emit('session.task_complete', { success: false, summary: 'invalid arguments' });
+
+    expect(idleHandler).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot task completion failed; session remains active',
+      { eventType: 'session.task_complete', summary: 'invalid arguments' },
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      '[SdkBackend] TASK COMPLETION FAILED; session remains active\n',
+    );
+
+    mock._emit('session.task_complete', { success: true });
+    expect(idleHandler).toHaveBeenCalledOnce();
+    stderr.mockRestore();
   });
 
   it('session.task_complete is safe when session.idle also fires', async () => {
