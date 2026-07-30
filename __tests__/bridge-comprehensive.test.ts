@@ -1119,6 +1119,200 @@ describe('bridge — retry node', () => {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
   });
 
+  function countedEntry(
+    counts: Record<string, number>,
+    nodeId: string,
+    action = 'default',
+  ): NodeEntry {
+    return mkEntry(async () => {
+      counts[nodeId] = (counts[nodeId] ?? 0) + 1;
+      return { action };
+    }, { displayName: nodeId });
+  }
+
+  function reviewLoopGraph(counts: Record<string, number>): FlowGraph {
+    return {
+      nodes: {
+        producer: countedEntry(counts, 'producer'),
+        gate: countedEntry(counts, 'gate'),
+        review: countedEntry(counts, 'review'),
+        decision: countedEntry(counts, 'decision', 'exit'),
+        dependent: countedEntry(counts, 'dependent'),
+      },
+      edges: {
+        producer: { default: 'gate' },
+        gate: { default: 'review' },
+        review: { default: 'decision' },
+        decision: { continue: 'producer', exit: 'dependent' },
+      },
+      start: ['producer'],
+      loops: [{
+        id: 'review-loop',
+        nodes: ['producer', 'gate', 'review', 'decision'],
+        entry: 'producer',
+        decision: 'decision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxIterations: 3,
+      }],
+    };
+  }
+
+  it('retryNode inside a loop does not re-run its upstream producer', async () => {
+    const counts: Record<string, number> = {};
+    const graph = reviewLoopGraph(counts);
+    const executionId = 'retry-loop-body';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+    expect(counts).toEqual({
+      producer: 1,
+      gate: 1,
+      review: 1,
+      decision: 1,
+      dependent: 1,
+    });
+
+    await bridge.retryNode(executionId, 'gate', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({
+      producer: 1,
+      gate: 2,
+      review: 2,
+      decision: 2,
+      dependent: 2,
+    });
+  });
+
+  it('retryNode on a loop decision follows its exit without resetting the loop entry', async () => {
+    const counts: Record<string, number> = {};
+    const graph = reviewLoopGraph(counts);
+    const executionId = 'retry-loop-decision';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    await bridge.retryNode(executionId, 'decision', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({
+      producer: 1,
+      gate: 1,
+      review: 1,
+      decision: 2,
+      dependent: 2,
+    });
+  });
+
+  it('retryNode outside a loop preserves ordinary downstream reset behavior', async () => {
+    const counts: Record<string, number> = {};
+    const graph: FlowGraph = {
+      nodes: {
+        upstream: countedEntry(counts, 'upstream'),
+        retried: countedEntry(counts, 'retried'),
+        dependent: countedEntry(counts, 'dependent'),
+      },
+      edges: {
+        upstream: { default: 'retried' },
+        retried: { default: 'dependent' },
+      },
+      start: ['upstream'],
+    };
+    const executionId = 'retry-no-loop';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    await bridge.retryNode(executionId, 'retried', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({ upstream: 1, retried: 2, dependent: 2 });
+  });
+
+  it('retryNode respects the continuation edges of multiple loop regions', async () => {
+    const counts: Record<string, number> = {};
+    const graph: FlowGraph = {
+      nodes: {
+        producerA: countedEntry(counts, 'producerA'),
+        gateA: countedEntry(counts, 'gateA'),
+        decisionA: countedEntry(counts, 'decisionA', 'exit'),
+        doneA: countedEntry(counts, 'doneA'),
+        producerB: countedEntry(counts, 'producerB'),
+        gateB: countedEntry(counts, 'gateB'),
+        decisionB: countedEntry(counts, 'decisionB', 'exit'),
+        doneB: countedEntry(counts, 'doneB'),
+      },
+      edges: {
+        producerA: { default: 'gateA' },
+        gateA: { default: 'decisionA' },
+        decisionA: { continue: 'producerA', exit: 'doneA' },
+        producerB: { default: 'gateB' },
+        gateB: { default: 'decisionB' },
+        decisionB: { continue: 'producerB', exit: 'doneB' },
+      },
+      start: ['producerA', 'producerB'],
+      loops: [
+        {
+          id: 'loop-a',
+          nodes: ['producerA', 'gateA', 'decisionA'],
+          entry: 'producerA',
+          decision: 'decisionA',
+          continueOn: 'continue',
+          exitOn: 'exit',
+          maxIterations: 3,
+        },
+        {
+          id: 'loop-b',
+          nodes: ['producerB', 'gateB', 'decisionB'],
+          entry: 'producerB',
+          decision: 'decisionB',
+          continueOn: 'continue',
+          exitOn: 'exit',
+          maxIterations: 3,
+        },
+      ],
+    };
+    const executionId = 'retry-multiple-loops';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    await bridge.retryNode(executionId, 'gateA', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({
+      producerA: 1,
+      gateA: 2,
+      decisionA: 2,
+      doneA: 2,
+      producerB: 1,
+      gateB: 1,
+      decisionB: 1,
+      doneB: 1,
+    });
+  });
+
   it('retryNode resets target and downstream, re-runs pipeline', async () => {
     // Complete the pipeline first
     await bridge.launch({
