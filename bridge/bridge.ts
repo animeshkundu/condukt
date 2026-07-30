@@ -633,7 +633,14 @@ function resetNodeAndDownstream(
     const edges = graph.edges[current];
     if (!edges) continue;
 
-    for (const edgeTarget of Object.values(edges)) {
+    for (const [action, edgeTarget] of Object.entries(edges)) {
+      // A declared continuation re-enters an earlier loop round; it is not a
+      // downstream dependency of the decision node in the retry operation.
+      const isLoopContinuation = graph.loops?.some(region =>
+        region.decision === current && region.continueOn === action,
+      ) ?? false;
+      if (isLoopContinuation) continue;
+
       const targets = Array.isArray(edgeTarget) ? edgeTarget : [edgeTarget];
       for (const target of targets) {
         if (target !== 'end' && !visited.has(target)) {
