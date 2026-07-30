@@ -33,7 +33,11 @@ import type { SessionConfig } from '../../src/types';
 // Mock SDK types that mirror the real SDK's shape
 // ---------------------------------------------------------------------------
 
-type SdkEventHandler = (e: { type?: string; data?: Record<string, unknown> }) => void;
+type SdkEventHandler = (e: {
+  type?: string;
+  agentId?: string;
+  data?: Record<string, unknown>;
+}) => void;
 
 interface MockModelInfo {
   readonly id: string;
@@ -66,7 +70,7 @@ interface MockSdkSession {
   };
   on: (event: string | SdkEventHandler, handler?: SdkEventHandler) => void;
   /** Simulate an SDK event by type. */
-  _emit: (type: string, data?: Record<string, unknown>) => void;
+  _emit: (type: string, data?: Record<string, unknown>, agentId?: string) => void;
 }
 
 function createMockSdkSession(): MockSdkSession {
@@ -96,8 +100,8 @@ function createMockSdkSession(): MockSdkSession {
         handlers.set(eventOrHandler, list);
       }
     },
-    _emit: (type: string, data?: Record<string, unknown>) => {
-      const event = { type, data };
+    _emit: (type: string, data?: Record<string, unknown>, agentId?: string) => {
+      const event = { type, data, agentId };
       const list = handlers.get(type) ?? [];
       for (const h of list) h(event);
       for (const h of catchAll) h(event);
@@ -1179,6 +1183,34 @@ describe('SdkBackend event mapping', () => {
     }));
   });
 
+  it('logs unknown agent-scoped failures without failing the parent', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const logger = createMockLogger();
+      const { session, mock } = await createTestSession({ logger });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await new Promise(r => setTimeout(r, 50));
+
+      mock._emit('future.transport_fatal', {
+        failed: true, error: 'future child failure',
+      }, 'bg-child-1');
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        'Copilot sub-agent failed; parent session remains active',
+        expect.objectContaining({
+          agentId: 'bg-child-1',
+          eventType: 'future.transport_fatal',
+          reason: 'future child failure',
+        }),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('still fails terminal events immediately after liveness resets', async () => {
     vi.useFakeTimers();
     try {
@@ -1235,8 +1267,95 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
-  it('lets eligible auto-switch errors reach the pending switch policy', async () => {
+  it('logs an agent-scoped session error and keeps the parent session alive', async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const logger = createMockLogger();
+      const { session, mock } = await createTestSession({ logger }, { heartbeatTimeout: 2 });
+      const errorHandler = vi.fn();
+      const textHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('text', textHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('session.error', {
+        message: 'child context is full', errorType: 'context_limit', statusCode: 400,
+      }, 'bg-child-1');
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        'Copilot sub-agent failed; parent session remains active',
+        {
+          agentId: 'bg-child-1',
+          eventType: 'session.error',
+          reason: 'child context is full',
+          errorType: 'context_limit',
+        },
+      );
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining(
+        'AGENT-SCOPED FAILURE agentId=bg-child-1 event=session.error reason=child context is full',
+      ));
+
+      mock._emit('assistant.message', { content: 'parent continued' });
+      expect(textHandler).toHaveBeenCalledWith('parent continued', undefined);
+
+      await vi.advanceTimersByTimeAsync(2 * 1000);
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('heartbeat timeout'),
+      }));
+    } finally {
+      stderr.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails a session-scoped session error immediately', async () => {
     const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+    await new Promise(r => setTimeout(r, 50));
+
+    mock._emit('session.error', {
+      message: 'authentication failed', errorType: 'authentication', statusCode: 401,
+    });
+
+    expect(errorHandler).toHaveBeenCalledOnce();
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'authentication failed',
+    }));
+  });
+
+  it('does not settle the parent from agent-scoped terminal-success events', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const idleHandler = vi.fn();
+      const errorHandler = vi.fn();
+      session.on('idle', idleHandler);
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('session.idle', {}, 'bg-child-1');
+      mock._emit('session.task_complete', {}, 'bg-child-1');
+
+      expect(idleHandler).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2 * 1000);
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('heartbeat timeout'),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets eligible auto-switch errors reach the pending switch policy', async () => {
+    const logger = createMockLogger();
+    const { session, mock } = await createTestSession({ logger });
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
     session.send('test prompt');
@@ -1248,11 +1367,36 @@ describe('SdkBackend event mapping', () => {
     mock._emit('auto_mode_switch.requested', { requestId: 'switch-rate-limit' });
 
     expect(errorHandler).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(mock.rpc.ui.handlePendingAutoModeSwitch).toHaveBeenCalledWith({
         requestId: 'switch-rate-limit', response: 'yes',
       });
     });
+  });
+
+  it('keeps the auto-switch exemption agent-scoped and loud', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const logger = createMockLogger();
+      const { session, mock } = await createTestSession({ logger });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await new Promise(r => setTimeout(r, 50));
+
+      mock._emit('session.error', {
+        message: 'child rate limited', errorType: 'rate_limit', eligibleForAutoSwitch: true,
+      }, 'bg-child-1');
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        'Copilot sub-agent failed; parent session remains active',
+        expect.objectContaining({ agentId: 'bg-child-1', reason: 'child rate limited' }),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('treats custom_agents_updated as benign and omits binary payload logging', async () => {

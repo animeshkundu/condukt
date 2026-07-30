@@ -77,14 +77,20 @@ interface ModelCapabilityResolution {
 
 interface SdkEvent {
   readonly type?: string;
+  readonly agentId?: string;
   readonly data?: Record<string, unknown>;
 }
 
 function normalizeSdkEvent(event: unknown): SdkEvent {
   if (typeof event !== 'object' || event === null) return {};
-  const candidate = event as { readonly type?: unknown; readonly data?: unknown };
+  const candidate = event as {
+    readonly type?: unknown;
+    readonly agentId?: unknown;
+    readonly data?: unknown;
+  };
   return {
     ...(typeof candidate.type === 'string' ? { type: candidate.type } : {}),
+    ...(typeof candidate.agentId === 'string' ? { agentId: candidate.agentId } : {}),
     ...(typeof candidate.data === 'object' && candidate.data !== null
       ? { data: candidate.data as Record<string, unknown> }
       : {}),
@@ -1007,17 +1013,17 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Session idle (agent finished all work) ---
-    sdkSession.on('session.idle', () => {
+    sdkSession.on('session.idle', (e: SdkEvent) => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
       this.resetHeartbeat();
-      this.settleIdle();
+      if (!e.agentId) this.settleIdle();
     });
 
     // --- task_complete → idle (some models fire this instead of session.idle) ---
-    sdkSession.on('session.task_complete', () => {
+    sdkSession.on('session.task_complete', (e: SdkEvent) => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
       this.resetHeartbeat();
-      this.settleIdle();
+      if (!e.agentId) this.settleIdle();
     });
 
     // The CLI normally follows an abort event with session.idle. If that
@@ -1025,6 +1031,7 @@ class SdkSession implements CopilotSession {
     sdkSession.on('abort', (e: SdkEvent) => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
       this.resetHeartbeat();
+      if (this.logAgentScopedFailure(e)) return;
       if (this.intentionalAborts.delete(sdkSession)) return;
       if (this.abortGraceTimer) clearTimeout(this.abortGraceTimer);
       this.abortGraceTimer = setTimeout(() => {
@@ -1039,6 +1046,7 @@ class SdkSession implements CopilotSession {
     sdkSession.on('session.error', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
+      if (this.logAgentScopedFailure(e)) return;
       // A rate-limit error eligible for automatic model switching is followed by
       // auto_mode_switch.requested. Let the headless policy resolve that request
       // instead of tearing down the session before it can recover.
@@ -1054,6 +1062,7 @@ class SdkSession implements CopilotSession {
     sdkSession.on('model.call_failure', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
+      if (this.logAgentScopedFailure(e)) return;
       const data = e.data;
       const detail = typeof data?.errorMessage === 'string'
         ? data.errorMessage
@@ -1075,9 +1084,10 @@ class SdkSession implements CopilotSession {
     // --- Context compaction (infinite sessions) ---
     // During compaction the model goes silent. SUSPEND the heartbeat entirely
     // (not reset) to prevent killing the session. Hard timeout remains as safety net.
-    sdkSession.on('session.compaction_start', () => {
+    sdkSession.on('session.compaction_start', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
+      if (e.agentId) return;
       this.compactionInProgress = true;
       // SUSPEND heartbeat — compaction silence is expected
       if (this.heartbeatTimer) {
@@ -1143,6 +1153,10 @@ class SdkSession implements CopilotSession {
 
     sdkSession.on('session.compaction_complete', (e: SdkEvent) => {
       if (!isActive()) return;
+      if (e.agentId) {
+        this.resetHeartbeat();
+        return;
+      }
       this.compactionInProgress = false;
       if (this.compactionTimer) { clearTimeout(this.compactionTimer); this.compactionTimer = null; }
       // Restart heartbeat — model should resume producing output
@@ -1319,6 +1333,35 @@ class SdkSession implements CopilotSession {
     void this._cleanup();
   }
 
+  private logAgentScopedFailure(e: SdkEvent): boolean {
+    // Scope is carried by agentId; matching error text or type would miss future child failures.
+    if (!e.agentId) return false;
+    const reason = typeof e.data?.message === 'string'
+      ? e.data.message
+      : typeof e.data?.errorMessage === 'string'
+        ? e.data.errorMessage
+        : typeof e.data?.error === 'string'
+          ? e.data.error
+          : typeof e.data?.reason === 'string'
+            ? e.data.reason
+            : 'Unknown agent failure';
+    const eventType = e.type ?? 'unknown';
+    const fields = {
+      agentId: e.agentId,
+      eventType,
+      reason,
+      ...(typeof e.data?.errorType === 'string' ? { errorType: e.data.errorType } : {}),
+      ...(typeof e.data?.errorCode === 'string' ? { errorCode: e.data.errorCode } : {}),
+    };
+    this.logger.error('Copilot sub-agent failed; parent session remains active', fields);
+    try {
+      process.stderr.write(
+        `[SdkBackend] AGENT-SCOPED FAILURE agentId=${e.agentId} event=${eventType} reason=${reason}\n`,
+      );
+    } catch { /* closed stream */ }
+    return true;
+  }
+
   private handleEarlyEvent(e: SdkEvent): void {
     if (this.aborted || !e || typeof e.type !== 'string') return;
     // Once the active handle exists, the session catch-all is authoritative.
@@ -1327,6 +1370,7 @@ class SdkSession implements CopilotSession {
     const eventClass = classifySdkEvent(e.type);
     if (eventClass === 'informational') return;
     if (this.isFailureShapedEvent(e)) {
+      if (this.logAgentScopedFailure(e)) return;
       const payload = this.serializeEventDataCompact(e.type, e.data);
       try { process.stderr.write(`[SdkBackend] Early failure event: ${e.type} data=${payload}\n`); } catch { /* */ }
       this.fail(new Error(`Early SDK failure event: ${e.type}`), e.type, e.data);
@@ -1339,6 +1383,7 @@ class SdkSession implements CopilotSession {
     if (NAMED_SDK_EVENTS.has(e.type)) return;
     const eventClass = classifySdkEvent(e.type);
     if (e.type === 'session.shutdown' && e.data?.shutdownType === 'error') {
+      if (this.logAgentScopedFailure(e)) return;
       const reason = typeof e.data.errorReason === 'string'
         ? e.data.errorReason
         : 'SDK session shut down abnormally';
@@ -1346,10 +1391,11 @@ class SdkSession implements CopilotSession {
       return;
     }
     if (eventClass === 'terminal-success') {
-      this.settleIdle();
+      if (!e.agentId) this.settleIdle();
       return;
     }
     if (eventClass === 'terminal-failure') {
+      if (this.logAgentScopedFailure(e)) return;
       this.fail(new Error(`SDK terminal failure: ${e.type}`), e.type, e.data);
       return;
     }
@@ -1363,6 +1409,7 @@ class SdkSession implements CopilotSession {
     const payload = this.serializeEventDataCompact(e.type, e.data);
     try { process.stderr.write(`[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
     if (this.isFailureShapedEvent(e)) {
+      if (this.logAgentScopedFailure(e)) return;
       this.fail(new Error(`Unknown SDK failure event: ${e.type}`), e.type, e.data);
     }
   }
