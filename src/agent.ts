@@ -1,8 +1,8 @@
 /**
  * Agent node factory — wraps an AgentRuntime session as a NodeFn.
  *
- * Lifecycle: delete stale artifact → setup → build prompt → create session →
- * wire events → send prompt → await idle/error → read artifact → teardown.
+ * Lifecycle: setup → build prompt → delete stale artifact per attempt →
+ * create session → wire events → send prompt → await idle/error → read artifact → teardown.
  *
  * Implements GT-3 dual-condition crash recovery: if a session errors out but
  * both a completion indicator was seen in output AND the artifact file exists
@@ -540,9 +540,9 @@ async function runSessionAttempt(
  * Creates a NodeFn that manages a full agent session lifecycle.
  *
  * The returned function:
- * 1. Deletes any stale artifact from a prior run
- * 2. Calls config.setup(input) if provided (R5, R10)
- * 3. Builds the prompt via config.promptBuilder(input)
+ * 1. Calls config.setup(input) if provided (R5, R10)
+ * 2. Builds the prompt via config.promptBuilder(input)
+ * 3. Deletes any stale artifact before each session attempt
  * 4. Creates a session via ctx.runtime.createSession()
  * 5. Wires session events to ctx.emitOutput for streaming
  * 6. Sends the prompt and awaits completion (idle) or error
@@ -554,15 +554,6 @@ export function agent(config: AgentConfig): NodeFn {
   return async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
     if (ctx.signal.aborted) {
       throw new FlowAbortedError('Aborted before agent start');
-    }
-
-    if (config.output) {
-      const artifactPath = path.join(input.dir, config.output);
-      try {
-        if (fs.existsSync(artifactPath)) fs.unlinkSync(artifactPath);
-      } catch {
-        // Ignore a stale artifact that cannot be removed.
-      }
     }
 
     if (config.setup) await config.setup(input);
@@ -621,6 +612,15 @@ export function agent(config: AgentConfig): NodeFn {
             };
 
         try {
+          if (config.output) {
+            // Per-attempt cleanup prevents a failed attempt's artifact surviving into a later one.
+            const artifactPath = path.join(input.dir, config.output);
+            try {
+              fs.unlinkSync(artifactPath);
+            } catch (error) {
+              if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+            }
+          }
           result = await runSessionAttempt(config, input, attemptContext, prompt);
           break;
         } catch (error) {

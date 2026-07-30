@@ -1023,7 +1023,19 @@ class SdkSession implements CopilotSession {
     sdkSession.on('session.task_complete', (e: SdkEvent) => {
       if (!isActive() || this.compactionRecoveryInProgress) return;
       this.resetHeartbeat();
-      if (!e.agentId) this.settleIdle();
+      if (e.agentId) return;
+      if (e.data?.success === false) {
+        const fields = {
+          eventType: e.type ?? 'session.task_complete',
+          ...(typeof e.data.summary === 'string' ? { summary: e.data.summary } : {}),
+        };
+        this.logger.warn('Copilot task completion failed; session remains active', fields);
+        try {
+          process.stderr.write('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+        } catch { /* closed stream */ }
+        return;
+      }
+      this.settleIdle();
     });
 
     // The CLI normally follows an abort event with session.idle. If that

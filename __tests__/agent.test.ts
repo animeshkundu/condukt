@@ -693,8 +693,74 @@ describe('agent factory', () => {
 
     await nodeFn(input, ctx);
 
-    // existsSync is called first to check for stale artifact, then unlinkSync to delete
     expect(fs.unlinkSync).toHaveBeenCalled();
+  });
+
+  it('removes a failed attempt artifact before retry and does not return it', async () => {
+    const fs = await import('node:fs');
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'artifact-retry-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    let artifact: string | undefined;
+    let failedArtifactWasReadable = false;
+    let artifactSeenBySecondAttempt: string | undefined;
+    (fs.existsSync as ReturnType<typeof vi.fn>).mockImplementation(() => artifact !== undefined);
+    (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      if (artifact === undefined) {
+        throw Object.assign(new Error('artifact not found'), { code: 'ENOENT' });
+      }
+      failedArtifactWasReadable = true;
+      return artifact;
+    });
+    (fs.unlinkSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      if (artifact === undefined) {
+        throw Object.assign(new Error('artifact not found'), { code: 'ENOENT' });
+      }
+      artifact = undefined;
+    });
+    failed.send.mockImplementation(() => queueMicrotask(() => {
+      artifact = 'artifact from failed attempt';
+      expect(fs.readFileSync('/tmp/test-agent/report.md', 'utf-8')).toBe(artifact);
+      failed._emit('error', Object.assign(new Error('upstream unavailable'), { statusCode: 503 }));
+    }));
+    succeeded.send.mockImplementation(() => {
+      artifactSeenBySecondAttempt = artifact;
+      queueMicrotask(() => succeeded._emit('idle'));
+    });
+
+    const result = await agent({
+      output: 'report.md',
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime));
+
+    expect(failedArtifactWasReadable).toBe(true);
+    expect(artifactSeenBySecondAttempt).toBeUndefined();
+    expect(result.artifact).toBeUndefined();
+    expect(fs.unlinkSync).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails before starting an attempt when its stale artifact cannot be removed', async () => {
+    const fs = await import('node:fs');
+    const removalError = Object.assign(new Error('artifact is locked'), { code: 'EACCES' });
+    (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+    (fs.unlinkSync as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw removalError;
+    });
+
+    await expect(agent({
+      output: 'report.md',
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 1 },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(removalError);
+
+    expect(mockRuntime.createSession).not.toHaveBeenCalled();
   });
 
   it('retries a retriable error with a fresh session and emits node:retrying', async () => {
