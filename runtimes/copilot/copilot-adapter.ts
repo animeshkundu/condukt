@@ -59,6 +59,9 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.contextTier !== undefined
           ? { contextTier: config.contextTier }
           : {}),
+        ...(config.compactionMode !== undefined
+          ? { compactionMode: config.compactionMode }
+          : {}),
         ...(config.mcpServers !== undefined
           ? { mcpServers: config.mcpServers }
           : {}),
@@ -76,6 +79,15 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
           : {}),
         ...(config.subagentRoster !== undefined
           ? { subagentRoster: config.subagentRoster }
+          : {}),
+        ...(config.subagentsEnabled !== undefined
+          ? { subagentsEnabled: config.subagentsEnabled }
+          : {}),
+        ...(config.maxDepth !== undefined
+          ? { maxDepth: config.maxDepth }
+          : {}),
+        ...(config.maxConcurrency !== undefined
+          ? { maxConcurrency: config.maxConcurrency }
           : {}),
         ...(config.defaultAgent !== undefined
           ? { defaultAgent: config.defaultAgent }

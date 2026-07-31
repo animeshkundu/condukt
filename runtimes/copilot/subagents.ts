@@ -8,6 +8,24 @@ export interface SubagentRosterEntry {
 
 export type SubagentRoster = Readonly<Record<string, SubagentRosterEntry>>;
 
+export interface SubagentLimits {
+  /**
+   * Enables model-issued subagent dispatch. Defaults to true. Callers can
+   * disable it through both the permission policy and the task tool filter.
+   */
+  readonly subagentsEnabled?: boolean;
+  /**
+   * Maximum nesting depth. The CLI rejects dispatches that would exceed this
+   * value with `Maximum sub-agent depth of N reached`.
+   */
+  readonly maxDepth?: number;
+  /**
+   * Maximum concurrently running subagents. The CLI rejects an over-limit
+   * dispatch rather than queueing it, so callers must handle failed dispatches.
+   */
+  readonly maxConcurrency?: number;
+}
+
 /**
  * `model` accepts a specific model id or one of the CLI's strategies: `inherit`
  * (match the session model), `complementary` (resolve a model from a different

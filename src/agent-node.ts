@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { agent } from './agent';
 import type {
+  CompactionMode,
   ContextTier,
   ExecutionContext,
   NodeEntry,
@@ -13,6 +14,7 @@ import type {
   RetryPolicy,
   ThinkingBudget,
   ToolRef,
+  SubagentLimits,
   SubagentRosterOption,
 } from './types';
 import { DEFAULT_AGENT_TIMEOUT_SECS } from './types';
@@ -53,7 +55,7 @@ export type AgentNodeSchema<T> =
   | SchemaValidationFunction<T>
   | StandardSchemaValidator<T>;
 
-export interface AgentNodeConfig<T> {
+export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly prompt:
     | string
     | ((
@@ -68,6 +70,7 @@ export interface AgentNodeConfig<T> {
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  readonly compactionMode?: CompactionMode;
   /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
   readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
@@ -324,6 +327,7 @@ export async function produce<T>(
     model: config.model,
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
+    compactionMode: config.compactionMode,
     mcpServers: config.mcpServers,
     isolation: config.isolation,
     timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,
@@ -332,6 +336,9 @@ export async function produce<T>(
     retry: config.retry,
     customAgents: config.customAgents,
     subagentRoster: config.subagentRoster,
+    subagentsEnabled: config.subagentsEnabled,
+    maxDepth: config.maxDepth,
+    maxConcurrency: config.maxConcurrency,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     memberId: config.memberId,

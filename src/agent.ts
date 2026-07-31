@@ -292,6 +292,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     // ?? rather than a presence check: an explicit 'default' must survive, so a consumer
     // can opt out of long context and not merely into it.
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
+    compactionMode: config.compactionMode,
     ...(mcpServers !== undefined ? { mcpServers } : {}),
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],
@@ -306,6 +307,9 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     excludedTools: config.excludedTools,
     customAgents: config.customAgents,
     subagentRoster: config.subagentRoster,
+    subagentsEnabled: config.subagentsEnabled,
+    maxDepth: config.maxDepth,
+    maxConcurrency: config.maxConcurrency,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     nodeId: ctx.nodeId,

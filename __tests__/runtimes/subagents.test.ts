@@ -44,9 +44,18 @@ async function sendWithRoster(
   backendRoster?: NonNullable<ConstructorParameters<typeof SdkBackend>[0]>['subagentRoster'],
   sessionRoster?: Parameters<SdkBackend['createSession']>[0]['subagentRoster'],
   logger?: Logger,
+  backendLimits: {
+    readonly maxDepth?: number;
+    readonly maxConcurrency?: number;
+  } = {},
+  sessionLimits: {
+    readonly maxDepth?: number;
+    readonly maxConcurrency?: number;
+  } = {},
 ): Promise<MockSdkSession> {
   const backend = new SdkBackend({
     ...(backendRoster !== undefined ? { subagentRoster: backendRoster } : {}),
+    ...backendLimits,
     ...(logger !== undefined ? { logger } : {}),
   });
   const session = await backend.createSession({
@@ -56,6 +65,7 @@ async function sendWithRoster(
     timeout: 3600,
     heartbeatTimeout: 120,
     ...(sessionRoster !== undefined ? { subagentRoster: sessionRoster } : {}),
+    ...sessionLimits,
   });
   session.send('test prompt');
   await vi.waitFor(() => expect(mockSdkSession.send).toHaveBeenCalled());
@@ -77,6 +87,8 @@ beforeEach(() => {
         RuntimeConnection: {
           forStdio: vi.fn(() => ({ kind: 'stdio' as const })),
         },
+        CopilotRequestHandler: class MockCopilotRequestHandler {},
+        CopilotWebSocketForwarder: class MockCopilotWebSocketForwarder {},
         CopilotClient: class MockCopilotClient {
           createSession(config: Record<string, unknown>) {
             return mockCreateSession(config);
@@ -144,7 +156,30 @@ describe('Copilot subagent roster', () => {
     });
   });
 
-  it('sends nothing when the roster is unset', async () => {
+  it('forwards maxDepth and maxConcurrency when set', async () => {
+    const mock = await sendWithRoster(
+      undefined,
+      undefined,
+      undefined,
+      { maxDepth: 4, maxConcurrency: 8 },
+      { maxDepth: 1, maxConcurrency: 2 },
+    );
+
+    expect(mock.rpc.tools.updateSubagentSettings).toHaveBeenCalledWith({
+      subagents: { maxDepth: 1, maxConcurrency: 2 },
+    });
+  });
+
+  it('omits maxDepth and maxConcurrency when not set', async () => {
+    const mock = await sendWithRoster(DEFAULT_SUBAGENT_ROSTER);
+    const params = mock.rpc.tools.updateSubagentSettings.mock.calls[0]?.[0] as {
+      readonly subagents: Record<string, unknown>;
+    };
+    expect(params.subagents).not.toHaveProperty('maxDepth');
+    expect(params.subagents).not.toHaveProperty('maxConcurrency');
+  });
+
+  it('sends nothing when the roster and limits are unset', async () => {
     const mock = await sendWithRoster();
     expect(mock.rpc.tools.updateSubagentSettings).not.toHaveBeenCalled();
   });
@@ -172,7 +207,7 @@ describe('Copilot subagent roster', () => {
     const mock = await sendWithRoster(DEFAULT_SUBAGENT_ROSTER, undefined, logger);
 
     expect(logger.warn).toHaveBeenCalledWith(
-      'Failed to apply Copilot subagent roster; using default settings',
+      'Failed to apply Copilot subagent settings; using default settings',
       { error: 'experimental RPC unavailable' },
     );
     expect(mock.send).toHaveBeenCalledWith({ prompt: 'test prompt' });
