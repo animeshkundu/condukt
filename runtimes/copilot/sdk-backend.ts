@@ -46,8 +46,18 @@ import type {
   SessionUsageMetrics,
 } from './copilot-backend';
 import { classifySdkEvent } from './lifecycle-events';
-import { DEFAULT_SUBAGENT_ROSTER, mergeSubagentRosters } from './subagents';
-import type { SubagentLimits, SubagentRoster } from './subagents';
+import {
+  DEFAULT_COMPLEMENTARY_MODEL_POLICY,
+  DEFAULT_SUBAGENT_ROSTER,
+  mergeSubagentRosters,
+  resolveSubagentRosterModels,
+  resolveTieredCustomAgents,
+} from './subagents';
+import type {
+  ComplementaryModelPolicy,
+  SubagentLimits,
+  SubagentRoster,
+} from './subagents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +74,8 @@ export interface SdkBackendOptions extends SubagentLimits {
   readonly configDir?: string;
   /** Opt-in per-agent overrides merged over the stable default roster; omit or pass false for no roster. */
   readonly subagentRoster?: SubagentRoster | false;
+  /** Overrides the model catalogue and stable preference used for cross-lab complements. */
+  readonly complementaryModelPolicy?: ComplementaryModelPolicy;
   /** Receives non-fatal backend diagnostics. */
   readonly logger?: Logger;
 }
@@ -679,6 +691,7 @@ export class SdkBackend implements CopilotBackend {
   private readonly mcpConfigPath: string | undefined;
   private readonly configDirectory: string | undefined;
   private readonly subagentRoster: SubagentRoster | false | undefined;
+  private readonly complementaryModelPolicy: ComplementaryModelPolicy;
   private readonly subagentsEnabled: boolean;
   private readonly maxDepth: number | undefined;
   private readonly maxConcurrency: number | undefined;
@@ -695,6 +708,8 @@ export class SdkBackend implements CopilotBackend {
     this.mcpConfigPath = options.mcpConfigPath;
     this.configDirectory = options.configDir;
     this.subagentRoster = options.subagentRoster;
+    this.complementaryModelPolicy = options.complementaryModelPolicy
+      ?? DEFAULT_COMPLEMENTARY_MODEL_POLICY;
     this.subagentsEnabled = options.subagentsEnabled ?? true;
     this.maxDepth = options.maxDepth;
     this.maxConcurrency = options.maxConcurrency;
@@ -815,6 +830,7 @@ export class SdkBackend implements CopilotBackend {
       this.mcpConfigPath,
       this.configDirectory,
       this.subagentRoster,
+      this.complementaryModelPolicy,
       this.subagentsEnabled,
       this.maxDepth,
       this.maxConcurrency,
@@ -848,6 +864,7 @@ class SdkSession implements CopilotSession {
   private readonly mcpConfigPath: string | undefined;
   private readonly configDirectory: string | undefined;
   private readonly backendRoster: SubagentRoster | false | undefined;
+  private readonly complementaryModelPolicy: ComplementaryModelPolicy;
   private readonly backendSubagentsEnabled: boolean;
   private readonly backendMaxDepth: number | undefined;
   private readonly backendMaxConcurrency: number | undefined;
@@ -957,6 +974,7 @@ class SdkSession implements CopilotSession {
     mcpConfigPath: string | undefined,
     configDirectory: string | undefined,
     backendRoster: SubagentRoster | false | undefined,
+    complementaryModelPolicy: ComplementaryModelPolicy,
     backendSubagentsEnabled: boolean,
     backendMaxDepth: number | undefined,
     backendMaxConcurrency: number | undefined,
@@ -972,6 +990,7 @@ class SdkSession implements CopilotSession {
     this.mcpConfigPath = mcpConfigPath;
     this.configDirectory = configDirectory;
     this.backendRoster = backendRoster;
+    this.complementaryModelPolicy = complementaryModelPolicy;
     this.backendSubagentsEnabled = backendSubagentsEnabled;
     this.backendMaxDepth = backendMaxDepth;
     this.backendMaxConcurrency = backendMaxConcurrency;
@@ -1158,6 +1177,40 @@ class SdkSession implements CopilotSession {
     this.reportedPromptTokenLimitSource = limitSource;
 
     const subagentsEnabled = this.config.subagentsEnabled ?? this.backendSubagentsEnabled;
+    const tieredCustomAgents = subagentsEnabled
+      ? resolveTieredCustomAgents(this.config.model, this.complementaryModelPolicy)
+      : undefined;
+    if (tieredCustomAgents !== undefined) {
+      const resolution = tieredCustomAgents.reviewResolution;
+      const fields = {
+        subagent: 'review',
+        sessionModel: resolution.sourceModel,
+        resolvedModel: resolution.resolvedModel,
+        usedCliFallback: resolution.usedCliFallback,
+        ...(resolution.source !== undefined
+          ? { sourceLab: resolution.source.lab, sourceTier: resolution.source.tier }
+          : {}),
+        ...(resolution.complement !== undefined
+          ? { resolvedLab: resolution.complement.lab, resolvedTier: resolution.complement.tier }
+          : {}),
+      };
+      if (resolution.usedCliFallback) {
+        this.logger.warn('Falling back to CLI complementary custom-agent model resolution', fields);
+      } else {
+        this.logger.info('Resolved complementary custom-agent model', fields);
+      }
+    }
+    const customAgents = new Map<string, import('./copilot-backend').CustomAgentConfig>();
+    for (const agent of tieredCustomAgents?.agents ?? []) customAgents.set(agent.name, agent);
+    for (const agent of this.config.customAgents ?? []) {
+      if (!subagentsEnabled || customAgents.has(agent.name)) customAgents.set(agent.name, agent);
+    }
+    const excludedBuiltinAgents = subagentsEnabled
+      ? [...new Set(['explore', 'research', ...(this.config.excludedBuiltinAgents ?? [])])]
+      : this.config.excludedBuiltinAgents !== undefined
+        ? [...this.config.excludedBuiltinAgents]
+        : undefined;
+
     const permissionHandler: CopilotPermissionHandler = subagentsEnabled
       ? approveAll
       : (request, invocation) => {
@@ -1198,8 +1251,8 @@ class SdkSession implements CopilotSession {
         if (!subagentsEnabled) excludedTools.add('task');
         return excludedTools.size > 0 ? { excludedTools: [...excludedTools] } : {};
       })(),
-      ...(this.config.customAgents !== undefined
-        ? { customAgents: this.config.customAgents.map(toSdkCustomAgent) }
+      ...(customAgents.size > 0
+        ? { customAgents: [...customAgents.values()].map(toSdkCustomAgent) }
         : {}),
       ...(this.config.defaultAgent !== undefined
         ? {
@@ -1210,8 +1263,8 @@ class SdkSession implements CopilotSession {
             },
           }
         : {}),
-      ...(this.config.excludedBuiltinAgents !== undefined
-        ? { excludedBuiltinAgents: [...this.config.excludedBuiltinAgents] }
+      ...(excludedBuiltinAgents !== undefined
+        ? { excludedBuiltinAgents }
         : {}),
       ...(mcpServers !== undefined ? { mcpServers } : {}),
       // The SDK defaults this on, so every commit an agent composes carries a
@@ -1243,10 +1296,37 @@ class SdkSession implements CopilotSession {
     }
     this._sdkSession = sdkSession;
 
+    const resolvedRoster = roster === undefined || roster === false
+      ? roster
+      : resolveSubagentRosterModels(roster, this.config.model, this.complementaryModelPolicy);
+    if (resolvedRoster !== undefined && resolvedRoster !== false) {
+      for (const resolution of resolvedRoster.resolutions) {
+        const fields = {
+          subagent: resolution.subagent,
+          sessionModel: resolution.sourceModel,
+          resolvedModel: resolution.resolvedModel,
+          usedCliFallback: resolution.usedCliFallback,
+          ...(resolution.source !== undefined
+            ? { sourceLab: resolution.source.lab, sourceTier: resolution.source.tier }
+            : {}),
+          ...(resolution.complement !== undefined
+            ? { resolvedLab: resolution.complement.lab, resolvedTier: resolution.complement.tier }
+            : {}),
+        };
+        if (resolution.usedCliFallback) {
+          this.logger.warn('Falling back to CLI complementary sub-agent model resolution', fields);
+        } else {
+          this.logger.info('Resolved complementary sub-agent model', fields);
+        }
+      }
+    }
+
     const maxDepth = this.config.maxDepth ?? this.backendMaxDepth;
     const maxConcurrency = this.config.maxConcurrency ?? this.backendMaxConcurrency;
     const subagentSettings = {
-      ...(roster !== undefined && roster !== false ? { agents: roster } : {}),
+      ...(resolvedRoster !== undefined && resolvedRoster !== false
+        ? { agents: resolvedRoster.roster }
+        : {}),
       ...(maxDepth !== undefined ? { maxDepth } : {}),
       ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
     };

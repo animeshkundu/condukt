@@ -2,9 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/types';
 import { SdkBackend } from '../../runtimes/copilot/sdk-backend';
 import {
+  DEFAULT_COMPLEMENTARY_MODEL_POLICY,
   DEFAULT_SUBAGENT_ROSTER,
+  MODEL_TIER_CATALOG,
+  MODEL_TIERS,
   mergeSubagentRosters,
+  resolveComplementaryModel,
+  resolveTieredCustomAgents,
 } from '../../runtimes/copilot/subagents';
+import type { ModelTier } from '../../runtimes/copilot/subagents';
 
 interface MockSdkSession {
   readonly send: ReturnType<typeof vi.fn>;
@@ -52,14 +58,17 @@ async function sendWithRoster(
     readonly maxDepth?: number;
     readonly maxConcurrency?: number;
   } = {},
+  model = 'test-model',
+  complementaryModelPolicy?: NonNullable<ConstructorParameters<typeof SdkBackend>[0]>['complementaryModelPolicy'],
 ): Promise<MockSdkSession> {
   const backend = new SdkBackend({
     ...(backendRoster !== undefined ? { subagentRoster: backendRoster } : {}),
     ...backendLimits,
     ...(logger !== undefined ? { logger } : {}),
+    ...(complementaryModelPolicy !== undefined ? { complementaryModelPolicy } : {}),
   });
   const session = await backend.createSession({
-    model: 'test-model',
+    model: model,
     cwd: '.',
     addDirs: [],
     timeout: 3600,
@@ -223,9 +232,163 @@ describe('Copilot subagent roster', () => {
     }
   });
 
-  it('keeps review agents complementary and planning inherited', () => {
-    expect(DEFAULT_SUBAGENT_ROSTER['code-review']?.model).toBe('complementary');
-    expect(DEFAULT_SUBAGENT_ROSTER['security-review']?.model).toBe('complementary');
-    expect(DEFAULT_SUBAGENT_ROSTER.plan?.model).toBe('inherit');
+  it('assigns every default roster entry to its intended tier at long context', () => {
+    const expected = {
+      plan: { model: 'inherit', tier: 'high' },
+      explore: { model: MODEL_TIERS.cheap[1], tier: 'cheap' },
+      'general-purpose': { model: MODEL_TIERS.mid[2], tier: 'mid' },
+      task: { model: MODEL_TIERS.mid[2], tier: 'mid' },
+      'code-review': { model: 'complementary', tier: 'high' },
+      'security-review': { model: 'complementary', tier: 'high' },
+      research: { model: MODEL_TIERS.mid[0], tier: 'mid' },
+    } as const;
+
+    for (const [name, intended] of Object.entries(expected)) {
+      const entry = DEFAULT_SUBAGENT_ROSTER[name];
+      expect(entry?.model, `${name} model`).toBe(intended.model);
+      expect(entry?.contextTier, `${name} context tier`).toBe('long_context');
+      if (entry?.model !== 'inherit' && entry?.model !== 'complementary') {
+        expect(MODEL_TIER_CATALOG.find(model => model.id === entry.model)?.tier, `${name} tier`)
+          .toBe(intended.tier);
+      }
+    }
+  });
+
+  it('defines exactly six routed custom agents at their intended tiers and context policy', () => {
+    const resolved = resolveTieredCustomAgents('gpt-5.6-sol');
+    expect(resolved.agents.map(agent => agent.name)).toEqual([
+      'explore', 'research', 'implement', 'verify', 'review', 'decide',
+    ]);
+    expect(Object.fromEntries(resolved.agents.map(agent => [agent.name, agent.model]))).toEqual({
+      explore: 'gemini-3.6-flash',
+      research: 'gemini-3.1-pro-preview',
+      implement: 'gpt-5.6-terra',
+      verify: 'claude-sonnet-5',
+      review: 'claude-opus-5',
+      decide: 'claude-opus-5',
+    });
+    for (const name of ['explore', 'research', 'review', 'decide']) {
+      expect(resolved.agents.find(agent => agent.name === name)?.tools, `${name} tools`)
+        .not.toContain('apply_patch');
+      expect(resolved.agents.find(agent => agent.name === name)?.tools, `${name} tools`)
+        .not.toContain('powershell');
+    }
+  });
+
+  it('resolves every catalogued model to a cross-lab complement without downgrading', () => {
+    const tierRank: Readonly<Record<ModelTier, number>> = { cheap: 0, mid: 1, high: 2 };
+
+    for (const source of MODEL_TIER_CATALOG) {
+      const resolution = resolveComplementaryModel(source.id);
+      expect(resolution.usedCliFallback, `${source.id} should resolve locally`).toBe(false);
+      expect(resolution.complement?.lab, `${source.id} complement lab`).not.toBe(source.lab);
+      expect(
+        tierRank[resolution.complement?.tier ?? 'cheap'],
+        `${source.id} complement must not downgrade`,
+      ).toBeGreaterThanOrEqual(tierRank[source.tier]);
+    }
+  });
+
+  it('uses explicit preference order deterministically regardless of catalogue order', () => {
+    const reversedPolicy = {
+      models: [...MODEL_TIER_CATALOG].reverse(),
+      preference: DEFAULT_COMPLEMENTARY_MODEL_POLICY.preference,
+    };
+
+    const expected = resolveComplementaryModel('gemini-3.1-pro-preview').resolvedModel;
+    expect(expected).toBe('claude-sonnet-5');
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect(resolveComplementaryModel('gemini-3.1-pro-preview', reversedPolicy).resolvedModel)
+        .toBe(expected);
+    }
+  });
+
+  it('allows callers to override complementary model preference', () => {
+    const resolution = resolveComplementaryModel('gemini-3.1-pro-preview', {
+      models: MODEL_TIER_CATALOG,
+      preference: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+    });
+
+    expect(resolution.resolvedModel).toBe('gpt-5.6-sol');
+    expect(resolution.usedCliFallback).toBe(false);
+  });
+
+  it('falls back when caller policy metadata contains duplicate model ids', () => {
+    const resolution = resolveComplementaryModel('duplicate', {
+      models: [
+        { id: 'duplicate', lab: 'openai', tier: 'mid' },
+        { id: 'duplicate', lab: 'google', tier: 'high' },
+        { id: 'anthropic-peer', lab: 'anthropic', tier: 'mid' },
+      ],
+      preference: ['duplicate', 'anthropic-peer'],
+    });
+
+    expect(resolution).toEqual({
+      sourceModel: 'duplicate',
+      resolvedModel: 'complementary',
+      usedCliFallback: true,
+    });
+  });
+
+  it('resolves known review complements before sending and logs the concrete model', async () => {
+    const logger: Logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    const mock = await sendWithRoster(
+      DEFAULT_SUBAGENT_ROSTER,
+      undefined,
+      logger,
+      {},
+      {},
+      'gpt-5.6-sol',
+    );
+    const params = mock.rpc.tools.updateSubagentSettings.mock.calls[0]?.[0] as {
+      readonly subagents: { readonly agents: Record<string, Record<string, unknown>> };
+    };
+
+    expect(params.subagents.agents['code-review']?.model).toBe('claude-opus-5');
+    expect(params.subagents.agents['security-review']?.model).toBe('claude-opus-5');
+    expect(logger.info).toHaveBeenCalledWith(
+      'Resolved complementary sub-agent model',
+      expect.objectContaining({
+        sessionModel: 'gpt-5.6-sol',
+        resolvedModel: 'claude-opus-5',
+        usedCliFallback: false,
+      }),
+    );
+  });
+
+  it('falls back to the CLI strategy for an unmapped session model and logs it', async () => {
+    const logger: Logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    const resolution = resolveComplementaryModel('future-model');
+    expect(resolution).toMatchObject({
+      sourceModel: 'future-model',
+      resolvedModel: 'complementary',
+      usedCliFallback: true,
+    });
+
+    const mock = await sendWithRoster(DEFAULT_SUBAGENT_ROSTER, undefined, logger);
+    const params = mock.rpc.tools.updateSubagentSettings.mock.calls[0]?.[0] as {
+      readonly subagents: { readonly agents: Record<string, Record<string, unknown>> };
+    };
+    expect(params.subagents.agents['code-review']?.model).toBe('complementary');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Falling back to CLI complementary sub-agent model resolution',
+      expect.objectContaining({
+        sessionModel: 'test-model',
+        resolvedModel: 'complementary',
+        usedCliFallback: true,
+      }),
+    );
   });
 });

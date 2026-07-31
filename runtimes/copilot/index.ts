@@ -23,8 +23,27 @@ export type {
 export { SubprocessBackend } from './subprocess-backend';
 export { SdkBackend } from './sdk-backend';
 export type { SdkBackendOptions } from './sdk-backend';
-export { DEFAULT_SUBAGENT_ROSTER, mergeSubagentRosters } from './subagents';
+export {
+  DEFAULT_COMPLEMENTARY_MODEL_POLICY,
+  DEFAULT_COMPLEMENTARY_MODEL_PREFERENCE,
+  DEFAULT_SUBAGENT_ROSTER,
+  MODEL_TIER_CATALOG,
+  MODEL_TIERS,
+  mergeSubagentRosters,
+  resolveComplementaryModel,
+  resolveSubagentRosterModels,
+  resolveTieredCustomAgents,
+} from './subagents';
 export type {
+  ComplementaryModelPolicy,
+  ComplementaryModelResolution,
+  ModelLab,
+  ModelTier,
+  ModelTierDefinition,
+  ResolvedSubagentRoster,
+  ResolvedTieredCustomAgents,
+  SubagentComplementaryResolution,
+  TieredCustomAgentDefinition,
   SubagentLimits,
   SubagentRoster,
   SubagentRosterEntry,
