@@ -1481,7 +1481,6 @@ describe('SdkBackend event mapping', () => {
         bufferExhaustionThreshold: 0.95,
       },
     });
-    expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.warn).toHaveBeenCalledWith(
       'Copilot model capability discovery failed; awaiting runtime context accounting',
       { reason: 'list_models_failed', error: 'models unavailable' },
@@ -1496,7 +1495,6 @@ describe('SdkBackend event mapping', () => {
 
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
     expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.warn).toHaveBeenCalledWith(
       'Copilot model capability lookup failed; awaiting runtime context accounting',
       { model: 'test-model', reason: 'model_not_found' },
@@ -1558,7 +1556,10 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledTimes(2));
     expect(mockStart).toHaveBeenCalledOnce();
     expect(mockListModels).toHaveBeenCalledOnce();
-    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot model capability discovery failed; awaiting runtime context accounting',
+      { reason: 'list_models_failed', error: 'models unavailable' },
+    );
   });
 
   it('forwards contextTier, thinkingBudget, and configDirectory to the SDK session config', async () => {
@@ -1813,19 +1814,19 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
-  it('forwards subagent configuration to the SDK session', async () => {
+  it('enforces tiered custom agents while preserving caller overrides', async () => {
     const backend = new SdkBackend();
     const session = await backend.createSession({
-      model: 'test-model',
+      model: 'gpt-5.6-sol',
       cwd: '.',
       addDirs: [],
       timeout: 3600,
       heartbeatTimeout: 120,
       customAgents: [{
-        name: 'worker',
-        prompt: 'Do bounded work.',
+        name: 'explore',
+        prompt: 'Use the caller policy.',
         tools: [],
-        model: 'cheap-model',
+        model: 'caller-model',
         mcpServers: {
           filtered: {
             command: 'filtered-server',
@@ -1833,6 +1834,10 @@ describe('SdkBackend event mapping', () => {
             timeout: 15_000,
           },
         },
+      }, {
+        name: 'extra',
+        prompt: 'This role is outside the enforced roster.',
+        model: 'caller-model',
       }],
       defaultAgent: { excludedTools: ['task'] },
       excludedBuiltinAgents: ['explore'],
@@ -1841,24 +1846,39 @@ describe('SdkBackend event mapping', () => {
 
     await vi.waitFor(() => {
       expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
-        customAgents: [{
-          name: 'worker',
-          prompt: 'Do bounded work.',
-          tools: [],
-          model: 'cheap-model',
-          mcpServers: {
-            filtered: {
-              type: 'local',
-              command: 'filtered-server',
-              tools: ['read'],
-              timeout: 15_000,
-            },
-          },
-        }],
+        customAgents: [
+          expect.objectContaining({ name: 'explore', model: 'caller-model' }),
+          expect.objectContaining({ name: 'research', model: 'gemini-3.1-pro-preview' }),
+          expect.objectContaining({ name: 'implement', model: 'gpt-5.6-terra' }),
+          expect.objectContaining({ name: 'verify', model: 'claude-sonnet-5' }),
+          expect.objectContaining({ name: 'review', model: 'claude-opus-5' }),
+          expect.objectContaining({ name: 'decide', model: 'claude-opus-5' }),
+        ],
         defaultAgent: { excludedTools: ['task'] },
-        excludedBuiltinAgents: ['explore'],
+        excludedBuiltinAgents: ['explore', 'research'],
       }));
     });
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly customAgents: readonly Record<string, unknown>[];
+    };
+    expect(config.customAgents).toHaveLength(6);
+    expect(config.customAgents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'extra' }),
+    ]));
+    expect(config.customAgents[0]).toEqual(expect.objectContaining({
+      name: 'explore',
+      prompt: 'Use the caller policy.',
+      tools: [],
+      model: 'caller-model',
+      mcpServers: {
+        filtered: {
+          type: 'local',
+          command: 'filtered-server',
+          tools: ['read'],
+          timeout: 15_000,
+        },
+      },
+    }));
   });
 
   it('treats SDK 0.2 lifecycle events as informational without changing turn state', async () => {
