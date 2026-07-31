@@ -6,10 +6,10 @@
  * One composition: FlowGraph + run()
  */
 
-import type { SubagentRosterOption } from '../runtimes/copilot/subagents';
+import type { SubagentLimits, SubagentRosterOption } from '../runtimes/copilot/subagents';
 import type { ExecutionEvent, OutputEvent } from './events';
 
-export type { SubagentRosterOption } from '../runtimes/copilot/subagents';
+export type { SubagentLimits, SubagentRosterOption } from '../runtimes/copilot/subagents';
 
 // ---------------------------------------------------------------------------
 // Branded types (opt-in — structural, zero runtime cost)
@@ -377,7 +377,9 @@ export interface DefaultAgentConfig {
   readonly excludedTools?: readonly string[];
 }
 
-export interface SessionConfig {
+export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
+
+export interface SessionConfig extends SubagentLimits {
   readonly model: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly cwd: string;
@@ -386,6 +388,8 @@ export interface SessionConfig {
   readonly heartbeatTimeout: number; // seconds
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
+  /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
+  readonly compactionMode?: CompactionMode;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
   readonly mcpServers?: MCPServersOption;
   /** System message to append to the agent's context (SdkBackend only). */
@@ -410,8 +414,101 @@ export interface SessionConfig {
   readonly artifactFilename?: string;
 }
 
+export interface ContextAttributionEntry {
+  readonly kind: string;
+  readonly id: string;
+  readonly label: string;
+  readonly tokens: number;
+  readonly parentId?: string;
+  readonly attributes?: Readonly<Record<string, string | undefined>>;
+}
+
+export interface SessionContextAttribution {
+  readonly totalTokens: number;
+  readonly entries: readonly ContextAttributionEntry[];
+  readonly compactions: { readonly count: number };
+}
+
+export interface ContextHeaviestMessage {
+  readonly id: string;
+  readonly label: string;
+  readonly role: string;
+  readonly tokens: number;
+}
+
+export interface ContextHeaviestMessages {
+  readonly totalTokens: number;
+  readonly messages: readonly ContextHeaviestMessage[];
+}
+
+export interface RecomputedContextTokens {
+  readonly totalTokens: number;
+  readonly messagesTokenCount: number;
+  readonly systemTokenCount: number;
+}
+
+export interface SessionUsageTokenDetail {
+  readonly tokenCount: number;
+}
+
+export interface SessionUsageCodeChanges {
+  readonly linesAdded: number;
+  readonly linesRemoved: number;
+  readonly filesModifiedCount: number;
+  readonly filesModified: readonly string[];
+}
+
+export interface SessionUsageModelMetric {
+  readonly requests: {
+    readonly count: number;
+    readonly cost: number;
+  };
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly cacheWriteTokens: number;
+    readonly reasoningTokens?: number;
+  };
+  readonly cacheExpiresAt?: string;
+  readonly totalNanoAiu?: number;
+  readonly tokenDetails?: Readonly<Record<string, SessionUsageTokenDetail | undefined>>;
+}
+
+export interface SessionUsageMetrics {
+  readonly totalPremiumRequestCost: number;
+  readonly totalUserRequests: number;
+  readonly totalNanoAiu?: number;
+  readonly tokenDetails?: Readonly<Record<string, SessionUsageTokenDetail | undefined>>;
+  readonly totalApiDurationMs: number;
+  readonly sessionStartTime: string;
+  readonly codeChanges: SessionUsageCodeChanges;
+  readonly modelMetrics: Readonly<Record<string, SessionUsageModelMetric | undefined>>;
+  readonly currentModel?: string;
+  readonly lastCallInputTokens: number;
+  readonly lastCallOutputTokens: number;
+}
+
+export interface AgentSessionMetadata {
+  getContextAttribution(): Promise<SessionContextAttribution | null>;
+  getContextHeaviestMessages(limit?: number): Promise<ContextHeaviestMessages>;
+  recomputeContextTokens(modelId?: string): Promise<RecomputedContextTokens>;
+}
+
+export interface AgentSessionUsage {
+  getMetrics(): Promise<SessionUsageMetrics>;
+}
+
+export interface AgentSessionHistory {
+  summarizeForHandoff(): Promise<string>;
+  truncate(eventId: string): Promise<number>;
+}
+
 export interface AgentSession {
   readonly pid: number | null;
+  readonly history?: AgentSessionHistory;
+  readonly metadata?: AgentSessionMetadata;
+  readonly usage?: AgentSessionUsage;
   send(prompt: string): void;
   // Core events (all backends)
   on(event: 'text', handler: (text: string) => void): void;
@@ -443,7 +540,7 @@ export interface ToolRef {
   readonly displayName: string;
 }
 
-export interface AgentConfig {
+export interface AgentConfig extends SubagentLimits {
   /**
    * @deprecated Documentation only — never reaches the model. Inert; retained
    * for back-compat.
@@ -460,6 +557,8 @@ export interface AgentConfig {
   readonly thinkingBudget?: ThinkingBudget;
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
+  /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
+  readonly compactionMode?: CompactionMode;
   /**
    * Session MCP servers. A record replaces DEFAULT_MCP_SERVERS; spread the
    * default into a record to extend it. Set false to disable MCP entirely.

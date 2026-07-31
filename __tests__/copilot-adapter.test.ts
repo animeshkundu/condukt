@@ -110,6 +110,7 @@ describe('adaptCopilotBackend', () => {
       timeout: 3600,
       heartbeatTimeout: 120,
       contextTier: 'long_context',
+      compactionMode: 'aggressive',
       mcpServers: { browser: { command: 'browser-mcp' } },
       systemMessage: 'You are a reviewer. Respond with JSON.',
       availableTools: ['view', 'glob'],
@@ -128,6 +129,9 @@ describe('adaptCopilotBackend', () => {
       subagentRoster: {
         explore: { model: 'gemini-3.6-flash', contextTier: 'long_context' },
       },
+      subagentsEnabled: true,
+      maxDepth: 1,
+      maxConcurrency: 2,
       defaultAgent: { excludedTools: ['task'] },
       excludedBuiltinAgents: ['explore'],
     });
@@ -135,6 +139,7 @@ describe('adaptCopilotBackend', () => {
     expect(createSession).toHaveBeenCalledWith(
       expect.objectContaining({
         contextTier: 'long_context',
+        compactionMode: 'aggressive',
         mcpServers: { browser: { command: 'browser-mcp' } },
         systemMessage: 'You are a reviewer. Respond with JSON.',
         availableTools: ['view', 'glob'],
@@ -143,6 +148,9 @@ describe('adaptCopilotBackend', () => {
         subagentRoster: {
           explore: { model: 'gemini-3.6-flash', contextTier: 'long_context' },
         },
+        subagentsEnabled: true,
+        maxDepth: 1,
+        maxConcurrency: 2,
         defaultAgent: { excludedTools: ['task'] },
         excludedBuiltinAgents: ['explore'],
       }),
@@ -163,8 +171,12 @@ describe('adaptCopilotBackend', () => {
     });
 
     const forwarded = createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(forwarded).not.toHaveProperty('compactionMode');
     expect(forwarded).not.toHaveProperty('customAgents');
     expect(forwarded).not.toHaveProperty('subagentRoster');
+    expect(forwarded).not.toHaveProperty('subagentsEnabled');
+    expect(forwarded).not.toHaveProperty('maxDepth');
+    expect(forwarded).not.toHaveProperty('maxConcurrency');
     expect(forwarded).not.toHaveProperty('defaultAgent');
     expect(forwarded).not.toHaveProperty('excludedBuiltinAgents');
   });

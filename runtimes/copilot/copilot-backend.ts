@@ -9,7 +9,7 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
-import type { SubagentRosterOption } from './subagents';
+import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
 export interface MCPServerConfig {
   readonly type?: string;
@@ -39,13 +39,17 @@ export interface DefaultAgentConfig {
   readonly excludedTools?: readonly string[];
 }
 
-export interface SessionConfig {
+export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
+
+export interface SessionConfig extends SubagentLimits {
   /** Model to use: "claude-opus-4.6", "gpt-5.4", etc. */
   readonly model: string;
   /** Thinking budget level for extended thinking models */
   readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh';
   /** Context-window tier to request from the Copilot SDK. */
   readonly contextTier?: 'default' | 'long_context';
+  /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
+  readonly compactionMode?: CompactionMode;
   /** MCP server configurations for the root session, or false to disable them. */
   readonly mcpServers?: Readonly<Record<string, MCPServerConfig>> | false;
   /** Working directory for the agent (repo root) */
@@ -117,9 +121,110 @@ export interface PermissionInfo {
 // Session interface
 // ---------------------------------------------------------------------------
 
+export interface ContextAttributionEntry {
+  readonly kind: string;
+  readonly id: string;
+  readonly label: string;
+  readonly tokens: number;
+  readonly parentId?: string;
+  readonly attributes?: Readonly<Record<string, string | undefined>>;
+}
+
+export interface SessionContextAttribution {
+  readonly totalTokens: number;
+  readonly entries: readonly ContextAttributionEntry[];
+  readonly compactions: { readonly count: number };
+}
+
+export interface ContextHeaviestMessage {
+  readonly id: string;
+  readonly label: string;
+  readonly role: string;
+  readonly tokens: number;
+}
+
+export interface ContextHeaviestMessages {
+  readonly totalTokens: number;
+  readonly messages: readonly ContextHeaviestMessage[];
+}
+
+export interface RecomputedContextTokens {
+  readonly totalTokens: number;
+  readonly messagesTokenCount: number;
+  readonly systemTokenCount: number;
+}
+
+export interface SessionUsageTokenDetail {
+  readonly tokenCount: number;
+}
+
+export interface SessionUsageCodeChanges {
+  readonly linesAdded: number;
+  readonly linesRemoved: number;
+  readonly filesModifiedCount: number;
+  readonly filesModified: readonly string[];
+}
+
+export interface SessionUsageModelMetric {
+  readonly requests: {
+    readonly count: number;
+    readonly cost: number;
+  };
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly cacheWriteTokens: number;
+    readonly reasoningTokens?: number;
+  };
+  readonly cacheExpiresAt?: string;
+  readonly totalNanoAiu?: number;
+  readonly tokenDetails?: Readonly<Record<string, SessionUsageTokenDetail | undefined>>;
+}
+
+export interface SessionUsageMetrics {
+  readonly totalPremiumRequestCost: number;
+  readonly totalUserRequests: number;
+  readonly totalNanoAiu?: number;
+  readonly tokenDetails?: Readonly<Record<string, SessionUsageTokenDetail | undefined>>;
+  readonly totalApiDurationMs: number;
+  readonly sessionStartTime: string;
+  readonly codeChanges: SessionUsageCodeChanges;
+  readonly modelMetrics: Readonly<Record<string, SessionUsageModelMetric | undefined>>;
+  readonly currentModel?: string;
+  readonly lastCallInputTokens: number;
+  readonly lastCallOutputTokens: number;
+}
+
+export interface CopilotSessionMetadata {
+  getContextAttribution(): Promise<SessionContextAttribution | null>;
+  getContextHeaviestMessages(limit?: number): Promise<ContextHeaviestMessages>;
+  recomputeContextTokens(modelId?: string): Promise<RecomputedContextTokens>;
+}
+
+export interface CopilotSessionUsage {
+  getMetrics(): Promise<SessionUsageMetrics>;
+}
+
+export interface CopilotSessionHistory {
+  /** Produce a markdown summary suitable for handing the session to a successor. */
+  summarizeForHandoff(): Promise<string>;
+  /** Remove the identified persisted event and every later event. */
+  truncate(eventId: string): Promise<number>;
+}
+
 export interface CopilotSession {
   /** Subprocess PID (if applicable) for kill operations */
   readonly pid: number | null;
+
+  /** Native long-session history operations when supported by the backend. */
+  readonly history?: CopilotSessionHistory;
+
+  /** Native context diagnostics when supported by the backend. */
+  readonly metadata?: CopilotSessionMetadata;
+
+  /** Native accumulated usage metrics when supported by the backend. */
+  readonly usage?: CopilotSessionUsage;
 
   /** Send a prompt to the agent. Agent begins working. */
   send(prompt: string): void;

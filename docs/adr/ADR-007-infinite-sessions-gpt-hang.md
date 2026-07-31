@@ -44,8 +44,24 @@ sessionConfig.infiniteSessions = {
 ```
 
 - Background compaction starts at 80% context utilization
-- Session blocks at 95% until compaction completes
+- The live settings RPC rejects over-limit dispatches at 95% until compaction completes
+- These documented stock values are the default. Callers can opt into the legacy aggressive 60%/75% thresholds or the exact-diagnostics adaptive pre-dispatch controller through `compactionMode`.
 - This allows sessions with unlimited tool calls
+
+The current runtime creates sessions without an explicit `sessionId`, so each SDK session is ephemeral and cannot be restarted by condukt. The SDK can resume an identified session with `client.resumeSession(sessionId)` and a fresh configuration, and persistent state is stored under `~/.copilot/session-state/{sessionId}/`. Exposing and retaining those IDs is a separate persistence change; ephemeral runners currently lose access to that state.
+
+### Validation
+
+A production `SdkBackend` accumulation probe retained 300 tool results totaling 2,400,900 payload bytes in each mode. Both runs completed with `COMPACTION_COMPARISON_COMPLETE` after exact-verified compaction:
+
+| Mode | Peak `usage_info` tokens | Peak exact recomputation | Exact compaction reductions | Result |
+|------|--------------------------|--------------------------|-----------------------------|--------|
+| Stock 80%/95% | 748,587 | 742,094 | 742,094 → 13,575 (count 0 → 1) | 300/300 calls completed |
+| Aggressive 60%/75% | 667,602 | 661,709 | 580,355 → 13,636 and 661,709 → 13,093 (count 0 → 1 → 2) | 300/300 calls completed |
+
+Each run captured token trajectories, attribution, heaviest messages, exact recomputation, usage metrics, and the successful-compaction count. Stock compacted before the historical 944,213-token failure point, so this controlled workload could not safely reproduce a context above that point. The result demonstrates compaction plus continued execution, not that a 944,213-token request was dispatched successfully.
+
+Request telemetry records only the serialized body byte count and SHA-256 visible at the SDK handler seam. Serialized bytes are not token counts and may differ from the provider's final transformed request.
 
 ### 2. Include failed nodes in loop-back re-dispatch
 

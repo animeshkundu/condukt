@@ -175,6 +175,7 @@ describe('agent factory', () => {
         model: 'gpt-5.3',
         thinkingBudget: 'high',
         contextTier: 'long_context',
+        compactionMode: undefined,
         cwd: '/tmp/test-agent',
         addDirs: ['/tmp/test-agent'],
         timeout: 1800,
@@ -185,12 +186,31 @@ describe('agent factory', () => {
         mcpServers: EXPECTED_DEFAULT_MCP_SERVERS,
         customAgents: undefined,
         subagentRoster: undefined,
+        subagentsEnabled: undefined,
+        maxDepth: undefined,
+        maxConcurrency: undefined,
         defaultAgent: undefined,
         excludedBuiltinAgents: undefined,
         nodeId: 'node-1',
         memberId: undefined,
         artifactFilename: undefined,
       },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
+  it('forwards the selected compaction mode', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({
+      promptBuilder: () => 'test prompt',
+      compactionMode: 'aggressive',
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ compactionMode: 'aggressive' }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

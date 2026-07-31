@@ -20,9 +20,11 @@ import {
   writeOutput,
 } from './agent-node';
 import type {
+  CompactionMode,
   ContextTier,
   CustomAgentConfig,
   DefaultAgentConfig,
+  SubagentLimits,
   ExecutionContext,
   MCPServersOption,
   NodeEntry,
@@ -38,6 +40,7 @@ export interface PanelMember {
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  readonly compactionMode?: CompactionMode;
   /** Replaces the panel MCP set for this member; false disables MCP. */
   readonly mcpServers?: MCPServersOption;
   readonly system?: string;
@@ -49,7 +52,7 @@ export interface PanelMemberMeta {
   readonly ok: boolean;
 }
 
-export interface PanelConfig<T, V = unknown> {
+export interface PanelConfig<T, V = unknown> extends SubagentLimits {
   readonly prompt:
     | string
     | ((
@@ -69,6 +72,7 @@ export interface PanelConfig<T, V = unknown> {
   readonly fallback?: (error: Error) => T;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
+  readonly compactionMode?: CompactionMode;
   /** Replaces DEFAULT_MCP_SERVERS; members may override or disable it. */
   readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_PANEL_TIMEOUT_SECS. */
@@ -102,6 +106,7 @@ async function runMember<T, V>(
     model: member.model ?? DEFAULT_REVIEWER_MODEL,
     thinkingBudget: member.thinkingBudget ?? config.thinkingBudget,
     contextTier: member.contextTier ?? config.contextTier ?? DEFAULT_CONTEXT_TIER,
+    compactionMode: member.compactionMode ?? config.compactionMode,
     mcpServers: member.mcpServers ?? config.mcpServers,
     system: member.system,
     output: memberOutput,
@@ -110,6 +115,9 @@ async function runMember<T, V>(
     retry: config.retry,
     customAgents: config.customAgents,
     subagentRoster: config.subagentRoster,
+    subagentsEnabled: config.subagentsEnabled,
+    maxDepth: config.maxDepth,
+    maxConcurrency: config.maxConcurrency,
     defaultAgent: config.defaultAgent,
     excludedBuiltinAgents: config.excludedBuiltinAgents,
     memberId: member.id ?? `member-${memberIndex}`,
