@@ -1,4 +1,8 @@
-import type { AgentNodeConfig, AgentNodeSchema } from './agent-node';
+import type {
+  AgentNodeConfig,
+  AgentNodeSchema,
+  RepairCandidate,
+} from './agent-node';
 import {
   DEFAULT_PANEL_TIMEOUT_SECS,
   DEFAULT_CONTEXT_TIER,
@@ -9,7 +13,9 @@ import {
   extractJsonCandidates,
   loadReads,
   produce,
+  preferRepairCandidate,
   rawCandidates,
+  repairCandidateIssues,
   removeInvalidOutput,
   repairPrompt,
   retryCount,
@@ -138,20 +144,21 @@ async function runMember<T, V>(
     }
 
     const validator = toValidator(config.memberSchema);
-    let raw = '';
-    let lastError = new Error('Structured output was not produced');
+    let lastIssues = ['Structured output was not produced'];
+    let lastCandidate: RepairCandidate | undefined;
+    let lastError = validationError(lastIssues);
     const attempts = retryCount(config.structuredRetry) + 1;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const currentPrompt = attempt === 0
         ? `${prompt}\n\nReturn exactly one valid JSON value with no prose or markdown fences.`
-        : repairPrompt(prompt, raw, lastError);
+        : repairPrompt(prompt, lastIssues, lastCandidate);
       try {
         removeInvalidOutput(input, memberOutput);
         const result = await produce(memberConfig, currentPrompt, input, ctx);
         const issues: string[] = [];
+        let repairCandidate: RepairCandidate | undefined;
         for (const source of rawCandidates(result)) {
-          raw = source.raw;
           let sawCandidate = false;
           for (const candidate of extractJsonCandidates(source.raw)) {
             sawCandidate = true;
@@ -159,14 +166,25 @@ async function runMember<T, V>(
             if (validated.ok) {
               return { ok: true, value: validated.value };
             }
-            issues.push(...validated.issues.map((issue) => `${source.label}: ${issue}`));
+            const candidateIssues = validated.issues;
+            issues.push(...candidateIssues.map((issue) => `${source.label}: ${issue}`));
+            repairCandidate = preferRepairCandidate(
+              repairCandidate,
+              source.label,
+              candidate,
+              candidateIssues,
+            );
           }
           if (!sawCandidate) {
             issues.push(`${source.label}: no valid JSON value was found`);
           }
         }
+        lastIssues = [...repairCandidateIssues(issues, repairCandidate)];
+        lastCandidate = repairCandidate;
         lastError = validationError(issues);
       } catch (error) {
+        lastIssues = [error instanceof Error ? error.message : String(error)];
+        lastCandidate = undefined;
         lastError = error instanceof Error ? error : new Error(String(error));
       }
     }

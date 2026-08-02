@@ -232,22 +232,138 @@ function toolIds(
   return tools?.map((tool) => typeof tool === 'string' ? tool : tool.id);
 }
 
-export function repairPrompt(prompt: string, raw: string, error: Error): string {
+interface Diagnostic {
+  readonly issue: string;
+  readonly count: number;
+  readonly order: number;
+}
+
+export interface RepairCandidate {
+  readonly source: string;
+  readonly value: Readonly<Record<string, unknown>>;
+  readonly issues: readonly string[];
+}
+
+function diagnostics(issues: readonly string[]): readonly Diagnostic[] {
+  const details = issues.length > 0 ? issues : ['Schema validation failed'];
+  const byIssue = new Map<string, { count: number; order: number }>();
+  for (const issue of details) {
+    const existing = byIssue.get(issue);
+    if (existing) existing.count += 1;
+    else byIssue.set(issue, { count: 1, order: byIssue.size });
+  }
+  return [...byIssue].map(([issue, detail]) => ({ issue, ...detail }));
+}
+
+function diagnosticLine(diagnostic: Diagnostic): string {
+  const count = diagnostic.count === 1
+    ? ''
+    : ` (${diagnostic.count} occurrences)`;
+  return `- ${diagnostic.issue}${count}`;
+}
+
+function omittedLine(count: number): string {
+  return `- ${count} distinct validation ${count === 1 ? 'issue was' : 'issues were'} omitted`;
+}
+
+function renderDiagnostics(entries: readonly Diagnostic[]): string {
+  return entries.map(diagnosticLine).join('\n');
+}
+
+function boundedDiagnostics(issues: readonly string[], budget: number): string {
+  const entries = diagnostics(issues);
+  const complete = renderDiagnostics(entries);
+  if (complete.length <= budget) return complete;
+
+  const ranked = [...entries].sort((left, right) => (
+    right.count - left.count || left.order - right.order
+  ));
+  const selected: Diagnostic[] = [];
+  for (const entry of ranked) {
+    const next = [...selected, entry];
+    const omitted = entries.length - next.length;
+    const lines = [
+      renderDiagnostics([...next].sort((left, right) => left.order - right.order)),
+      ...(omitted > 0 ? [omittedLine(omitted)] : []),
+    ].filter((line) => line.length > 0).join('\n');
+    if (lines.length > budget) continue;
+    selected.push(entry);
+  }
+
+  const omitted = entries.length - selected.length;
+  const omission = omittedLine(omitted);
+  if (selected.length === 0) {
+    // A budget too small for "issue plus omission count" still has room for the issue,
+    // and one concrete diagnostic is worth more than a bare count of what was dropped.
+    const only = ranked[0] === undefined ? '' : diagnosticLine(ranked[0]);
+    if (only.length > 0 && only.length <= budget) return only;
+    return omission.length <= budget ? omission : '';
+  }
+  return [
+    renderDiagnostics([...selected].sort((left, right) => left.order - right.order)),
+    ...(omitted > 0 ? [omission] : []),
+  ].filter((line) => line.length > 0).join('\n');
+}
+
+export function preferRepairCandidate(
+  current: RepairCandidate | undefined,
+  source: string,
+  value: unknown,
+  issues: readonly string[],
+): RepairCandidate | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return current;
+  const candidate: RepairCandidate = {
+    source,
+    value: value as Readonly<Record<string, unknown>>,
+    issues,
+  };
+  return current === undefined
+    || Object.keys(candidate.value).length >= Object.keys(current.value).length
+    ? candidate
+    : current;
+}
+
+export function repairCandidateIssues(
+  issues: readonly string[],
+  candidate: RepairCandidate | undefined,
+): readonly string[] {
+  return candidate === undefined
+    ? issues
+    : candidate.issues.map((issue) => `${candidate.source}: ${issue}`);
+}
+
+export function repairPrompt(
+  prompt: string,
+  issues: readonly string[],
+  candidate?: RepairCandidate,
+): string {
+  // Evidence about a failed attempt must never exceed the instructions it diagnoses.
+  const evidenceBudget = prompt.length;
+  // The candidate claims the budget first: it is what lets a near-miss be corrected
+  // without redoing the work, whereas diagnostics only describe the miss.
+  const serialized = candidate === undefined ? undefined : JSON.stringify(candidate.value, null, 2);
+  const serializedCandidate = serialized !== undefined && serialized.length <= evidenceBudget
+    ? serialized
+    : undefined;
+  const issueBlock = boundedDiagnostics(issues, evidenceBudget - (serializedCandidate?.length ?? 0));
+
+  const evidence = serializedCandidate === undefined
+    ? candidate === undefined
+      ? ['', 'No credible JSON object was found in the previous response.']
+      : ['', 'The previous JSON object exceeded the repair evidence budget.']
+    : ['', `Previous JSON candidate from ${candidate?.source}:`, serializedCandidate];
   return [
     prompt,
     '',
-    'Your previous response was not valid structured output. Return only corrected JSON.',
-    'Validation issues:',
-    error.message,
-    '',
-    'Previous response:',
-    raw,
+    'Your previous response was not valid structured output.',
+    'Return exactly one valid JSON value matching the requested contract with no prose or markdown fences.',
+    ...(issueBlock.length === 0 ? [] : ['Validation issues:', issueBlock]),
+    ...evidence,
   ].join('\n');
 }
 
 export function validationError(issues: readonly string[]): Error {
-  const details = issues.length > 0 ? issues : ['Schema validation failed'];
-  return new Error(details.map((issue) => `- ${issue}`).join('\n'));
+  return new Error(renderDiagnostics(diagnostics(issues)));
 }
 
 export async function validateCandidate<T>(
@@ -420,17 +536,20 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
       ? nodeContext
       : { ...nodeContext, retryDeadlineMs };
     let raw = '';
-    let lastError = new Error('Structured output was not produced');
+    let lastIssues = ['Structured output was not produced'];
+    let lastCandidate: RepairCandidate | undefined;
+    let lastError = validationError(lastIssues);
     let metadata: Record<string, unknown> | undefined;
     const attempts = retryCount(config.structuredRetry) + 1;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const currentPrompt = attempt === 0
         ? `${prompt}\n\nReturn exactly one valid JSON value with no prose or markdown fences.`
-        : repairPrompt(prompt, raw, lastError);
+        : repairPrompt(prompt, lastIssues, lastCandidate);
       const result = await produce(config, currentPrompt, input, producerContext);
       metadata = result.metadata;
       const issues: string[] = [];
+      let repairCandidate: RepairCandidate | undefined;
       for (const source of rawCandidates(result)) {
         raw = source.raw;
         let sawCandidate = false;
@@ -440,12 +559,21 @@ export function agentNode<T = string>(config: AgentNodeConfig<T>): NodeEntry {
           if (validated.ok) {
             return successOutput(config, input, validated.value, metadata);
           }
-          issues.push(...validated.issues.map((issue) => `${source.label}: ${issue}`));
+          const candidateIssues = validated.issues;
+          issues.push(...candidateIssues.map((issue) => `${source.label}: ${issue}`));
+          repairCandidate = preferRepairCandidate(
+            repairCandidate,
+            source.label,
+            candidate,
+            candidateIssues,
+          );
         }
         if (!sawCandidate) {
           issues.push(`${source.label}: no valid JSON value was found`);
         }
       }
+      lastIssues = [...repairCandidateIssues(issues, repairCandidate)];
+      lastCandidate = repairCandidate;
       lastError = validationError(issues);
     }
 
