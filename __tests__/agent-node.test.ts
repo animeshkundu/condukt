@@ -3,6 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { agentNode, dryRun, toValidator } from '../src';
+import {
+  preferRepairCandidate,
+  repairPrompt,
+  validationError,
+} from '../src/agent-node';
 import type {
   AgentRuntime,
   AgentSession,
@@ -36,6 +41,33 @@ function parseStructured(value: unknown): StructuredResult | undefined {
 
 function completedAction(result: Awaited<ReturnType<typeof dryRun>>, nodeId: string): string | undefined {
   return result.projection.graph.nodes.find((node) => node.id === nodeId)?.action;
+}
+
+function promptCapturingRuntime(
+  name: string,
+  responses: string[],
+  prompts: string[],
+): AgentRuntime {
+  return {
+    name,
+    createSession: vi.fn().mockImplementation(async () => {
+      const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+      const response = responses.shift() ?? '';
+      return {
+        pid: null,
+        send: (sentPrompt: string) => queueMicrotask(() => {
+          prompts.push(sentPrompt);
+          for (const handler of handlers.get('text') ?? []) handler(response);
+          for (const handler of handlers.get('idle') ?? []) handler();
+        }),
+        on: (event: string, handler: (...args: unknown[]) => void) => {
+          handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        },
+        abort: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSession;
+    }),
+    isAvailable: vi.fn().mockResolvedValue(true),
+  };
 }
 
 describe('agentNode', () => {
@@ -218,6 +250,82 @@ describe('agentNode', () => {
     );
   });
 
+  it('deduplicates repeated validation issues with an occurrence count', () => {
+    const issue = 'Model text: Validation function returned undefined';
+
+    expect(validationError(Array.from({ length: 1_544 }, () => issue)).message).toBe(
+      `- ${issue} (1544 occurrences)`,
+    );
+    expect(validationError([issue]).message).toBe(`- ${issue}`);
+  });
+
+  it('keeps the highest-count diagnostics within the instruction-derived budget', () => {
+    const prompt = 'x'.repeat(125);
+    const repaired = repairPrompt(prompt, [
+      'rare issue '.repeat(10),
+      'frequent issue',
+      'frequent issue',
+      'frequent issue',
+      'secondary issue',
+      'secondary issue',
+    ]);
+
+    expect(repaired).toContain('- frequent issue (3 occurrences)');
+    expect(repaired).toContain('- secondary issue (2 occurrences)');
+    expect(repaired).toContain('- 1 distinct validation issue was omitted');
+    expect(repaired).not.toContain('rare issue');
+  });
+
+  it('skips oversized diagnostics while retaining later issues that fit', () => {
+    const prompt = 'x'.repeat(80);
+    const repaired = repairPrompt(prompt, [
+      'oversized '.repeat(100),
+      'short issue',
+    ]);
+
+    expect(repaired).toContain('- short issue');
+    expect(repaired).toContain('- 1 distinct validation issue was omitted');
+    expect(repaired).not.toContain('oversized');
+  });
+
+  it('prefers the last object when candidate key counts tie', () => {
+    const first = preferRepairCandidate(
+      undefined,
+      'Artifact',
+      { status: 'first' },
+      ['wrong status'],
+    );
+    const last = preferRepairCandidate(
+      first,
+      'Model text',
+      { status: 'last' },
+      ['still wrong'],
+    );
+
+    expect(last).toEqual({
+      source: 'Model text',
+      value: { status: 'last' },
+      issues: ['still wrong'],
+    });
+  });
+
+  it('bounds repair evidence by the original prompt length', () => {
+    const prompt = 'Return a result matching this contract. '.repeat(100);
+    const raw = `${'Playwright output and screenshot paths\n'.repeat(100_000)}not JSON`;
+    const issues = [
+      ...Array.from(
+        { length: 1_544 },
+        () => 'Model text: Validation function returned undefined',
+      ),
+      raw,
+    ];
+    const repaired = repairPrompt(prompt, issues);
+
+    expect(repaired.length).toBeLessThan(prompt.length * 2);
+    expect(repaired).not.toContain('Playwright output and screenshot paths');
+    expect(repaired).toContain('(1544 occurrences)');
+  });
+
   it('repairs invalid structured output with a second model send', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
@@ -258,6 +366,86 @@ describe('agentNode', () => {
       status: 'recovered',
       count: 2,
     });
+  });
+
+  it('echoes the best object candidate with matching source diagnostics', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const prompts: string[] = [];
+    const responses = [
+      'prose ["array"] {"small":true} more prose {"status":"wrong","count":1,"extra":true} trailing prose',
+      '{"status":"recovered","count":2}',
+    ];
+    const runtime = promptCapturingRuntime(
+      'candidate-repair-runtime',
+      responses,
+      prompts,
+    );
+    const entry = agentNode({
+      prompt: 'Return a structured result with a status and count, following every requirement. Include the required status string and numeric count in one object, and do not add unrelated fields or surrounding text.',
+      model: 'mock-model',
+      schema: {
+        validate: (value) => {
+          const parsed = parseStructured(value);
+          return parsed?.status === 'recovered'
+            ? { ok: true, value: parsed }
+            : { ok: false, issues: ['status must be recovered'] };
+        },
+      },
+      structuredRetry: 1,
+    });
+    const context: ExecutionContext = {
+      executionId: 'candidate-repair',
+      nodeId: 'repair',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    const result = await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(result.action).toBe('default');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('Previous JSON candidate from Model text:');
+    expect(prompts[1]).toContain('"extra": true');
+    expect(prompts[1]).not.toContain('prose [');
+    expect(prompts[1]).not.toContain('"small": true');
+  });
+
+  it('does not echo raw text when no object candidate exists', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const prompts: string[] = [];
+    const responses = [
+      'sensitive prose [1, 2, 3] more sensitive prose',
+      '{"status":"recovered","count":2}',
+    ];
+    const runtime = promptCapturingRuntime(
+      'no-candidate-repair-runtime',
+      responses,
+      prompts,
+    );
+    const entry = agentNode({
+      prompt: 'Return a structured result with a status and count.',
+      model: 'mock-model',
+      schema: parseStructured,
+      structuredRetry: 1,
+    });
+    const context: ExecutionContext = {
+      executionId: 'no-candidate-repair',
+      nodeId: 'repair',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    const result = await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(result.action).toBe('default');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('No credible JSON object was found in the previous response.');
+    expect(prompts[1]).not.toContain('sensitive prose');
+    expect(prompts[1]).not.toContain('[1, 2, 3]');
   });
 
   it('validates model text when the output artifact is malformed', async () => {
