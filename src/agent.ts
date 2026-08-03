@@ -207,33 +207,34 @@ function errorChain(error: Error): readonly Error[] {
 }
 
 function hasPermanentMarker(message: string): boolean {
-  return /\b(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden|permission denied|invalid request|unprocessable|abort(?:ed)?|cancel(?:led|ed)?|cancellation)\b/.test(message);
+  return /\b(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden|permission denied|invalid request|unprocessable)\b/.test(message);
 }
 
 function hasTransientTimeoutMarker(message: string): boolean {
   return /heartbeat(?: timeout)?|idle(?: stall| timeout)|no output for \d+(?:\.\d+)?s|session timed out|request timed out|connect(?:ion)? timeout|socket timeout|etimedout/.test(message);
 }
 
-/** Default fail-closed classifier for model/session failures. */
 export function isRetriableModelError(error: Error, meta: RetryMeta): boolean {
   if (error instanceof FlowAbortedError) return false;
 
-  const messages = errorChain(error)
-    .map((entry) => `${entry.name} ${entry.message}`.toLowerCase());
-  if (messages.some(hasPermanentMarker)) return false;
-
-  if (meta.statusCode === 400 || meta.statusCode === 401
-    || meta.statusCode === 403 || meta.statusCode === 422) {
-    return false;
-  }
-  if (meta.statusCode === 429
-    || (meta.statusCode !== undefined && meta.statusCode >= 500 && meta.statusCode <= 599)) {
-    return true;
+  const statusCode = meta.statusCode;
+  if (statusCode !== undefined) {
+    if (statusCode < 400) return false;
+    return !(statusCode === 400 || statusCode === 401 || statusCode === 403
+      || statusCode === 404 || statusCode === 405 || statusCode === 410
+      || statusCode === 413 || statusCode === 414 || statusCode === 415
+      || statusCode === 422);
   }
 
   const code = meta.errorCode?.toUpperCase();
   if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
-  return messages.some(hasTransientTimeoutMarker);
+
+  const messages = errorChain(error)
+    .map((entry) => `${entry.name} ${entry.message}`.toLowerCase());
+  if (messages.some(hasPermanentMarker)) return false;
+  if (messages.some(hasTransientTimeoutMarker)) return true;
+  // Unknown model failures retry because attempt and deadline limits bound false positives.
+  return true;
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

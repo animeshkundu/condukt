@@ -783,7 +783,7 @@ describe('agent factory', () => {
     expect(mockRuntime.createSession).not.toHaveBeenCalled();
   });
 
-  it('retries a retriable error with a fresh session and emits node:retrying', async () => {
+  it('retries a 499 error with a fresh session and emits node:retrying', async () => {
     const failed = createMockSession();
     const succeeded = createMockSession();
     const runtime: AgentRuntime = {
@@ -795,7 +795,7 @@ describe('agent factory', () => {
     };
     const emitState = vi.fn().mockResolvedValue(undefined);
     failed.send.mockImplementation(() => queueMicrotask(() => failed._emit(
-      'error', Object.assign(new Error('upstream unavailable'), { statusCode: 503 }),
+      'error', Object.assign(new Error('499 status code 499'), { statusCode: 499 }),
     )));
     succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
 
@@ -972,8 +972,16 @@ describe('agent factory', () => {
     ]);
   });
 
-  it('does not retry auth failures merely because their message contains timeout', async () => {
-    const error = new Error('Auth token timeout while refreshing credentials');
+  it.each([
+    'Auth token timeout while refreshing credentials',
+    'authorization request timed out',
+    'unauthorized after connection timeout',
+    'forbidden because the session timed out',
+    'permission denied after socket timeout',
+    'invalid request because the connection timed out',
+    'unprocessable response after heartbeat timeout',
+  ])('does not retry a permanent text marker containing a timeout: %s', async (message) => {
+    const error = new Error(message);
     mockSession.send.mockImplementation(() => queueMicrotask(() => {
       mockSession._emit('error', error);
     }));
@@ -985,8 +993,122 @@ describe('agent factory', () => {
     expect(mockRuntime.createSession).toHaveBeenCalledOnce();
   });
 
-  it('fails closed for unrecognized model errors', () => {
-    expect(isRetriableModelError(new Error('unrecognized failure'), { attempt: 1 })).toBe(false);
+  it.each([408, 425, 429, 499, 500, 503, 599])(
+    'classifies status %i as retriable',
+    (statusCode) => {
+      expect(isRetriableModelError(new Error('model call failed'), {
+        attempt: 1,
+        statusCode,
+      })).toBe(true);
+    },
+  );
+
+  it.each([418, 460])('classifies unknown status %i as retriable', (statusCode) => {
+    expect(isRetriableModelError(new Error('unrecognized failure'), {
+      attempt: 1,
+      statusCode,
+    })).toBe(true);
+  });
+
+  it.each([400, 401, 403, 404, 405, 410, 413, 414, 415, 422])(
+    'classifies permanent status %i as non-retriable',
+    (statusCode) => {
+      expect(isRetriableModelError(new Error('model call failed'), {
+        attempt: 1,
+        statusCode,
+      })).toBe(false);
+    },
+  );
+
+  it.each([200, 302, 399])('does not retry anomalous status %i', (statusCode) => {
+    expect(isRetriableModelError(new Error('model call failed'), {
+      attempt: 1,
+      statusCode,
+    })).toBe(false);
+  });
+
+  it('classifies an unrecognized model error without a status as retriable', () => {
+    expect(isRetriableModelError(new Error('unrecognized failure'), { attempt: 1 })).toBe(true);
+  });
+
+  it('lets a retriable status override a permanent text marker', () => {
+    expect(isRetriableModelError(new Error('invalid request from upstream'), {
+      attempt: 1,
+      statusCode: 503,
+    })).toBe(true);
+  });
+
+  it('uses a permanent text marker when no structured signal exists', () => {
+    expect(isRetriableModelError(new Error('invalid request from upstream'), {
+      attempt: 1,
+    })).toBe(false);
+  });
+
+  it('retries ECONNABORTED even when its message says aborted', () => {
+    expect(isRetriableModelError(Object.assign(
+      new Error('The socket operation was aborted'),
+      { code: 'ECONNABORTED' },
+    ), {
+      attempt: 1,
+      errorCode: 'ECONNABORTED',
+    })).toBe(true);
+  });
+
+  it('lets a permanent message decide when the error code is unrecognized', () => {
+    expect(isRetriableModelError(new Error('authentication failed for the configured key'), {
+      attempt: 1,
+      errorCode: 'PROVIDER_SPECIFIC_CODE',
+    })).toBe(false);
+  });
+
+  it('retries an unrecognized error code when nothing marks it permanent', () => {
+    expect(isRetriableModelError(new Error('upstream closed the connection'), {
+      attempt: 1,
+      errorCode: 'PROVIDER_SPECIFIC_CODE',
+    })).toBe(true);
+  });
+
+  it.each([
+    'socket hang up because the stream was aborted',
+    'The operation was aborted',
+    'upstream request cancelled',
+  ])('does not treat transient abort text as permanent: %s', (message) => {
+    expect(isRetriableModelError(new Error(message), { attempt: 1 })).toBe(true);
+  });
+
+  it('never classifies FlowAbortedError as retriable', () => {
+    expect(isRetriableModelError(new FlowAbortedError(), {
+      attempt: 1,
+      statusCode: 503,
+      errorCode: 'ECONNABORTED',
+    })).toBe(false);
+  });
+
+  it('uses a caller-supplied retry classifier instead of the default', async () => {
+    const error = Object.assign(new Error('invalid request'), { statusCode: 400 });
+    const isRetriable = vi.fn().mockReturnValue(true);
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'custom-classifier-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    failed.send.mockImplementation(() => queueMicrotask(() => failed._emit('error', error)));
+    succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+    await agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false, isRetriable },
+    })(createMockInput(), createMockContext(runtime));
+
+    expect(isRetriable).toHaveBeenCalledWith(error, {
+      attempt: 1,
+      statusCode: 400,
+    });
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry a deeply nested string-status 401 from the runtime', async () => {
