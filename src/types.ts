@@ -676,6 +676,16 @@ export interface OutputPage {
   readonly hasMore: boolean;
 }
 
+/**
+ * A storage engine that can have an execution's whole event log replaced atomically.
+ *
+ * Separate from StorageEngine so an engine with no durable log (MemoryStorage in a test, say)
+ * is not forced to pretend it supports checkpoint restore. Callers feature-detect.
+ */
+export interface CheckpointableStorageEngine extends StorageEngine {
+  replaceEvents(execId: string, events: readonly ExecutionEvent[]): void;
+}
+
 export interface StorageEngine {
   appendEvent(execId: string, event: ExecutionEvent): void;
   readEvents(execId: string): ExecutionEvent[];

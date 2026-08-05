@@ -49,6 +49,24 @@ export class FileStorage implements StorageEngine {
     fs.appendFileSync(file, JSON.stringify(event) + '\n', 'utf-8');
   }
 
+  /**
+   * Replace the whole event log atomically.
+   *
+   * Writes to a sibling temp file and renames, so a crash mid-restore leaves either the old log
+   * or the new one, never a half-written mixture. The projection is NOT written here: the caller
+   * rebuilds it from the restored events, which keeps the two from disagreeing.
+   */
+  replaceEvents(execId: string, events: readonly ExecutionEvent[]): void {
+    const dir = this.execDir(execId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'events.jsonl');
+    const temp = `${file}.restore-${process.pid}`;
+    let body = '';
+    for (const event of events) body += JSON.stringify(event) + '\n';
+    fs.writeFileSync(temp, body, 'utf-8');
+    fs.renameSync(temp, file);
+  }
+
   readEvents(execId: string): ExecutionEvent[] {
     const file = path.join(this.execDir(execId), 'events.jsonl');
     if (!fs.existsSync(file)) return [];
