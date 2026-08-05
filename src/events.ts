@@ -149,6 +149,13 @@ export interface RouteResolvedEvent {
       readonly source: string;
       readonly target: string;
     }[];
+    /**
+     * The node the feedback below is owed to, and the feedback itself. Persisted so a resume
+     * can hand the re-dispatched node the same retryContext the uninterrupted run would have.
+     * Optional: logs written before this field simply resume without feedback, as they do today.
+     */
+    readonly feedbackTarget?: string;
+    readonly feedback?: string;
   };
   /** Present when a loop region takes its graceful exhaustion path. */
   readonly exhaustion?: RouteExhaustion;

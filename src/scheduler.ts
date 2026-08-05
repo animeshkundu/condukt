@@ -53,6 +53,8 @@ interface ResolvedLoopRoute {
     readonly source: string;
     readonly target: string;
   }[];
+  readonly feedbackTarget?: string;
+  readonly feedback?: string;
 }
 
 async function emitResolvedRoute(
@@ -884,6 +886,22 @@ export async function run(
     for (const [loopKey, iteration] of resumeFrom.loopIterations) {
       loopIterations.set(loopKey, iteration);
     }
+    // Restore the feedback owed to a node that was mid-loop when the run stopped. priorOutput is
+    // re-read from the artifact directory rather than carried through the resume state, so it
+    // reflects what is actually on disk after a restore.
+    for (const [nodeId, retryContext] of resumeFrom.loopRetryContexts ?? []) {
+      let priorOutput = retryContext.priorOutput;
+      const outputName = graph.nodes[nodeId]?.output;
+      if (priorOutput === null && outputName) {
+        try {
+          const artifactPath = path.join(dir, outputName);
+          if (fs.existsSync(artifactPath)) priorOutput = fs.readFileSync(artifactPath, 'utf-8');
+        } catch {
+          // A missing or unreadable artifact is not fatal; the node still gets its feedback.
+        }
+      }
+      loopRetryContexts.set(nodeId, { ...retryContext, priorOutput });
+    }
 
     // Compute frontier for resume
     pending = computeFrontier(graph, resumeFrom);
@@ -1321,6 +1339,8 @@ export async function run(
                 readyTargets: [region.entry],
                 firedTargets: [],
                 clearedEdges,
+                feedbackTarget: region.entry,
+                feedback,
               },
             },
           );

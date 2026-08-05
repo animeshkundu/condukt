@@ -209,6 +209,13 @@ export interface ResumeState {
   readonly firedEdges: Map<string, Set<string>>; // target → sources that routed there
   readonly nodeStatuses: Map<string, string>;
   readonly loopIterations: Map<string, number>; // source:action → iteration count
+  /**
+   * Loop feedback owed to a re-dispatched node, keyed by node id. Without this a run
+   * interrupted mid-loop resumes with retryContext undefined on the loop entry, so the node
+   * re-runs blind to why the previous round was rejected and any consumer reading the round
+   * out of the feedback silently restarts its count at zero.
+   */
+  readonly loopRetryContexts?: Map<string, RetryContext>;
   readonly readyNodes?: ReadonlySet<string>; // loop reset targets dispatched without a completed source
 }
 

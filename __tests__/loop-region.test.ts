@@ -338,6 +338,51 @@ describe('loop regions', () => {
     }
   });
 
+  it('carries loop feedback across a resume into the region entry node', async () => {
+    // The scheduler seeds loopIterations from ResumeState but never seeded loopRetryContexts,
+    // so a run interrupted mid-loop came back with input.retryContext undefined on the entry
+    // node. Every downstream consumer then reads round zero and re-runs blind to why the
+    // previous round was rejected.
+    const seen: (string | undefined)[] = [];
+    const events: ExecutionEvent[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        produce: entry(async (input) => {
+          seen.push(input.retryContext?.feedback);
+          return { action: 'default' };
+        }),
+        decision: entry(async () => ({ action: 'exit' })),
+      },
+      edges: {
+        produce: { default: 'decision' },
+        decision: { continue: 'produce', exit: 'end' },
+      },
+      start: ['produce'],
+      loops: [{
+        id: 'feedback-resume',
+        nodes: ['produce', 'decision'],
+        entry: 'produce',
+        decision: 'decision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 3,
+        feedback: (_output, iteration) => `attempt ${iteration} of 3`,
+      }],
+    };
+
+    const resumeFrom = {
+      completedNodes: new Map<string, { action: string; finishedAt: number }>(),
+      firedEdges: new Map<string, Set<string>>(),
+      nodeStatuses: new Map<string, string>(),
+      loopIterations: new Map([['region:feedback-resume', 2]]),
+      loopRetryContexts: new Map([['produce', { priorOutput: null, feedback: 'attempt 2 of 3' }]]),
+    };
+
+    await run(graph, { ...runOptions(events), resumeFrom });
+
+    expect(seen).toEqual(['attempt 2 of 3']);
+  });
+
   it('resumes with only the remaining maxRounds budget', async () => {
     const counts: Record<string, number> = { produce: 0, decision: 0, done: 0 };
     const events: ExecutionEvent[] = [];
