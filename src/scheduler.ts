@@ -863,10 +863,17 @@ export async function run(
     roundStartedAt: number;
     maxRoundElapsedMs: number;
   }>();
+  // Membership used only for loopContext. Deliberately separate from loopRegionsByNode, which
+  // is gated on budgetMs because it drives round timing: reusing it here would silently hand
+  // unbudgeted regions no loop position at all.
+  const regionByMemberNode = new Map<string, LoopRegion>();
   for (const region of graph.loops ?? []) {
     loopRegionsByDecision.set(region.decision, region);
     if (region.budgetMs !== undefined) {
       for (const nodeId of region.nodes) loopRegionsByNode.set(nodeId, region);
+    }
+    for (const nodeId of [...region.nodes, region.decision]) {
+      regionByMemberNode.set(nodeId, region);
     }
   }
 
@@ -998,11 +1005,22 @@ export async function run(
 
         // PARITY-1: Build NodeInput with retryContext from RunOptions if present
         // Loop-back provides retryContext via loopRetryContexts
+        const memberRegion = regionByMemberNode.get(nodeId);
+        const loopContext = memberRegion === undefined ? undefined : {
+          regionId: memberRegion.id,
+          iteration: loopIterations.get(`region:${memberRegion.id}`) ?? 0,
+          round: (loopIterations.get(`region:${memberRegion.id}`) ?? 0) + 1,
+          ...(memberRegion.maxRounds === undefined ? {} : { maxRounds: memberRegion.maxRounds }),
+          ...(memberRegion.maxIterations === undefined
+            ? {}
+            : { maxIterations: memberRegion.maxIterations }),
+        };
         const nodeInput: NodeInput = {
           dir,
           params,
           artifactPaths,
           retryContext: retryContexts?.[nodeId] ?? loopRetryContexts.get(nodeId),
+          ...(loopContext === undefined ? {} : { loopContext }),
         };
 
         // Give each dispatch its own cancellation scope. The node stops when either

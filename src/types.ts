@@ -33,11 +33,28 @@ export type ExecutionId = Brand<string, 'ExecutionId'>;
 export type NodeFn = (input: NodeInput, ctx: ExecutionContext) => Promise<NodeOutput>;
 
 /** What every node receives — composition-defined, framework-opaque. */
+/**
+ * Where a node sits in its loop region, for nodes inside one.
+ *
+ * Without this the round number has to be formatted into the feedback string by the graph and
+ * parsed back out by the node, which couples the two through prose. `iteration` counts loop-backs
+ * taken and is 0 on the first pass; `round` is the 1-based human-facing equivalent.
+ */
+export interface LoopContext {
+  readonly regionId: string;
+  readonly iteration: number;
+  readonly round: number;
+  readonly maxRounds?: number;
+  readonly maxIterations?: number;
+}
+
 export interface NodeInput {
   readonly dir: string;
   readonly params: Readonly<Record<string, unknown>>;
   readonly artifactPaths: Readonly<Record<string, string>>;
   readonly retryContext?: RetryContext;
+  /** Present for every node inside a LoopRegion, budgeted or not. */
+  readonly loopContext?: LoopContext;
 }
 
 /** What every node returns — the scheduler handles event emission from this. */

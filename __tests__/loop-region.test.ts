@@ -12,6 +12,7 @@ import type {
   LoopRegion,
   NodeEntry,
   NodeFn,
+  NodeInput,
   RetryContext,
   RunOptions,
 } from '../src/types';
@@ -336,6 +337,57 @@ describe('loop regions', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('gives every region node its loop position, including regions with no budget', async () => {
+    // Consumers otherwise have to format the round into the feedback string and parse it back
+    // out. The region below deliberately omits budgetMs: loopRegionsByNode is only populated for
+    // budgeted regions, so deriving loopContext from that map alone would silently yield nothing
+    // here -- the exact class of failure this codebase keeps hitting.
+    const seen: { node: string; round: number; iteration: number; regionId: string }[] = [];
+    const record = (node: string) => async (input: NodeInput) => {
+      if (input.loopContext) {
+        seen.push({
+          node,
+          round: input.loopContext.round,
+          iteration: input.loopContext.iteration,
+          regionId: input.loopContext.regionId,
+        });
+      }
+      return { action: node === 'decision' ? (seen.length >= 4 ? 'exit' : 'continue') : 'default' };
+    };
+    const events: ExecutionEvent[] = [];
+    const graph: FlowGraph = {
+      nodes: {
+        produce: entry(record('produce')),
+        decision: entry(record('decision')),
+        done: entry(async () => ({ action: 'default' })),
+      },
+      edges: {
+        produce: { default: 'decision' },
+        decision: { continue: 'produce', exit: 'done' },
+      },
+      start: ['produce'],
+      loops: [{
+        id: 'unbudgeted',
+        nodes: ['produce', 'decision'],
+        entry: 'produce',
+        decision: 'decision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 3,
+      }],
+    };
+
+    await run(graph, runOptions(events));
+
+    expect(seen.every(entry => entry.regionId === 'unbudgeted')).toBe(true);
+    // Round is 1-based and iteration 0-based on the first pass, for both member nodes.
+    expect(seen.slice(0, 2)).toEqual([
+      { node: 'produce', round: 1, iteration: 0, regionId: 'unbudgeted' },
+      { node: 'decision', round: 1, iteration: 0, regionId: 'unbudgeted' },
+    ]);
+    expect(seen[2]).toEqual({ node: 'produce', round: 2, iteration: 1, regionId: 'unbudgeted' });
   });
 
   it('carries loop feedback across a resume into the region entry node', async () => {
