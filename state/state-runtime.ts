@@ -7,12 +7,21 @@
  */
 
 import type {
+  CheckpointableStorageEngine,
   StorageEngine,
   ExecutionProjection,
   OutputPage,
 } from '../src/types';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
 import { reduce, createEmptyProjection, replayEvents } from './reducer';
+import {
+  buildSnapshot,
+  rebaseSnapshot,
+  validateSnapshot,
+  type ExecutionStateSnapshot,
+  type SnapshotCaptureOptions,
+  type SnapshotRestoreOptions,
+} from './snapshot';
 
 function escapeForLog(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
@@ -34,13 +43,61 @@ export class StateRuntime {
   // -------------------------------------------------------------------------
 
   async handleEvent(event: ExecutionEvent): Promise<void> {
-    const id = event.executionId;
+    await this.withLock(event.executionId, () => this._applyEvent(event));
+  }
 
-    // SYS-1: Serialize events per-execution via promise chain
+  /** SYS-1: serialize work per-execution via a promise chain. */
+  private async withLock<T>(id: string, work: () => T): Promise<T> {
     const prev = this.locks.get(id) ?? Promise.resolve();
-    const next = prev.then(() => this._applyEvent(event));
-    this.locks.set(id, next.catch(() => { /* swallow to keep chain alive */ }));
-    await next;
+    const next = prev.then(work);
+    this.locks.set(id, next.then(() => undefined, () => undefined));
+    return next;
+  }
+
+  /**
+   * Capture an execution's durable event history.
+   *
+   * Takes the same per-execution lock as handleEvent, so the capture cannot interleave with an
+   * in-flight append and claim a sequence whose event is not yet durable. A consumer reading the
+   * log itself has no way to arrange that, which is the whole reason this lives here.
+   */
+  async captureExecutionSnapshot(
+    execId: string,
+    options?: SnapshotCaptureOptions,
+  ): Promise<ExecutionStateSnapshot> {
+    return this.withLock(execId, () =>
+      buildSnapshot(execId, this.storage.readEvents(execId), options));
+  }
+
+  /**
+   * Restore a captured history, optionally under a different execution id.
+   *
+   * Verifies the snapshot before writing anything, replaces the log atomically, then rebuilds
+   * the projection from the restored events so the two cannot disagree. Requires a storage
+   * engine that can replace a log; an append-only engine is rejected rather than silently
+   * appending a second copy of history.
+   */
+  async restoreExecutionSnapshot(
+    snapshot: ExecutionStateSnapshot,
+    options?: SnapshotRestoreOptions,
+  ): Promise<ExecutionProjection> {
+    validateSnapshot(snapshot);
+    const rebased = options === undefined ? snapshot : rebaseSnapshot(snapshot, options);
+    validateSnapshot(rebased);
+
+    const storage = this.storage as Partial<CheckpointableStorageEngine>;
+    if (typeof storage.replaceEvents !== 'function') {
+      throw new Error('Storage engine cannot restore a snapshot: replaceEvents is not implemented');
+    }
+
+    const execId = rebased.executionId;
+    return this.withLock(execId, () => {
+      storage.replaceEvents!(execId, rebased.events);
+      const projection = replayEvents(execId, rebased.events);
+      this.storage.writeProjection(execId, projection);
+      this.cache.set(execId, projection);
+      return projection;
+    });
   }
 
   private _applyEvent(event: ExecutionEvent): void {

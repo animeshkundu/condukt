@@ -23,6 +23,7 @@ export { panelNode } from './panel-node';
  */
 export type { PanelConfig, PanelMember, PanelMemberMeta } from './panel-node';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
+export type { LoopContext } from './types';
 export { verify, property } from './verify';
 export { createHmrSingleton } from './hmr-singleton';
 export { setupOnce, clearSetupCache } from './setup-once';

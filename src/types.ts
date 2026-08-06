@@ -33,11 +33,28 @@ export type ExecutionId = Brand<string, 'ExecutionId'>;
 export type NodeFn = (input: NodeInput, ctx: ExecutionContext) => Promise<NodeOutput>;
 
 /** What every node receives — composition-defined, framework-opaque. */
+/**
+ * Where a node sits in its loop region, for nodes inside one.
+ *
+ * Without this the round number has to be formatted into the feedback string by the graph and
+ * parsed back out by the node, which couples the two through prose. `iteration` counts loop-backs
+ * taken and is 0 on the first pass; `round` is the 1-based human-facing equivalent.
+ */
+export interface LoopContext {
+  readonly regionId: string;
+  readonly iteration: number;
+  readonly round: number;
+  readonly maxRounds?: number;
+  readonly maxIterations?: number;
+}
+
 export interface NodeInput {
   readonly dir: string;
   readonly params: Readonly<Record<string, unknown>>;
   readonly artifactPaths: Readonly<Record<string, string>>;
   readonly retryContext?: RetryContext;
+  /** Present for every node inside a LoopRegion, budgeted or not. */
+  readonly loopContext?: LoopContext;
 }
 
 /** What every node returns — the scheduler handles event emission from this. */
@@ -209,6 +226,13 @@ export interface ResumeState {
   readonly firedEdges: Map<string, Set<string>>; // target → sources that routed there
   readonly nodeStatuses: Map<string, string>;
   readonly loopIterations: Map<string, number>; // source:action → iteration count
+  /**
+   * Loop feedback owed to a re-dispatched node, keyed by node id. Without this a run
+   * interrupted mid-loop resumes with retryContext undefined on the loop entry, so the node
+   * re-runs blind to why the previous round was rejected and any consumer reading the round
+   * out of the feedback silently restarts its count at zero.
+   */
+  readonly loopRetryContexts?: Map<string, RetryContext>;
   readonly readyNodes?: ReadonlySet<string>; // loop reset targets dispatched without a completed source
 }
 
@@ -650,6 +674,16 @@ export interface OutputPage {
   readonly offset: number;
   readonly total: number;
   readonly hasMore: boolean;
+}
+
+/**
+ * A storage engine that can have an execution's whole event log replaced atomically.
+ *
+ * Separate from StorageEngine so an engine with no durable log (MemoryStorage in a test, say)
+ * is not forced to pretend it supports checkpoint restore. Callers feature-detect.
+ */
+export interface CheckpointableStorageEngine extends StorageEngine {
+  replaceEvents(execId: string, events: readonly ExecutionEvent[]): void;
 }
 
 export interface StorageEngine {

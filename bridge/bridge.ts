@@ -572,6 +572,11 @@ function buildResumeState(
 
   // Reconstruct loopIterations from atomic loop routes, with node:reset fallback for old logs.
   const loopIterations = new Map<string, number>();
+  // Loop feedback owed to a node that was mid-loop when the run stopped, keyed by node id. Only
+  // the most recent continuation for a given target counts, so a later round overwrites an
+  // earlier one. Logs written before route:resolved carried feedback simply yield an empty map,
+  // which resumes exactly as it did before.
+  const loopRetryContexts = new Map<string, RetryContext>();
   if (events) {
     const loopRegionsByDecision = new Map(
       (graph.loops ?? []).map(region => [region.decision, region] as const),
@@ -582,6 +587,12 @@ function buildResumeState(
         const current = loopIterations.get(event.loop.key) ?? 0;
         if (event.loop.iteration > current) {
           loopIterations.set(event.loop.key, event.loop.iteration);
+        }
+        if (event.loop.feedbackTarget !== undefined && event.loop.feedback !== undefined) {
+          loopRetryContexts.set(event.loop.feedbackTarget, {
+            priorOutput: null,
+            feedback: event.loop.feedback,
+          });
         }
       } else if (event.type === 'edge:traversed') {
         edgeActions.set(`${event.source}:${event.target}`, event.action);
@@ -607,7 +618,7 @@ function buildResumeState(
     }
   }
 
-  return { completedNodes, firedEdges, nodeStatuses, loopIterations, readyNodes };
+  return { completedNodes, firedEdges, nodeStatuses, loopIterations, loopRetryContexts, readyNodes };
 }
 
 export const _buildResumeStateForTesting = buildResumeState;

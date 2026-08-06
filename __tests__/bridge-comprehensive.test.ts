@@ -1084,6 +1084,74 @@ describe('bridge — resume', () => {
     });
   });
 
+  it('reconstructs loop feedback owed to a node interrupted mid-loop', async () => {
+    // loopIterations alone is not enough to resume a loop faithfully: the entry node also has
+    // feedback owed to it. Without this the node re-runs with retryContext undefined, blind to
+    // why the previous round was rejected, and any consumer parsing the round out of the
+    // feedback silently restarts at zero.
+    const executionId = 'resume-loop-feedback';
+    const graph: FlowGraph = {
+      nodes: {
+        regionEntry: mkEntry(async () => ({ action: 'default' })),
+        regionDecision: mkEntry(async () => ({ action: 'continue' })),
+      },
+      edges: {
+        regionEntry: { default: 'regionDecision' },
+        regionDecision: { continue: 'regionEntry', exit: 'end' },
+      },
+      start: ['regionEntry'],
+      loops: [{
+        id: 'review',
+        nodes: ['regionEntry', 'regionDecision'],
+        entry: 'regionEntry',
+        decision: 'regionDecision',
+        continueOn: 'continue',
+        exitOn: 'exit',
+        maxRounds: 4,
+      }],
+    };
+    const projection: ExecutionProjection = {
+      id: executionId,
+      flowId: '',
+      status: 'stopped',
+      params: {},
+      graph: { nodes: [], edges: [], activeNodes: [], completedPath: [] },
+      totalCost: 0,
+      metadata: {},
+    };
+    const loopRoute = (iteration: number, feedback?: string) => ({
+      type: 'route:resolved' as const,
+      executionId,
+      source: 'regionDecision',
+      action: 'continue',
+      targets: ['regionEntry'],
+      loop: {
+        key: 'region:review',
+        iteration,
+        resetNodes: ['regionEntry', 'regionDecision'],
+        readyTargets: ['regionEntry'],
+        firedTargets: [],
+        clearedEdges: [],
+        ...(feedback === undefined ? {} : { feedbackTarget: 'regionEntry', feedback }),
+      },
+      ts: iteration,
+    });
+
+    // The latest continuation wins, so round 2's feedback supersedes round 1's.
+    const state = _buildResumeStateForTesting(projection, graph, [
+      loopRoute(1, 'attempt 1 of 4'),
+      loopRoute(2, 'attempt 2 of 4'),
+    ]);
+    expect(Object.fromEntries(state.loopRetryContexts ?? new Map())).toEqual({
+      regionEntry: { priorOutput: null, feedback: 'attempt 2 of 4' },
+    });
+
+    // A log written before the feedback fields existed still resumes, just without feedback.
+    const legacy = _buildResumeStateForTesting(projection, graph, [loopRoute(2)]);
+    expect(legacy.loopRetryContexts?.size ?? 0).toBe(0);
+    expect(legacy.loopIterations.get('region:review')).toBe(2);
+  });
+
   it('resume on completed execution throws', async () => {
     await bridge.launch({
       executionId: 'resume-completed',
