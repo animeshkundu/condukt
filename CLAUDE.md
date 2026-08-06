@@ -179,15 +179,39 @@ UI Layer (ui/)
 
 ## Publishing
 
+**Always publish through the `Publish` workflow. Never run `npm publish` by hand.**
+
+The workflow authenticates to npm by OIDC trusted publishing, so no npm credential exists on
+any developer machine. A manual `npm publish` fails with a 401 that reads like a 404
+(`'condukt@x.y.z' could not be found or you do not have permission`), which is easy to misread
+as a packaging problem rather than a missing credential.
+
+**The workflow owns the version.** It runs `npm version <type> --no-git-tag-version` itself and
+commits the bump back to master. Do NOT bump `package.json` in a feature branch: the workflow
+bumps again on top of it, so a hand-written `0.17.0` ships as `0.17.1`, and a consumer pinned to
+the hand-written number is pinned to a version that never existed.
+
 ```bash
-# 1. Bump version in package.json
-# 2. Build and publish
-npm run build && npm publish
-# 3. In taco-helper, update to new version
-cd Q:\Software\investigation\taco-helper && npm update condukt
+# Automatic: merging to master publishes, bump inferred from the commit subject.
+#   feat!: / BREAKING CHANGE -> major
+#   feat:                    -> minor
+#   anything else            -> patch
+#   chore|docs|ci|test|style -> skipped, no publish
+# Explicit: choose the bump yourself.
+gh workflow run publish.yml -R animeshkundu/condukt -f bump=minor
 ```
 
-For local iteration without publishing: `npm run build && npm pack` in condukt, then `npm install ../condukt/condukt-0.x.0.tgz` in taco-helper. Or use `npm link` for fastest feedback.
+Afterwards, consume the version the workflow actually published, not the one you expected:
+
+```bash
+npm view condukt version --registry=https://registry.npmjs.org/
+cd <consumer> && npm install condukt@<that version>   --registry=https://registry.npmjs.org/ --include=dev --save-exact
+```
+
+For local iteration without publishing: `npm run build && npm pack` here, then
+`npm install ../condukt/condukt-<version>.tgz` in the consumer, or `npm link` for the fastest
+loop. A `file:` reference must never be committed -- every consumer workflow runs `npm ci`
+against the registry and would break.
 
 ## Gotchas
 
