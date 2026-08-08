@@ -403,6 +403,31 @@ export interface DefaultAgentConfig {
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
 
+export interface AdvisorConfig {
+  readonly model: string;
+  readonly thinkingBudget?: ThinkingBudget;
+  readonly contextTier?: ContextTier;
+  /** Appended to the advisor's system message. */
+  readonly system?: string;
+  /** Overrides the tool description shown to the calling model. */
+  readonly description?: string;
+  /** Transcript budget in characters; oldest turns are dropped first. Default 200_000. */
+  readonly maxTranscriptChars?: number;
+}
+
+export interface PanelToolConfig {
+  /** Explicit catalogued member models. Mutually exclusive with memberCount. */
+  readonly members?: readonly string[];
+  /** Number of cross-lab members selected from the model catalogue. Default 3. */
+  readonly memberCount?: number;
+  readonly thinkingBudget?: ThinkingBudget;
+  readonly contextTier?: ContextTier;
+  /** Appended to every panel member's system message. */
+  readonly system?: string;
+  /** Overrides the tool description shown to the calling model. */
+  readonly description?: string;
+}
+
 export interface SessionConfig extends SubagentLimits {
   readonly model: string;
   readonly thinkingBudget?: ThinkingBudget;
@@ -414,6 +439,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  readonly advisor?: AdvisorConfig;
+  readonly panel?: PanelToolConfig;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
   readonly mcpServers?: MCPServersOption;
   /** System message to append to the agent's context (SdkBackend only). */
@@ -583,6 +610,8 @@ export interface AgentConfig extends SubagentLimits {
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  readonly advisor?: AdvisorConfig;
+  readonly panel?: PanelToolConfig;
   /**
    * Session MCP servers. A record replaces DEFAULT_MCP_SERVERS; spread the
    * default into a record to extend it. Set false to disable MCP entirely.

@@ -26,14 +26,18 @@ export interface SubagentLimits {
   readonly maxConcurrency?: number;
 }
 
+// Order within a tier is load-bearing: DEFAULT_COMPLEMENTARY_MODEL_PREFERENCE is a spread of
+// these arrays, and resolveComplementaryModel takes the FIRST different-lab entry at or above
+// the source tier. Append a new model at the end of its tier; inserting one earlier silently
+// re-resolves the complement of every model already in the catalog.
 export const MODEL_TIERS = {
   cheap: ['gpt-5.6-luna', 'gemini-3.6-flash'],
-  mid: ['gemini-3.1-pro-preview', 'claude-sonnet-5', 'gpt-5.6-terra'],
+  mid: ['gemini-3.1-pro-preview', 'claude-sonnet-5', 'gpt-5.6-terra', 'grok-4.5'],
   high: ['claude-opus-5', 'gpt-5.6-sol'],
 } as const;
 
 export type ModelTier = keyof typeof MODEL_TIERS;
-export type ModelLab = 'anthropic' | 'google' | 'openai';
+export type ModelLab = 'anthropic' | 'google' | 'openai' | 'xai';
 
 export interface ModelTierDefinition {
   readonly id: string;
@@ -47,6 +51,7 @@ export const MODEL_TIER_CATALOG = [
   { id: MODEL_TIERS.mid[0], lab: 'google', tier: 'mid' },
   { id: MODEL_TIERS.mid[1], lab: 'anthropic', tier: 'mid' },
   { id: MODEL_TIERS.mid[2], lab: 'openai', tier: 'mid' },
+  { id: MODEL_TIERS.mid[3], lab: 'xai', tier: 'mid' },
   { id: MODEL_TIERS.high[0], lab: 'anthropic', tier: 'high' },
   { id: MODEL_TIERS.high[1], lab: 'openai', tier: 'high' },
 ] as const satisfies readonly ModelTierDefinition[];
@@ -210,14 +215,6 @@ export function resolveTieredCustomAgents(
         prompt: 'Review the supplied work independently. Find correctness, security, and maintainability problems without modifying the workspace.',
         tools: READ_ONLY_REPOSITORY_TOOLS,
         model: reviewResolution.resolvedModel,
-      },
-      {
-        name: 'decide',
-        displayName: 'Decide',
-        description: 'Resolve one ambiguity or make one focused judgement call for the driver. Independence from the driver is not required.',
-        prompt: 'Analyze the bounded decision, state the trade-offs, and return one clear recommendation without modifying the workspace.',
-        tools: READ_ONLY_REPOSITORY_TOOLS,
-        model: MODEL_TIERS.high[0],
       },
     ],
     reviewResolution,

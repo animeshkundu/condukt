@@ -189,6 +189,101 @@ describe('panelNode', () => {
     expect(byMember.get('disabled')?.mcpServers).toBe(false);
   });
 
+  // A panel judges what `reads` hands it. Without this, a member is a full producer with
+  // the backend's whole tool set and the node's working directory, so a reviewer can spend
+  // its entire timeout editing the candidate instead of returning a verdict. `[]` has to
+  // survive intact: the SDK enables a tool when it matches `availableTools` OR
+  // `availableTools` is unset, so collapsing the empty array to undefined grants everything.
+  it('passes the panel tool set to members, and lets a member replace it', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const captured: SessionConfig[] = [];
+    const runtime: AgentRuntime = {
+      name: 'panel-tools-runtime',
+      createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
+        captured.push(sessionConfig);
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) {
+              handler(sessionConfig.memberId ?? 'member');
+            }
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = panelNode({
+      prompt: 'Vote',
+      tools: [],
+      members: [
+        { id: 'toolless', model: 'toolless-model' },
+        { id: 'reader', model: 'reader-model', tools: ['view'] },
+      ],
+      reconcile: (verdicts: readonly string[]) => verdicts.join(','),
+    });
+    const context: ExecutionContext = {
+      executionId: 'panel-tools',
+      nodeId: 'panel',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    const byMember = new Map(captured.map((config) => [config.memberId, config]));
+    expect(byMember.get('toolless')?.availableTools).toEqual([]);
+    expect(byMember.get('reader')?.availableTools).toEqual(['view']);
+  });
+
+  it('leaves availableTools unset when the panel declares no tool set', async () => {
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const captured: SessionConfig[] = [];
+    const runtime: AgentRuntime = {
+      name: 'panel-tools-default-runtime',
+      createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
+        captured.push(sessionConfig);
+        const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+        return {
+          pid: null,
+          send: () => queueMicrotask(() => {
+            for (const handler of handlers.get('text') ?? []) handler('done');
+            for (const handler of handlers.get('idle') ?? []) handler();
+          }),
+          on: (event: string, handler: (...args: unknown[]) => void) => {
+            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+          },
+          abort: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AgentSession;
+      }),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const entry = panelNode({
+      prompt: 'Vote',
+      members: [{ id: 'default', model: 'default-model' }],
+      reconcile: (verdicts: readonly string[]) => verdicts.join(','),
+    });
+    const context: ExecutionContext = {
+      executionId: 'panel-tools-default',
+      nodeId: 'panel',
+      runtime,
+      emitOutput: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await entry.fn({ dir, params: {}, artifactPaths: {} }, context);
+
+    expect(captured[0]?.availableTools).toBeUndefined();
+  });
+
   it('reconciles a three-member fixture sequence, routes, and writes JSON', async () => {
     const dir = createTmpDir();
     dirs.push(dir);

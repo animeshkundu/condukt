@@ -9,6 +9,7 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
+import type { AdvisorConfig, PanelToolConfig } from '../../src/types';
 import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
 export interface MCPServerConfig {
@@ -50,6 +51,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly contextTier?: 'default' | 'long_context';
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  readonly advisor?: AdvisorConfig;
+  readonly panel?: PanelToolConfig;
   /** MCP server configurations for the root session, or false to disable them. */
   readonly mcpServers?: Readonly<Record<string, MCPServerConfig>> | false;
   /** Working directory for the agent (repo root) */

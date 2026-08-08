@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { agent } from './agent';
 import type {
+  AdvisorConfig,
+  PanelToolConfig,
   CompactionMode,
   ContextTier,
   ExecutionContext,
@@ -71,6 +73,8 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
   readonly compactionMode?: CompactionMode;
+  readonly advisor?: AdvisorConfig;
+  readonly panel?: PanelToolConfig;
   /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
   readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
@@ -444,6 +448,8 @@ export async function produce<T>(
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
     compactionMode: config.compactionMode,
+    advisor: config.advisor,
+    panel: config.panel,
     mcpServers: config.mcpServers,
     isolation: config.isolation,
     timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,

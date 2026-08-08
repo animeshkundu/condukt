@@ -47,7 +47,7 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
       // field SdkBackend consumes; systemMessage (role instructions + any
       // response schema), the tool filters, and the context tier must reach the
       // backend or the agent runs on the default persona with no system prompt.
-      const copilotConfig = {
+      const copilotConfig: import('./copilot-backend').SessionConfig = {
         model: config.model,
         ...(config.thinkingBudget !== undefined
           ? { thinkingBudget: config.thinkingBudget }
@@ -61,6 +61,12 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
           : {}),
         ...(config.compactionMode !== undefined
           ? { compactionMode: config.compactionMode }
+          : {}),
+        ...(config.advisor !== undefined
+          ? { advisor: config.advisor }
+          : {}),
+        ...(config.panel !== undefined
+          ? { panel: config.panel }
           : {}),
         ...(config.mcpServers !== undefined
           ? { mcpServers: config.mcpServers }

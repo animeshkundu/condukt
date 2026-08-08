@@ -56,6 +56,8 @@ interface MockModelInfo {
 
 interface MockSdkSession {
   send: ReturnType<typeof vi.fn>;
+  sendAndWait: ReturnType<typeof vi.fn>;
+  getEvents: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
   rpc: {
@@ -90,6 +92,11 @@ function createMockSdkSession(): MockSdkSession {
 
   const session: MockSdkSession = {
     send: vi.fn().mockResolvedValue(undefined),
+    sendAndWait: vi.fn().mockResolvedValue({
+      type: 'assistant.message',
+      data: { content: 'advisor response' },
+    }),
+    getEvents: vi.fn().mockResolvedValue([]),
     abort: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: {
@@ -449,6 +456,456 @@ describe('SdkBackend event mapping', () => {
       expect(classifySdkEvent(phantom), phantom).toBeUndefined();
     }
   });
+  it('registers the advisor tool only when configured', async () => {
+    const withoutAdvisor = await createTestSession();
+    withoutAdvisor.session.send('plain prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('tools');
+
+    mockCreateSession.mockClear();
+    mockSdkSession = createMockSdkSession();
+    mockSdkSessions = [mockSdkSession];
+    const withAdvisor = await createTestSession({}, {
+      advisor: { model: 'advisor-model' },
+    });
+    withAdvisor.session.send('advised prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0];
+    const tools = config?.tools as Array<{
+      readonly name: string;
+      readonly skipPermission?: boolean;
+      readonly defer?: string;
+    }> | undefined;
+    expect(tools).toHaveLength(1);
+    expect(tools?.[0]).toEqual(expect.objectContaining({
+      name: 'advisor',
+      skipPermission: true,
+      defer: 'never',
+    }));
+  });
+
+  it('creates a toolless non-recursive advisor session', async () => {
+    const caller = createMockSdkSession();
+    const advised = createMockSdkSession();
+    caller.getEvents.mockResolvedValue([
+      { type: 'user.message', data: { content: 'Review this approach' } },
+      { type: 'assistant.message', data: { content: 'Proposed approach' } },
+    ]);
+    advised.sendAndWait.mockResolvedValue({
+      type: 'assistant.message',
+      data: { content: 'Change the approach' },
+    });
+    mockSdkSessions = [caller, advised];
+
+    const { session } = await createTestSession({}, {
+      advisor: {
+        model: 'advisor-model',
+        thinkingBudget: 'xhigh',
+        contextTier: 'long_context',
+      },
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const rootConfig = mockCreateSession.mock.calls[0]?.[0];
+    const tool = (rootConfig?.tools as Array<{
+      readonly handler: (args: { readonly context?: string }) => Promise<unknown>;
+    }>)[0];
+
+    await expect(tool.handler({ context: 'Focus on correctness.' }))
+      .resolves.toBe('Change the approach');
+    expect(mockCreateSession).toHaveBeenCalledTimes(2);
+    expect(mockCreateSession.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      model: 'advisor-model',
+      reasoningEffort: 'xhigh',
+      contextTier: 'long_context',
+      tools: [],
+      availableTools: [],
+      excludedTools: ['task'],
+      customAgents: [],
+      mcpServers: {},
+      enableConfigDiscovery: false,
+    }));
+    const advisorConfig = mockCreateSession.mock.calls[1]?.[0];
+    expect(advisorConfig).not.toHaveProperty('advisor');
+    expect(advisorConfig).not.toHaveProperty('subagentRoster');
+    expect(advised.abort).toHaveBeenCalledOnce();
+    expect(advised.disconnect).toHaveBeenCalledOnce();
+    expect(caller.abort).not.toHaveBeenCalled();
+  });
+
+  it('drops the oldest transcript entries within the configured character budget', async () => {
+    const caller = createMockSdkSession();
+    const advised = createMockSdkSession();
+    caller.getEvents.mockResolvedValue([
+      { type: 'user.message', data: { content: `old-${'x'.repeat(40)}` } },
+      { type: 'assistant.message', data: { content: `middle-${'y'.repeat(40)}` } },
+      { type: 'user.message', data: { content: `new-${'z'.repeat(40)}` } },
+    ]);
+    mockSdkSessions = [caller, advised];
+
+    const { session } = await createTestSession({}, {
+      advisor: { model: 'advisor-model', maxTranscriptChars: 100 },
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly handler: (args: {}) => Promise<unknown>;
+    }>)[0];
+    await tool.handler({});
+
+    const advisorPrompt = advised.sendAndWait.mock.calls[0]?.[0].prompt as string;
+    const transcript = advisorPrompt.split('CALLING SESSION TRANSCRIPT\n')[1] ?? '';
+    expect(transcript.length).toBeLessThanOrEqual(100);
+    expect(transcript).toContain('new-');
+    expect(transcript).not.toContain('old-');
+    expect(transcript).toMatch(/oldest transcript turns omitted/);
+  });
+
+  it('clips one oversized newest turn without claiming that it was omitted', async () => {
+    const caller = createMockSdkSession();
+    const advised = createMockSdkSession();
+    caller.getEvents.mockResolvedValue([
+      { type: 'user.message', data: { content: 'x'.repeat(200) } },
+    ]);
+    mockSdkSessions = [caller, advised];
+
+    const { session } = await createTestSession({}, {
+      advisor: { model: 'advisor-model', maxTranscriptChars: 80 },
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly handler: (args: {}) => Promise<unknown>;
+    }>)[0];
+    await tool.handler({});
+
+    const advisorPrompt = advised.sendAndWait.mock.calls[0]?.[0].prompt as string;
+    const transcript = advisorPrompt.split('CALLING SESSION TRANSCRIPT\n')[1] ?? '';
+    expect(transcript.length).toBeLessThanOrEqual(80);
+    expect(transcript).toContain('Newest transcript turn clipped');
+    expect(transcript).not.toContain('oldest transcript turns omitted');
+  });
+
+  it('returns a short string when the advisor handler fails', async () => {
+    const caller = createMockSdkSession();
+    caller.getEvents.mockRejectedValue(new Error('history lookup failed'));
+    mockSdkSessions = [caller];
+
+    const { session } = await createTestSession({}, {
+      advisor: { model: 'advisor-model' },
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly handler: (args: {}) => Promise<unknown>;
+    }>)[0];
+
+    await expect(tool.handler({})).resolves.toBe(
+      'Advisor unavailable: history lookup failed',
+    );
+    expect(mockCreateSession).toHaveBeenCalledOnce();
+  });
+
+  it('registers the panel tool only when configured', async () => {
+    const withoutPanel = await createTestSession();
+    withoutPanel.session.send('plain prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('tools');
+
+    mockCreateSession.mockClear();
+    mockSdkSession = createMockSdkSession();
+    mockSdkSessions = [mockSdkSession];
+    const withPanel = await createTestSession({}, {
+      panel: { memberCount: 3 },
+    });
+    withPanel.session.send('panel prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const tools = mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly skipPermission?: boolean;
+      readonly defer?: string;
+    }> | undefined;
+    expect(tools).toHaveLength(1);
+    expect(tools?.[0]).toEqual(expect.objectContaining({
+      name: 'panel',
+      skipPermission: true,
+      defer: 'never',
+    }));
+  });
+
+  it('creates toolless non-recursive panel member sessions', async () => {
+    const caller = createMockSdkSession();
+    const children = Array.from({ length: 4 }, () => createMockSdkSession());
+    const responses = [
+      { ranking: ['A', 'B'], reasoning: 'blind A', needMoreInfo: false },
+      { ranking: ['B', 'A'], reasoning: 'blind B', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed A', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed B', needMoreInfo: false },
+    ];
+    for (const [index, child] of children.entries()) {
+      child.sendAndWait.mockResolvedValue({
+        type: 'assistant.message',
+        data: { content: JSON.stringify(responses[index]) },
+      });
+    }
+    mockSdkSessions = [caller, ...children];
+
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+
+    await tool.handler({
+      decision: 'Choose a path',
+      options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
+      context: 'Only supplied context',
+    });
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(5);
+    for (const [childConfig] of mockCreateSession.mock.calls.slice(1)) {
+      expect(childConfig).toEqual(expect.objectContaining({
+        tools: [],
+        availableTools: [],
+        excludedTools: ['task'],
+        customAgents: [],
+        mcpServers: {},
+        enableConfigDiscovery: false,
+      }));
+      expect(childConfig).not.toHaveProperty('advisor');
+      expect(childConfig).not.toHaveProperty('panel');
+      expect(childConfig).not.toHaveProperty('subagentRoster');
+    }
+  });
+
+  it('passes only caller-supplied decision context into cold-start panel prompts', async () => {
+    const caller = createMockSdkSession();
+    caller.getEvents.mockResolvedValue([
+      { type: 'user.message', data: { content: 'PRIVATE CALLER HISTORY SENTINEL' } },
+    ]);
+    const children = Array.from({ length: 4 }, () => createMockSdkSession());
+    for (const [index, child] of children.entries()) {
+      child.sendAndWait.mockResolvedValue({
+        type: 'assistant.message',
+        data: {
+          content: JSON.stringify({
+            ranking: ['keep', 'change'],
+            reasoning: `member ${index}`,
+            needMoreInfo: false,
+          }),
+        },
+      });
+    }
+    mockSdkSessions = [caller, ...children];
+
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('PRIVATE ROOT PROMPT SENTINEL');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+
+    await tool.handler({
+      decision: 'Keep or change?',
+      options: [
+        { id: 'keep', summary: 'Keep the current design' },
+        { id: 'change', summary: 'Change it' },
+      ],
+      context: 'PUBLIC PANEL CONTEXT SENTINEL',
+    });
+
+    expect(caller.getEvents).not.toHaveBeenCalled();
+    for (const child of children) {
+      const prompt = child.sendAndWait.mock.calls[0]?.[0].prompt as string;
+      expect(prompt).toContain('Keep or change?');
+      expect(prompt).toContain('Keep the current design');
+      expect(prompt).toContain('PUBLIC PANEL CONTEXT SENTINEL');
+      expect(prompt).not.toContain('PRIVATE CALLER HISTORY SENTINEL');
+      expect(prompt).not.toContain('PRIVATE ROOT PROMPT SENTINEL');
+    }
+  });
+
+  it.each([1, 7])('rejects an option count of %i with a message', async (optionCount) => {
+    const caller = createMockSdkSession();
+    mockSdkSessions = [caller];
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+    const options = Array.from({ length: optionCount }, (_, index) => ({
+      id: `option-${index}`,
+      summary: `Option ${index}`,
+    }));
+
+    await expect(tool.handler({ decision: 'Choose', options, context: 'Context' }))
+      .resolves.toMatch(/^Panel unavailable: options must contain between 2 and 6 items/);
+    expect(mockCreateSession).toHaveBeenCalledOnce();
+  });
+
+  it('runs blind and informed panel rounds with anonymized first-round answers', async () => {
+    const caller = createMockSdkSession();
+    const children = Array.from({ length: 4 }, () => createMockSdkSession());
+    const responses = [
+      { ranking: ['A', 'B'], reasoning: 'blind-alpha', needMoreInfo: false },
+      { ranking: ['B', 'A'], reasoning: 'blind-beta', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed-alpha', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed-beta', needMoreInfo: false },
+    ];
+    for (const [index, child] of children.entries()) {
+      child.sendAndWait.mockResolvedValue({
+        type: 'assistant.message',
+        data: { content: JSON.stringify(responses[index]) },
+      });
+    }
+    mockSdkSessions = [caller, ...children];
+
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+
+    const output = await tool.handler({
+      decision: 'Choose',
+      options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
+      context: 'Context',
+    });
+
+    expect(children[0]?.sendAndWait).toHaveBeenCalledOnce();
+    expect(children[1]?.sendAndWait).toHaveBeenCalledOnce();
+    const informedPromptA = children[2]?.sendAndWait.mock.calls[0]?.[0].prompt as string;
+    const informedPromptB = children[3]?.sendAndWait.mock.calls[0]?.[0].prompt as string;
+    for (const prompt of [informedPromptA, informedPromptB]) {
+      expect(prompt).toContain('blind-alpha');
+      expect(prompt).toContain('blind-beta');
+      expect(prompt).toContain('member-1');
+      expect(prompt).toContain('member-2');
+      expect(prompt).not.toContain('gpt-5.6-sol');
+      expect(prompt).not.toContain('claude-opus-5');
+    }
+    expect(JSON.parse(String(output))).toEqual(expect.objectContaining({
+      status: 'consensus',
+      winningOptionId: 'A',
+      members: expect.arrayContaining([
+        expect.objectContaining({ reasoning: 'informed-alpha' }),
+        expect.objectContaining({ reasoning: 'informed-beta' }),
+      ]),
+    }));
+  });
+
+  it('requires two successful members in each panel round', async () => {
+    const caller = createMockSdkSession();
+    const blindSuccess = createMockSdkSession();
+    const blindFailure = createMockSdkSession();
+    blindSuccess.sendAndWait.mockResolvedValue({
+      type: 'assistant.message',
+      data: {
+        content: JSON.stringify({
+          ranking: ['A', 'B'],
+          reasoning: 'only survivor',
+          needMoreInfo: false,
+        }),
+      },
+    });
+    blindFailure.sendAndWait.mockRejectedValue(new Error('blind failure'));
+    mockSdkSessions = [caller, blindSuccess, blindFailure];
+
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+
+    await expect(tool.handler({
+      decision: 'Choose',
+      options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
+      context: 'Context',
+    })).resolves.toBe(
+      'Panel unavailable: fewer than two blind-round members succeeded',
+    );
+    expect(mockCreateSession).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns a bounded string when the panel handler fails', async () => {
+    const caller = createMockSdkSession();
+    const failedA = createMockSdkSession();
+    const failedB = createMockSdkSession();
+    failedA.sendAndWait.mockRejectedValue(new Error(`first failure ${'x'.repeat(500)}`));
+    failedB.sendAndWait.mockRejectedValue(new Error('second failure'));
+    mockSdkSessions = [caller, failedA, failedB];
+
+    const { session } = await createTestSession({}, {
+      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'panel');
+    if (tool === undefined) throw new Error('Panel tool was not registered');
+
+    const result = await tool.handler({
+      decision: 'Choose',
+      options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
+      context: 'Context',
+    });
+
+    expect(result).toMatch(/^Panel unavailable:/);
+    expect(String(result).length).toBeLessThanOrEqual(260);
+  });
+
   it('defaults to stock compaction and bootstraps adaptive headroom from exact fixed overhead when opted in', async () => {
     const logger = createMockLogger();
     const { session, mock } = await createTestSession({ logger }, {
@@ -1852,7 +2309,6 @@ describe('SdkBackend event mapping', () => {
           expect.objectContaining({ name: 'implement', model: 'gpt-5.6-terra' }),
           expect.objectContaining({ name: 'verify', model: 'claude-sonnet-5' }),
           expect.objectContaining({ name: 'review', model: 'claude-opus-5' }),
-          expect.objectContaining({ name: 'decide', model: 'claude-opus-5' }),
         ],
         defaultAgent: { excludedTools: ['task'] },
         excludedBuiltinAgents: ['explore', 'research'],
@@ -1861,7 +2317,7 @@ describe('SdkBackend event mapping', () => {
     const config = mockCreateSession.mock.calls[0]?.[0] as {
       readonly customAgents: readonly Record<string, unknown>[];
     };
-    expect(config.customAgents).toHaveLength(6);
+    expect(config.customAgents).toHaveLength(5);
     expect(config.customAgents).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'extra' }),
     ]));

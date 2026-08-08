@@ -39,6 +39,7 @@ import type {
   RetryPolicy,
   SubagentRosterOption,
   ThinkingBudget,
+  ToolRef,
 } from './types';
 
 export interface PanelMember {
@@ -49,6 +50,11 @@ export interface PanelMember {
   readonly compactionMode?: CompactionMode;
   /** Replaces the panel MCP set for this member; false disables MCP. */
   readonly mcpServers?: MCPServersOption;
+  /**
+   * Replaces the panel tool set for this member. An empty array grants no tools at
+   * all, which is how a member is confined to judging what `reads` hands it.
+   */
+  readonly tools?: readonly ToolRef[] | readonly string[];
   readonly system?: string;
   readonly id?: string;
 }
@@ -81,6 +87,12 @@ export interface PanelConfig<T, V = unknown> extends SubagentLimits {
   readonly compactionMode?: CompactionMode;
   /** Replaces DEFAULT_MCP_SERVERS; members may override or disable it. */
   readonly mcpServers?: MCPServersOption;
+  /**
+   * Tools every member may call, unless the member replaces it. Omit to take the
+   * backend default, which is every tool the session offers. Pass `[]` for a panel
+   * that judges only what `reads` supplies and cannot touch the workspace.
+   */
+  readonly tools?: readonly ToolRef[] | readonly string[];
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_PANEL_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
@@ -114,6 +126,7 @@ async function runMember<T, V>(
     contextTier: member.contextTier ?? config.contextTier ?? DEFAULT_CONTEXT_TIER,
     compactionMode: member.compactionMode ?? config.compactionMode,
     mcpServers: member.mcpServers ?? config.mcpServers,
+    tools: member.tools ?? config.tools,
     system: member.system,
     output: memberOutput,
     timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,

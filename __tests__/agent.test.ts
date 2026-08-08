@@ -176,6 +176,8 @@ describe('agent factory', () => {
         thinkingBudget: 'high',
         contextTier: 'long_context',
         compactionMode: undefined,
+        advisor: undefined,
+        panel: undefined,
         cwd: '/tmp/test-agent',
         addDirs: ['/tmp/test-agent'],
         timeout: 1800,
@@ -195,6 +197,32 @@ describe('agent factory', () => {
         memberId: undefined,
         artifactFilename: undefined,
       },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
+  it('forwards advisor and panel configuration to the session', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    const advisor = {
+      model: 'advisor-model',
+      thinkingBudget: 'xhigh' as const,
+      maxTranscriptChars: 12_000,
+    };
+    const panel = {
+      memberCount: 3,
+      thinkingBudget: 'high' as const,
+    };
+    await agent({
+      promptBuilder: () => 'test prompt',
+      advisor,
+      panel,
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ advisor, panel }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

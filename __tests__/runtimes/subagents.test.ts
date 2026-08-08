@@ -254,10 +254,10 @@ describe('Copilot subagent roster', () => {
     }
   });
 
-  it('defines exactly six routed custom agents at their intended tiers and context policy', () => {
+  it('defines exactly five routed custom agents at their intended tiers and context policy', () => {
     const resolved = resolveTieredCustomAgents('gpt-5.6-sol');
     expect(resolved.agents.map(agent => agent.name)).toEqual([
-      'explore', 'research', 'implement', 'verify', 'review', 'decide',
+      'explore', 'research', 'implement', 'verify', 'review',
     ]);
     expect(Object.fromEntries(resolved.agents.map(agent => [agent.name, agent.model]))).toEqual({
       explore: 'gemini-3.6-flash',
@@ -265,9 +265,8 @@ describe('Copilot subagent roster', () => {
       implement: 'gpt-5.6-terra',
       verify: 'claude-sonnet-5',
       review: 'claude-opus-5',
-      decide: 'claude-opus-5',
     });
-    for (const name of ['explore', 'research', 'review', 'decide']) {
+    for (const name of ['explore', 'research', 'review']) {
       expect(resolved.agents.find(agent => agent.name === name)?.tools, `${name} tools`)
         .not.toContain('apply_patch');
       expect(resolved.agents.find(agent => agent.name === name)?.tools, `${name} tools`)
@@ -286,6 +285,31 @@ describe('Copilot subagent roster', () => {
         tierRank[resolution.complement?.tier ?? 'cheap'],
         `${source.id} complement must not downgrade`,
       ).toBeGreaterThanOrEqual(tierRank[source.tier]);
+    }
+  });
+
+  // Pinned, not derived. DEFAULT_COMPLEMENTARY_MODEL_PREFERENCE is a spread of MODEL_TIERS in
+  // order, and resolveComplementaryModel takes the first different-lab entry at or above the
+  // source tier -- so inserting a model anywhere but the end of its tier silently re-resolves
+  // the complement of models that were already correct. The catalogue-wide test above only
+  // asserts each resolution is cross-lab and not a downgrade, which a perturbed order still
+  // satisfies. This table is what actually fails when the order moves.
+  it('keeps every complement resolution stable as the catalogue grows', () => {
+    const expected: ReadonlyArray<readonly [string, string]> = [
+      ['gpt-5.6-luna', 'gemini-3.6-flash'],
+      ['gemini-3.6-flash', 'gpt-5.6-luna'],
+      ['gemini-3.1-pro-preview', 'claude-sonnet-5'],
+      ['claude-sonnet-5', 'gemini-3.1-pro-preview'],
+      ['gpt-5.6-terra', 'gemini-3.1-pro-preview'],
+      ['grok-4.5', 'gemini-3.1-pro-preview'],
+      ['claude-opus-5', 'gpt-5.6-sol'],
+      ['gpt-5.6-sol', 'claude-opus-5'],
+    ];
+
+    expect(MODEL_TIER_CATALOG.map((model) => model.id)).toEqual(expected.map(([id]) => id));
+    for (const [source, complement] of expected) {
+      expect(resolveComplementaryModel(source).resolvedModel, `${source} complement`)
+        .toBe(complement);
     }
   });
 
