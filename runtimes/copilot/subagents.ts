@@ -169,7 +169,14 @@ export function resolveSubagentRosterModels(
   return { roster: resolvedRoster, resolutions };
 }
 
-const READ_ONLY_REPOSITORY_TOOLS = ['view', 'rg', 'glob'] as const;
+// The content-search tool is named `grep`, not `rg`. `availableTools` is an allowlist matched
+// against names the runtime registered, and an unrecognised entry is dropped silently rather
+// than rejected -- so `rg` bought nothing and the explore, research and review sub-agents ran
+// able to list and read files but unable to search inside them.
+//
+// Measured, not guessed: a session given ['view', 'rg', 'glob'] reported exactly ["view",
+// "glob"], while sessions with the default set reported `grep` and never `rg`.
+const READ_ONLY_REPOSITORY_TOOLS = ['view', 'grep', 'glob'] as const;
 
 export function resolveTieredCustomAgents(
   sessionModel: string,

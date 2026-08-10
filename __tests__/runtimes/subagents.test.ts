@@ -274,6 +274,29 @@ describe('Copilot subagent roster', () => {
     }
   });
 
+  // availableTools is an allowlist matched against names the runtime registered, and an entry it
+  // does not recognise is dropped silently rather than rejected. `rg` was such an entry: these
+  // three read-only agents could list and read files but not search inside them, with nothing to
+  // indicate it. A session handed ['view','rg','glob'] reported back exactly ["view","glob"].
+  //
+  // Asserting the exact set rather than "contains a search tool" is the point -- a typo here is
+  // invisible at runtime, so the only place it can be caught is a pin.
+  it('gives the read-only agents a search tool the runtime actually registers', () => {
+    const resolved = resolveTieredCustomAgents('gpt-5.6-sol');
+
+    for (const name of ['explore', 'review']) {
+      expect(resolved.agents.find(agent => agent.name === name)?.tools, `${name} tools`)
+        .toEqual(['view', 'grep', 'glob']);
+    }
+    // research additionally reaches external sources.
+    expect(resolved.agents.find(agent => agent.name === 'research')?.tools)
+      .toEqual(['view', 'grep', 'glob', 'web_fetch']);
+    for (const agent of resolved.agents) {
+      expect(agent.tools ?? [], `${agent.name} must not name the non-existent rg tool`)
+        .not.toContain('rg');
+    }
+  });
+
   it('resolves every catalogued model to a cross-lab complement without downgrading', () => {
     const tierRank: Readonly<Record<ModelTier, number>> = { cheap: 0, mid: 1, high: 2 };
 
