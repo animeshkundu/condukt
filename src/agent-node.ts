@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { agent } from './agent';
 import type {
   AdvisorConfig,
-  PanelToolConfig,
+  StandInConfig,
   CompactionMode,
   ContextTier,
   ExecutionContext,
@@ -76,7 +76,7 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly compactionMode?: CompactionMode;
   readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
-  readonly panel?: PanelToolConfig;
+  readonly standIn?: StandInConfig;
   /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
   readonly mcpServers?: MCPServersOption;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
@@ -88,7 +88,7 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly subagentRoster?: SubagentRosterOption;
   readonly defaultAgent?: DefaultAgentConfig;
   readonly excludedBuiltinAgents?: readonly string[];
-  /** Runtime-only identifier used to distinguish concurrent panel members. */
+  /** Runtime-only identifier used to distinguish concurrent quorum members. */
   readonly memberId?: string;
   readonly route?: (result: T) => string;
   readonly fallback?: (raw: string, error: Error) => T;
@@ -452,7 +452,7 @@ export async function produce<T>(
     compactionMode: config.compactionMode,
     mode: config.mode,
     advisor: config.advisor,
-    panel: config.panel,
+    standIn: config.standIn,
     mcpServers: config.mcpServers,
     isolation: config.isolation,
     timeout: config.timeout ?? DEFAULT_AGENT_TIMEOUT_SECS,

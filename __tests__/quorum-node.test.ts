@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { dryRun, panelNode } from '../src';
+import { dryRun, quorumNode } from '../src';
 import type {
   AgentRuntime,
   AgentSession,
@@ -21,7 +21,7 @@ interface Decision {
 }
 
 function createTmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'condukt-panel-node-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'condukt-quorum-node-'));
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -39,7 +39,7 @@ function majority(verdicts: readonly Vote[]): Decision {
     counts.set(verdict.choice, (counts.get(verdict.choice) ?? 0) + 1);
   }
   const choice = [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
-  if (!choice) throw new Error('Cannot reconcile an empty panel');
+  if (!choice) throw new Error('Cannot reconcile an empty quorum');
   return { choice };
 }
 
@@ -56,7 +56,7 @@ const members = [
   { id: 'peer-b', model: 'peer-b-model' },
 ] as const;
 
-describe('panelNode', () => {
+describe('quorumNode', () => {
   const dirs: string[] = [];
 
   afterEach(() => {
@@ -66,14 +66,14 @@ describe('panelNode', () => {
   });
 
   it.each([
-    { name: 'uses the panel default', timeout: undefined, expected: 3 * 60 * 60 },
+    { name: 'uses the quorum default', timeout: undefined, expected: 3 * 60 * 60 },
     { name: 'preserves an explicit timeout', timeout: 37, expected: 37 },
   ])('$name', async ({ timeout, expected }) => {
     const dir = createTmpDir();
     dirs.push(dir);
     const captured: SessionConfig[] = [];
     const runtime: AgentRuntime = {
-      name: 'panel-timeout-runtime',
+      name: 'quorum-timeout-runtime',
       createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
         captured.push(sessionConfig);
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -91,15 +91,15 @@ describe('panelNode', () => {
       }),
       isAvailable: vi.fn().mockResolvedValue(true),
     };
-    const entry = panelNode({
+    const entry = quorumNode({
       prompt: 'Review',
       members: [{ model: 'reviewer' }],
       reconcile: (verdicts: readonly string[]) => verdicts.join(','),
       ...(timeout === undefined ? {} : { timeout }),
     });
     const context: ExecutionContext = {
-      executionId: 'panel-timeout',
-      nodeId: 'panel',
+      executionId: 'quorum-timeout',
+      nodeId: 'quorum',
       runtime,
       emitOutput: vi.fn(),
       signal: new AbortController().signal,
@@ -112,12 +112,12 @@ describe('panelNode', () => {
     expect(captured[0]?.timeout).toBe(expected);
   });
 
-  it('applies panel context, effort, and MCP defaults while member values take precedence', async () => {
+  it('applies quorum context, effort, and MCP defaults while member values take precedence', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const captured: SessionConfig[] = [];
     const runtime: AgentRuntime = {
-      name: 'panel-config-runtime',
+      name: 'quorum-config-runtime',
       createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
         captured.push(sessionConfig);
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -137,12 +137,12 @@ describe('panelNode', () => {
       }),
       isAvailable: vi.fn().mockResolvedValue(true),
     };
-    const entry = panelNode({
+    const entry = quorumNode({
       prompt: 'Vote',
       contextTier: 'long_context',
       thinkingBudget: 'high',
       mcpServers: {
-        panel: { command: 'panel-mcp' },
+        quorum: { command: 'quorum-mcp' },
       },
       members: [
         { id: 'inherited', model: 'inherited-model' },
@@ -164,8 +164,8 @@ describe('panelNode', () => {
       reconcile: (verdicts: readonly string[]) => verdicts.join(','),
     });
     const context: ExecutionContext = {
-      executionId: 'panel-config',
-      nodeId: 'panel',
+      executionId: 'quorum-config',
+      nodeId: 'quorum',
       runtime,
       emitOutput: vi.fn(),
       signal: new AbortController().signal,
@@ -178,7 +178,7 @@ describe('panelNode', () => {
       model: 'inherited-model',
       contextTier: 'long_context',
       thinkingBudget: 'high',
-      mcpServers: { panel: { command: 'panel-mcp' } },
+      mcpServers: { quorum: { command: 'quorum-mcp' } },
     }));
     expect(byMember.get('overridden')).toEqual(expect.objectContaining({
       model: 'overridden-model',
@@ -189,17 +189,17 @@ describe('panelNode', () => {
     expect(byMember.get('disabled')?.mcpServers).toBe(false);
   });
 
-  // A panel judges what `reads` hands it. Without this, a member is a full producer with
+  // A quorum judges what `reads` hands it. Without this, a member is a full producer with
   // the backend's whole tool set and the node's working directory, so a reviewer can spend
   // its entire timeout editing the candidate instead of returning a verdict. `[]` has to
   // survive intact: the SDK enables a tool when it matches `availableTools` OR
   // `availableTools` is unset, so collapsing the empty array to undefined grants everything.
-  it('passes the panel tool set to members, and lets a member replace it', async () => {
+  it('passes the quorum tool set to members, and lets a member replace it', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const captured: SessionConfig[] = [];
     const runtime: AgentRuntime = {
-      name: 'panel-tools-runtime',
+      name: 'quorum-tools-runtime',
       createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
         captured.push(sessionConfig);
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -219,7 +219,7 @@ describe('panelNode', () => {
       }),
       isAvailable: vi.fn().mockResolvedValue(true),
     };
-    const entry = panelNode({
+    const entry = quorumNode({
       prompt: 'Vote',
       tools: [],
       members: [
@@ -229,8 +229,8 @@ describe('panelNode', () => {
       reconcile: (verdicts: readonly string[]) => verdicts.join(','),
     });
     const context: ExecutionContext = {
-      executionId: 'panel-tools',
-      nodeId: 'panel',
+      executionId: 'quorum-tools',
+      nodeId: 'quorum',
       runtime,
       emitOutput: vi.fn(),
       signal: new AbortController().signal,
@@ -243,12 +243,12 @@ describe('panelNode', () => {
     expect(byMember.get('reader')?.availableTools).toEqual(['view']);
   });
 
-  it('leaves availableTools unset when the panel declares no tool set', async () => {
+  it('leaves availableTools unset when the quorum declares no tool set', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const captured: SessionConfig[] = [];
     const runtime: AgentRuntime = {
-      name: 'panel-tools-default-runtime',
+      name: 'quorum-tools-default-runtime',
       createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
         captured.push(sessionConfig);
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -266,14 +266,14 @@ describe('panelNode', () => {
       }),
       isAvailable: vi.fn().mockResolvedValue(true),
     };
-    const entry = panelNode({
+    const entry = quorumNode({
       prompt: 'Vote',
       members: [{ id: 'default', model: 'default-model' }],
       reconcile: (verdicts: readonly string[]) => verdicts.join(','),
     });
     const context: ExecutionContext = {
-      executionId: 'panel-tools-default',
-      nodeId: 'panel',
+      executionId: 'quorum-tools-default',
+      nodeId: 'quorum',
       runtime,
       emitOutput: vi.fn(),
       signal: new AbortController().signal,
@@ -289,7 +289,7 @@ describe('panelNode', () => {
     dirs.push(dir);
     const graph: FlowGraph = {
       nodes: {
-        panel: panelNode({
+        quorum: quorumNode({
           prompt: 'Vote',
           members,
           memberSchema: parseVote,
@@ -298,14 +298,14 @@ describe('panelNode', () => {
           output: 'decision.json',
         }),
       },
-      edges: { panel: {} },
-      start: ['panel'],
+      edges: { quorum: {} },
+      start: ['quorum'],
     };
 
     const result = await dryRun(graph, {
       dir,
       fixtures: {
-        panel: {
+        quorum: {
           artifact: [
             '{"choice":"continue"}',
             '{"choice":"exit"}',
@@ -315,7 +315,7 @@ describe('panelNode', () => {
       },
     });
 
-    expect(action(result, 'panel')).toBe('continue');
+    expect(action(result, 'quorum')).toBe('continue');
     expect(fs.readFileSync(path.join(dir, 'decision.json'), 'utf-8')).toBe(
       JSON.stringify({ choice: 'continue' }, null, 2),
     );
@@ -328,7 +328,7 @@ describe('panelNode', () => {
     let receivedMeta: readonly { readonly ok: boolean }[] = [];
     const graph: FlowGraph = {
       nodes: {
-        panel: panelNode({
+        quorum: quorumNode({
           prompt: 'Vote',
           members,
           memberSchema: parseVote,
@@ -340,14 +340,14 @@ describe('panelNode', () => {
           },
         }),
       },
-      edges: { panel: {} },
-      start: ['panel'],
+      edges: { quorum: {} },
+      start: ['quorum'],
     };
 
     await dryRun(graph, {
       dir,
       fixtures: {
-        panel: {
+        quorum: {
           artifact: [
             '{"choice":"continue"}',
             'not JSON',
@@ -367,7 +367,7 @@ describe('panelNode', () => {
     let fallbackError = '';
     const graph: FlowGraph = {
       nodes: {
-        panel: panelNode({
+        quorum: quorumNode({
           prompt: 'Vote',
           members,
           memberSchema: parseVote,
@@ -380,16 +380,16 @@ describe('panelNode', () => {
           route: (result) => result.choice,
         }),
       },
-      edges: { panel: {} },
-      start: ['panel'],
+      edges: { quorum: {} },
+      start: ['quorum'],
     };
 
     const result = await dryRun(graph, {
       dir,
-      fixtures: { panel: { artifact: ['bad-1', 'bad-2', 'bad-3'] } },
+      fixtures: { quorum: { artifact: ['bad-1', 'bad-2', 'bad-3'] } },
     });
 
-    expect(action(result, 'panel')).toBe('fallback');
+    expect(action(result, 'quorum')).toBe('fallback');
     expect(fallbackError).toContain('no valid JSON value');
   });
 
@@ -398,7 +398,7 @@ describe('panelNode', () => {
     dirs.push(dir);
     const graph: FlowGraph = {
       nodes: {
-        panel: panelNode({
+        quorum: quorumNode({
           prompt: 'Vote',
           members,
           memberSchema: parseVote,
@@ -406,16 +406,16 @@ describe('panelNode', () => {
           reconcile: majority,
         }),
       },
-      edges: { panel: {} },
-      start: ['panel'],
+      edges: { quorum: {} },
+      start: ['quorum'],
     };
 
     const result = await dryRun(graph, {
       dir,
-      fixtures: { panel: { artifact: ['bad-1', 'bad-2', 'bad-3'] } },
+      fixtures: { quorum: { artifact: ['bad-1', 'bad-2', 'bad-3'] } },
     });
 
-    expect(action(result, 'panel')).toBe('fail');
+    expect(action(result, 'quorum')).toBe('fail');
   });
 
   it('drives LoopRegion continuation and exit as its decision node', async () => {
@@ -429,7 +429,7 @@ describe('panelNode', () => {
           displayName: 'Produce',
           nodeType: 'deterministic',
         },
-        panel: panelNode({
+        quorum: quorumNode({
           prompt: 'Vote',
           members: [{ model: 'owner' }],
           memberSchema: parseVote,
@@ -446,15 +446,15 @@ describe('panelNode', () => {
         },
       },
       edges: {
-        produce: { default: 'panel' },
-        panel: { continue: 'produce', exit: 'done' },
+        produce: { default: 'quorum' },
+        quorum: { continue: 'produce', exit: 'done' },
       },
       start: ['produce'],
       loops: [{
-        id: 'panel-loop',
-        nodes: ['produce', 'panel'],
+        id: 'quorum-loop',
+        nodes: ['produce', 'quorum'],
         entry: 'produce',
-        decision: 'panel',
+        decision: 'quorum',
         continueOn: 'continue',
         exitOn: 'exit',
         maxRounds: 2,
@@ -464,7 +464,7 @@ describe('panelNode', () => {
     const result = await dryRun(graph, {
       dir,
       fixtures: {
-        panel: {
+        quorum: {
           artifact: ['{"choice":"continue"}', '{"choice":"exit"}'],
         },
       },
@@ -472,7 +472,7 @@ describe('panelNode', () => {
 
     expect(result.completed).toBe(true);
     expect(reconciliations).toBe(2);
-    expect(action(result, 'panel')).toBe('exit');
+    expect(action(result, 'quorum')).toBe('exit');
     expect(action(result, 'done')).toBe('default');
   });
 
@@ -517,7 +517,7 @@ describe('panelNode', () => {
         }),
         isAvailable: vi.fn().mockResolvedValue(true),
       };
-      const entry = panelNode({
+      const entry = quorumNode({
         prompt: 'Vote',
         members: [
           { id: 'first-id', model: 'first' },
@@ -533,7 +533,7 @@ describe('panelNode', () => {
       });
       const context: ExecutionContext = {
         executionId: 'parallel-order',
-        nodeId: 'panel',
+        nodeId: 'quorum',
         runtime,
         emitOutput: vi.fn(),
         signal: new AbortController().signal,
@@ -594,7 +594,7 @@ describe('panelNode', () => {
         }),
         isAvailable: vi.fn().mockResolvedValue(true),
       };
-      const entry = panelNode({
+      const entry = quorumNode({
         prompt: 'Vote',
         members: [
           { id: 'good-a', model: 'a' },
@@ -609,7 +609,7 @@ describe('panelNode', () => {
       });
       const context: ExecutionContext = {
         executionId: 'parallel-isolation',
-        nodeId: 'panel',
+        nodeId: 'quorum',
         runtime,
         emitOutput: vi.fn(),
         signal: new AbortController().signal,
@@ -632,7 +632,7 @@ describe('panelNode', () => {
     dirs.push(dir);
     const artifactPaths: string[] = [];
     const runtime: AgentRuntime = {
-      name: 'panel-artifact-runtime',
+      name: 'quorum-artifact-runtime',
       createSession: vi.fn().mockImplementation(async (sessionConfig: SessionConfig) => {
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
         return {
@@ -656,7 +656,7 @@ describe('panelNode', () => {
       }),
       isAvailable: vi.fn().mockResolvedValue(true),
     };
-    const entry = panelNode({
+    const entry = quorumNode({
       prompt: 'Vote',
       members: [
         { id: 'alpha', model: 'alpha-model' },
@@ -670,7 +670,7 @@ describe('panelNode', () => {
     });
     const context: ExecutionContext = {
       executionId: 'artifact-execution',
-      nodeId: 'panel-node',
+      nodeId: 'quorum-node',
       runtime,
       emitOutput: vi.fn(),
       signal: new AbortController().signal,
@@ -680,8 +680,8 @@ describe('panelNode', () => {
 
     expect(new Set(artifactPaths).size).toBe(2);
     expect(artifactPaths).toEqual([
-      '.condukt/artifact-execution-panel-node-panel-member-0.json',
-      '.condukt/artifact-execution-panel-node-panel-member-1.json',
+      '.condukt/artifact-execution-quorum-node-quorum-member-0.json',
+      '.condukt/artifact-execution-quorum-node-quorum-member-1.json',
     ]);
     expect(fs.readFileSync(path.join(dir, 'decision.json'), 'utf-8')).toBe(
       JSON.stringify({ choice: 'alpha,beta' }, null, 2),
@@ -698,7 +698,7 @@ describe('panelNode', () => {
       let reconciled: readonly Vote[] = [];
       const graph: FlowGraph = {
         nodes: {
-          panel: panelNode({
+          quorum: quorumNode({
             prompt: 'Vote',
             members,
             memberSchema: parseVote,
@@ -708,16 +708,16 @@ describe('panelNode', () => {
             },
           }),
         },
-        edges: { panel: {} },
-        start: ['panel'],
+        edges: { quorum: {} },
+        start: ['quorum'],
       };
 
       await dryRun(graph, {
         dir,
         fixtures: {
-          'panel:owner': { artifact: '{"choice":"owner"}', delay: 30 },
-          'panel:peer-a': { artifact: '{"choice":"peer-a"}', delay: 20 },
-          'panel:peer-b': { artifact: '{"choice":"peer-b"}', delay: 10 },
+          'quorum:owner': { artifact: '{"choice":"owner"}', delay: 30 },
+          'quorum:peer-a': { artifact: '{"choice":"peer-a"}', delay: 20 },
+          'quorum:peer-b': { artifact: '{"choice":"peer-b"}', delay: 10 },
         },
       });
 
@@ -737,7 +737,7 @@ describe('panelNode', () => {
       const sendTimes: number[] = [];
       const abortTimes: number[] = [];
       const runtime: AgentRuntime = {
-        name: 'panel-deadline-runtime',
+        name: 'quorum-deadline-runtime',
         createSession: vi.fn().mockImplementation(async () => {
           const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
           let timer: ReturnType<typeof setTimeout> | undefined;
@@ -761,15 +761,15 @@ describe('panelNode', () => {
         }),
         isAvailable: vi.fn().mockResolvedValue(true),
       };
-      const entry = panelNode({
+      const entry = quorumNode({
         prompt: 'Vote',
         members: [{ model: 'first' }, { model: 'second' }, { model: 'third' }],
         retry: { budgetMs: 100 },
         reconcile: (verdicts: readonly string[]) => verdicts.join(','),
       });
       const context: ExecutionContext = {
-        executionId: 'panel-deadline',
-        nodeId: 'panel',
+        executionId: 'quorum-deadline',
+        nodeId: 'quorum',
         runtime,
         emitOutput: vi.fn(),
         signal: new AbortController().signal,

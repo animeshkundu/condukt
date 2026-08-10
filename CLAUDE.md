@@ -29,6 +29,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 | `src/events.ts` | 17 execution events + 2 output events (discriminated unions) |
 | `src/scheduler.ts` | Graph walker: fan-in, fan-out, bounded loop-back, parallel dispatch, per-node timeout, abort, resume |
 | `src/agent.ts` | LLM agent factory with GT-3 crash recovery, setup/teardown hooks |
+| `src/quorum-node.ts` | Concurrent multi-member decision node with caller-defined reconciliation |
 | `src/nodes.ts` | deterministic() + gate() factories, resolveGate() |
 | `src/verify.ts` | Iterative verification combinator |
 | `state/reducer.ts` | Pure event->projection fold |
@@ -85,6 +86,7 @@ Pin to the latest stable of everything unless there is a reason not to, and writ
 | Fan-out | `__tests__/fan-out.test.ts` | 12 |
 | Loop-back | `__tests__/loop-back.test.ts` | 17 |
 | Agent | `__tests__/agent.test.ts` | 17 |
+| Quorum Node | `__tests__/quorum-node.test.ts` | 15 |
 | Nodes | `__tests__/nodes.test.ts` | 10 |
 | Verify | `__tests__/verify.test.ts` | 9 |
 | Reducer | `__tests__/reducer.test.ts` | 20 |

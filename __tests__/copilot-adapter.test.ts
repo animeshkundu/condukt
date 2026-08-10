@@ -113,7 +113,7 @@ describe('adaptCopilotBackend', () => {
       compactionMode: 'aggressive',
       mode: 'plan',
       advisor: { model: 'advisor-model', thinkingBudget: 'high' },
-      panel: { memberCount: 3, thinkingBudget: 'high' },
+      standIn: { memberCount: 3, thinkingBudget: 'high' },
       mcpServers: { browser: { command: 'browser-mcp' } },
       systemMessage: 'You are a reviewer. Respond with JSON.',
       availableTools: ['view', 'glob'],

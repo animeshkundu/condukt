@@ -178,7 +178,7 @@ describe('agent factory', () => {
         compactionMode: undefined,
         mode: 'autopilot',
         advisor: undefined,
-        panel: undefined,
+        standIn: undefined,
         cwd: '/tmp/test-agent',
         addDirs: ['/tmp/test-agent'],
         timeout: 1800,
@@ -218,7 +218,7 @@ describe('agent factory', () => {
     );
   });
 
-  it('forwards advisor and panel configuration to the session', async () => {
+  it('forwards advisor and standIn configuration to the session', async () => {
     mockSession.send.mockImplementation(() => {
       queueMicrotask(() => mockSession._emit('idle'));
     });
@@ -228,18 +228,18 @@ describe('agent factory', () => {
       thinkingBudget: 'xhigh' as const,
       maxTranscriptChars: 12_000,
     };
-    const panel = {
+    const standIn = {
       memberCount: 3,
       thinkingBudget: 'high' as const,
     };
     await agent({
       promptBuilder: () => 'test prompt',
       advisor,
-      panel,
+      standIn,
     })(createMockInput(), createMockContext(mockRuntime));
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
-      expect.objectContaining({ advisor, panel }),
+      expect.objectContaining({ advisor, standIn }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

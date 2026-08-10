@@ -125,7 +125,7 @@ describe('agentNode', () => {
     expect(captured[0]?.timeout).toBe(expected);
   });
 
-  it('forwards mode, contextTier, thinkingBudget, advisor, panel, and MCP servers through the plain agent node', async () => {
+  it('forwards mode, contextTier, thinkingBudget, advisor, standIn, and MCP servers through the plain agent node', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const runtime: AgentRuntime = {
@@ -153,7 +153,7 @@ describe('agentNode', () => {
       thinkingBudget: 'xhigh',
       mode: 'plan',
       advisor: { model: 'advisor-model', contextTier: 'long_context' },
-      panel: { memberCount: 3, contextTier: 'long_context' },
+      standIn: { memberCount: 3, contextTier: 'long_context' },
       mcpServers: {
         node: { command: 'node-mcp', args: ['--stdio'] },
       },
@@ -175,7 +175,7 @@ describe('agentNode', () => {
         thinkingBudget: 'xhigh',
         mode: 'plan',
         advisor: { model: 'advisor-model', contextTier: 'long_context' },
-        panel: { memberCount: 3, contextTier: 'long_context' },
+        standIn: { memberCount: 3, contextTier: 'long_context' },
         mcpServers: {
           node: { command: 'node-mcp', args: ['--stdio'] },
         },

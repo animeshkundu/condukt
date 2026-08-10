@@ -68,8 +68,8 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.advisor !== undefined
           ? { advisor: config.advisor }
           : {}),
-        ...(config.panel !== undefined
-          ? { panel: config.panel }
+        ...(config.standIn !== undefined
+          ? { standIn: config.standIn }
           : {}),
         ...(config.mcpServers !== undefined
           ? { mcpServers: config.mcpServers }

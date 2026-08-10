@@ -296,7 +296,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     compactionMode: config.compactionMode,
     mode: config.mode ?? 'autopilot',
     advisor: config.advisor,
-    panel: config.panel,
+    standIn: config.standIn,
     ...(mcpServers !== undefined ? { mcpServers } : {}),
     cwd: sessionCwd,
     addDirs: config.isolation ? [] : [input.dir],

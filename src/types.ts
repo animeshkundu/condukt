@@ -302,12 +302,12 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 export const DEFAULT_AGENT_TIMEOUT_SECS = 5 * 60 * 60;
 
 /**
- * Default total wall-clock limit for review panels, in seconds.
+ * Default total wall-clock limit for review quorums, in seconds.
  *
  * Review is bounded by an existing artifact rather than open-ended generation.
- * Panel members run concurrently, so this bounds the slowest member, not their sum.
+ * Quorum members run concurrently, so this bounds the slowest member, not their sum.
  */
-export const DEFAULT_PANEL_TIMEOUT_SECS = 3 * 60 * 60;
+export const DEFAULT_QUORUM_TIMEOUT_SECS = 3 * 60 * 60;
 
 /**
  * Default context tier requested when a config does not specify one.
@@ -334,7 +334,7 @@ export const DEFAULT_CONTEXT_TIER: ContextTier = 'long_context';
  */
 export const DEFAULT_PRODUCER_MODEL = 'gpt-5.6-sol';
 
-/** Default model for the review primitive (panelNode). Cross-lab from the producer. */
+/** Default model for the review primitive (quorumNode). Cross-lab from the producer. */
 export const DEFAULT_REVIEWER_MODEL = 'claude-opus-5';
 
 /** Default reasoning effort. High is the useful floor for both producing and critiquing. */
@@ -416,14 +416,14 @@ export interface AdvisorConfig {
   readonly maxTranscriptChars?: number;
 }
 
-export interface PanelToolConfig {
+export interface StandInConfig {
   /** Explicit catalogued member models. Mutually exclusive with memberCount. */
   readonly members?: readonly string[];
   /** Number of cross-lab members selected from the model catalogue. Default 3. */
   readonly memberCount?: number;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
-  /** Appended to every panel member's system message. */
+  /** Appended to every stand-in voter's system message. */
   readonly system?: string;
   /** Overrides the tool description shown to the calling model. */
   readonly description?: string;
@@ -443,7 +443,7 @@ export interface SessionConfig extends SubagentLimits {
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
-  readonly panel?: PanelToolConfig;
+  readonly standIn?: StandInConfig;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
   readonly mcpServers?: MCPServersOption;
   /** System message to append to the agent's context (SdkBackend only). */
@@ -462,7 +462,7 @@ export interface SessionConfig extends SubagentLimits {
   readonly excludedBuiltinAgents?: readonly string[];
   /** Set by agent() so a runtime can identify the node; ignored by real backends. */
   readonly nodeId?: string;
-  /** Set by panelNode() so a runtime can identify one panel member; ignored by real backends. */
+  /** Set by quorumNode() so a runtime can identify one quorum member; ignored by real backends. */
   readonly memberId?: string;
   /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
   readonly artifactFilename?: string;
@@ -616,7 +616,7 @@ export interface AgentConfig extends SubagentLimits {
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
-  readonly panel?: PanelToolConfig;
+  readonly standIn?: StandInConfig;
   /**
    * Session MCP servers. A record replaces DEFAULT_MCP_SERVERS; spread the
    * default into a record to extend it. Set false to disable MCP entirely.
@@ -650,7 +650,7 @@ export interface AgentConfig extends SubagentLimits {
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session (SdkBackend only). */
   readonly excludedBuiltinAgents?: readonly string[];
-  /** Runtime-only panel member identifier; ignored by real backends. */
+  /** Runtime-only quorum member identifier; ignored by real backends. */
   readonly memberId?: string;
 }
 

@@ -621,19 +621,19 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
-  it('registers the panel tool only when configured', async () => {
-    const withoutPanel = await createTestSession();
-    withoutPanel.session.send('plain prompt');
+  it('registers the stand-in tool only when configured', async () => {
+    const withoutStandIn = await createTestSession();
+    withoutStandIn.session.send('plain prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
     expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('tools');
 
     mockCreateSession.mockClear();
     mockSdkSession = createMockSdkSession();
     mockSdkSessions = [mockSdkSession];
-    const withPanel = await createTestSession({}, {
-      panel: { memberCount: 3 },
+    const withStandIn = await createTestSession({}, {
+      standIn: { memberCount: 3 },
     });
-    withPanel.session.send('panel prompt');
+    withStandIn.session.send('stand-in prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
 
     const tools = mockCreateSession.mock.calls[0]?.[0].tools as Array<{
@@ -643,13 +643,13 @@ describe('SdkBackend event mapping', () => {
     }> | undefined;
     expect(tools).toHaveLength(1);
     expect(tools?.[0]).toEqual(expect.objectContaining({
-      name: 'panel',
+      name: 'stand_in',
       skipPermission: true,
       defer: 'never',
     }));
   });
 
-  it('creates toolless non-recursive panel member sessions', async () => {
+  it('creates toolless non-recursive stand-in voter sessions', async () => {
     const caller = createMockSdkSession();
     const children = Array.from({ length: 4 }, () => createMockSdkSession());
     const responses = [
@@ -667,7 +667,7 @@ describe('SdkBackend event mapping', () => {
     mockSdkSessions = [caller, ...children];
 
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('root prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -678,8 +678,8 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
 
     await tool.handler({
       decision: 'Choose a path',
@@ -698,12 +698,12 @@ describe('SdkBackend event mapping', () => {
         enableConfigDiscovery: false,
       }));
       expect(childConfig).not.toHaveProperty('advisor');
-      expect(childConfig).not.toHaveProperty('panel');
+      expect(childConfig).not.toHaveProperty('standIn');
       expect(childConfig).not.toHaveProperty('subagentRoster');
     }
   });
 
-  it('passes only caller-supplied decision context into cold-start panel prompts', async () => {
+  it('passes only caller-supplied decision context into cold-start stand-in prompts', async () => {
     const caller = createMockSdkSession();
     caller.getEvents.mockResolvedValue([
       { type: 'user.message', data: { content: 'PRIVATE CALLER HISTORY SENTINEL' } },
@@ -724,7 +724,7 @@ describe('SdkBackend event mapping', () => {
     mockSdkSessions = [caller, ...children];
 
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('PRIVATE ROOT PROMPT SENTINEL');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -735,8 +735,8 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
 
     await tool.handler({
       decision: 'Keep or change?',
@@ -744,7 +744,7 @@ describe('SdkBackend event mapping', () => {
         { id: 'keep', summary: 'Keep the current design' },
         { id: 'change', summary: 'Change it' },
       ],
-      context: 'PUBLIC PANEL CONTEXT SENTINEL',
+      context: 'PUBLIC STAND_IN CONTEXT SENTINEL',
     });
 
     expect(caller.getEvents).not.toHaveBeenCalled();
@@ -752,7 +752,7 @@ describe('SdkBackend event mapping', () => {
       const prompt = child.sendAndWait.mock.calls[0]?.[0].prompt as string;
       expect(prompt).toContain('Keep or change?');
       expect(prompt).toContain('Keep the current design');
-      expect(prompt).toContain('PUBLIC PANEL CONTEXT SENTINEL');
+      expect(prompt).toContain('PUBLIC STAND_IN CONTEXT SENTINEL');
       expect(prompt).not.toContain('PRIVATE CALLER HISTORY SENTINEL');
       expect(prompt).not.toContain('PRIVATE ROOT PROMPT SENTINEL');
     }
@@ -762,7 +762,7 @@ describe('SdkBackend event mapping', () => {
     const caller = createMockSdkSession();
     mockSdkSessions = [caller];
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('root prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -773,19 +773,19 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
     const options = Array.from({ length: optionCount }, (_, index) => ({
       id: `option-${index}`,
       summary: `Option ${index}`,
     }));
 
     await expect(tool.handler({ decision: 'Choose', options, context: 'Context' }))
-      .resolves.toMatch(/^Panel unavailable: options must contain between 2 and 6 items/);
+      .resolves.toMatch(/^Stand-in unavailable: options must contain between 2 and 6 items/);
     expect(mockCreateSession).toHaveBeenCalledOnce();
   });
 
-  it('runs blind and informed panel rounds with anonymized first-round answers', async () => {
+  it('runs blind and informed stand-in rounds with anonymized first-round answers', async () => {
     const caller = createMockSdkSession();
     const children = Array.from({ length: 4 }, () => createMockSdkSession());
     const responses = [
@@ -803,7 +803,7 @@ describe('SdkBackend event mapping', () => {
     mockSdkSessions = [caller, ...children];
 
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('root prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -814,8 +814,8 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
 
     const output = await tool.handler({
       decision: 'Choose',
@@ -845,7 +845,7 @@ describe('SdkBackend event mapping', () => {
     }));
   });
 
-  it('requires two successful members in each panel round', async () => {
+  it('requires two successful members in each stand-in round', async () => {
     const caller = createMockSdkSession();
     const blindSuccess = createMockSdkSession();
     const blindFailure = createMockSdkSession();
@@ -863,7 +863,7 @@ describe('SdkBackend event mapping', () => {
     mockSdkSessions = [caller, blindSuccess, blindFailure];
 
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('root prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -874,20 +874,20 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
 
     await expect(tool.handler({
       decision: 'Choose',
       options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
       context: 'Context',
     })).resolves.toBe(
-      'Panel unavailable: fewer than two blind-round members succeeded',
+      'Stand-in unavailable: fewer than two blind-round members succeeded',
     );
     expect(mockCreateSession).toHaveBeenCalledTimes(3);
   });
 
-  it('returns a bounded string when the panel handler fails', async () => {
+  it('returns a bounded string when the stand-in handler fails', async () => {
     const caller = createMockSdkSession();
     const failedA = createMockSdkSession();
     const failedB = createMockSdkSession();
@@ -896,7 +896,7 @@ describe('SdkBackend event mapping', () => {
     mockSdkSessions = [caller, failedA, failedB];
 
     const { session } = await createTestSession({}, {
-      panel: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
     });
     session.send('root prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -907,8 +907,8 @@ describe('SdkBackend event mapping', () => {
         readonly options: readonly { readonly id: string; readonly summary: string }[];
         readonly context: string;
       }) => Promise<unknown>;
-    }>).find((candidate) => candidate.name === 'panel');
-    if (tool === undefined) throw new Error('Panel tool was not registered');
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
 
     const result = await tool.handler({
       decision: 'Choose',
@@ -916,7 +916,7 @@ describe('SdkBackend event mapping', () => {
       context: 'Context',
     });
 
-    expect(result).toMatch(/^Panel unavailable:/);
+    expect(result).toMatch(/^Stand-in unavailable:/);
     expect(String(result).length).toBeLessThanOrEqual(260);
   });
 

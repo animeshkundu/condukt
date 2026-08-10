@@ -17,11 +17,11 @@ export type {
 /**
  * @experimental Experimental — API may change before it stabilizes into condukt core.
  */
-export { panelNode } from './panel-node';
+export { quorumNode } from './quorum-node';
 /**
  * @experimental Experimental — API may change before it stabilizes into condukt core.
  */
-export type { PanelConfig, PanelMember, PanelMemberMeta } from './panel-node';
+export type { QuorumConfig, QuorumMember, QuorumMemberMeta } from './quorum-node';
 export { deterministic, gate, resolveGate, _getGateRegistryForTesting } from './nodes';
 export type { LoopContext } from './types';
 export { verify, property } from './verify';
@@ -43,7 +43,7 @@ export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
-  AgentRuntime, AgentSession, AgentSessionHistory, AgentSessionMetadata, AgentSessionUsage, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, CompactionMode, SessionMode, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, AgentSession, AgentSessionHistory, AgentSessionMetadata, AgentSessionUsage, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, CompactionMode, SessionMode, AdvisorConfig, StandInConfig, ToolRef, AgentConfig, PromptOutput,
   ContextAttributionEntry, SessionContextAttribution, ContextHeaviestMessage, ContextHeaviestMessages, RecomputedContextTokens,
   SessionUsageTokenDetail, SessionUsageCodeChanges, SessionUsageModelMetric, SessionUsageMetrics,
   RetryPolicy, RetryMeta, MCPServerConfig, MCPServersOption, CustomAgentConfig, DefaultAgentConfig, SubagentLimits, SubagentRosterOption,
@@ -59,7 +59,7 @@ export {
   DEFAULT_THINKING_BUDGET,
   DEFAULT_REVIEWER_MODEL,
   DEFAULT_PRODUCER_MODEL,
-  DEFAULT_PANEL_TIMEOUT_SECS,
+  DEFAULT_QUORUM_TIMEOUT_SECS,
   DEFAULT_RETRY_POLICY,
   getParams,
   FlowAbortedError,

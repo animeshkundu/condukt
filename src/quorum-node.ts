@@ -4,7 +4,7 @@ import type {
   RepairCandidate,
 } from './agent-node';
 import {
-  DEFAULT_PANEL_TIMEOUT_SECS,
+  DEFAULT_QUORUM_TIMEOUT_SECS,
   DEFAULT_CONTEXT_TIER,
   DEFAULT_REVIEWER_MODEL,
   FlowAbortedError,
@@ -42,16 +42,16 @@ import type {
   ToolRef,
 } from './types';
 
-export interface PanelMember {
+export interface QuorumMember {
   /** Omit to take DEFAULT_REVIEWER_MODEL, which is cross-lab from the producer default. */
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
   readonly compactionMode?: CompactionMode;
-  /** Replaces the panel MCP set for this member; false disables MCP. */
+  /** Replaces the quorum MCP set for this member; false disables MCP. */
   readonly mcpServers?: MCPServersOption;
   /**
-   * Replaces the panel tool set for this member. An empty array grants no tools at
+   * Replaces the quorum tool set for this member. An empty array grants no tools at
    * all, which is how a member is confined to judging what `reads` hands it.
    */
   readonly tools?: readonly ToolRef[] | readonly string[];
@@ -59,23 +59,23 @@ export interface PanelMember {
   readonly id?: string;
 }
 
-export interface PanelMemberMeta {
-  readonly member: PanelMember;
+export interface QuorumMemberMeta {
+  readonly member: QuorumMember;
   readonly ok: boolean;
 }
 
-export interface PanelConfig<T, V = unknown> extends SubagentLimits {
+export interface QuorumConfig<T, V = unknown> extends SubagentLimits {
   readonly prompt:
     | string
     | ((
       input: NodeInput,
       reads: Readonly<Record<string, unknown>>,
     ) => string);
-  readonly members: readonly PanelMember[];
+  readonly members: readonly QuorumMember[];
   readonly memberSchema?: AgentNodeSchema<V>;
   readonly reconcile: (
     verdicts: readonly V[],
-    meta: readonly PanelMemberMeta[],
+    meta: readonly QuorumMemberMeta[],
   ) => T;
   readonly output?: string;
   readonly reads?: readonly string[];
@@ -89,11 +89,11 @@ export interface PanelConfig<T, V = unknown> extends SubagentLimits {
   readonly mcpServers?: MCPServersOption;
   /**
    * Tools every member may call, unless the member replaces it. Omit to take the
-   * backend default, which is every tool the session offers. Pass `[]` for a panel
+   * backend default, which is every tool the session offers. Pass `[]` for a quorum
    * that judges only what `reads` supplies and cannot touch the workspace.
    */
   readonly tools?: readonly ToolRef[] | readonly string[];
-  /** Total wall-clock limit in seconds. Defaults to DEFAULT_PANEL_TIMEOUT_SECS. */
+  /** Total wall-clock limit in seconds. Defaults to DEFAULT_QUORUM_TIMEOUT_SECS. */
   readonly timeout?: number;
   readonly isolation?: boolean;
   readonly retry?: RetryPolicy;
@@ -109,8 +109,8 @@ type MemberResult<V> =
   | { readonly ok: false; readonly error: Error };
 
 async function runMember<T, V>(
-  config: PanelConfig<T, V>,
-  member: PanelMember,
+  config: QuorumConfig<T, V>,
+  member: QuorumMember,
   memberIndex: number,
   prompt: string,
   input: NodeInput,
@@ -118,7 +118,7 @@ async function runMember<T, V>(
 ): Promise<MemberResult<V>> {
   const executionId = encodeURIComponent(ctx.executionId);
   const nodeId = encodeURIComponent(ctx.nodeId);
-  const memberOutput = `.condukt/${executionId}-${nodeId}-panel-member-${memberIndex}.json`;
+  const memberOutput = `.condukt/${executionId}-${nodeId}-quorum-member-${memberIndex}.json`;
   const memberConfig: AgentNodeConfig<V> = {
     prompt,
     model: member.model ?? DEFAULT_REVIEWER_MODEL,
@@ -129,7 +129,7 @@ async function runMember<T, V>(
     tools: member.tools ?? config.tools,
     system: member.system,
     output: memberOutput,
-    timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,
+    timeout: config.timeout ?? DEFAULT_QUORUM_TIMEOUT_SECS,
     isolation: config.isolation,
     retry: config.retry,
     customAgents: config.customAgents,
@@ -209,34 +209,34 @@ async function runMember<T, V>(
 }
 
 function successOutput<T, V>(
-  config: PanelConfig<T, V>,
+  config: QuorumConfig<T, V>,
   input: NodeInput,
   result: T,
-  meta: readonly PanelMemberMeta[],
+  meta: readonly QuorumMemberMeta[],
 ): NodeOutput {
   const artifact = serialize(result);
   writeOutput(input, config.output, artifact);
   return {
     action: config.route?.(result) ?? 'default',
     artifact,
-    metadata: { value: result, panel: meta },
+    metadata: { value: result, quorum: meta },
   };
 }
 
 /**
- * Create a concurrent multi-agent panel whose successful member verdicts are
+ * Create a concurrent multi-agent quorum whose successful member verdicts are
  * combined in member input order by a caller-supplied reconciliation policy.
  *
  * @experimental Experimental — API may change before it stabilizes into condukt core.
  */
-export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry {
+export function quorumNode<T, V = unknown>(config: QuorumConfig<T, V>): NodeEntry {
   if (config.members.length < 1) {
-    throw new Error('panelNode requires at least one member');
+    throw new Error('quorumNode requires at least one member');
   }
 
   const fn = async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
     let retryAttempt = 1;
-    const panelContext: ExecutionContext = ctx.nextRetryAttempt
+    const quorumContext: ExecutionContext = ctx.nextRetryAttempt
       ? ctx
       : {
           ...ctx,
@@ -249,15 +249,15 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
     const retryWindowMs = retryBudgetMs === undefined
       ? config.retry === undefined
         ? undefined
-        : (config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS) * 1000
+        : (config.timeout ?? DEFAULT_QUORUM_TIMEOUT_SECS) * 1000
       : Number.isFinite(retryBudgetMs)
         ? Math.max(0, retryBudgetMs)
         : 0;
-    const retryDeadlineMs = panelContext.retryDeadlineMs
+    const retryDeadlineMs = quorumContext.retryDeadlineMs
       ?? (retryWindowMs === undefined ? undefined : Date.now() + retryWindowMs);
     const memberContext = retryDeadlineMs === undefined
-      ? panelContext
-      : { ...panelContext, retryDeadlineMs };
+      ? quorumContext
+      : { ...quorumContext, retryDeadlineMs };
     const reads = loadReads(input, config.reads);
     const prompt = typeof config.prompt === 'string'
       ? config.prompt
@@ -284,11 +284,11 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
       }),
     );
     if (ctx.signal.aborted) {
-      throw new FlowAbortedError('Panel aborted during member execution');
+      throw new FlowAbortedError('Quorum aborted during member execution');
     }
     const verdicts: V[] = [];
-    const meta: PanelMemberMeta[] = [];
-    let lastError = new Error('No panel members produced a verdict');
+    const meta: QuorumMemberMeta[] = [];
+    let lastError = new Error('No quorum members produced a verdict');
 
     for (const { member, result } of memberOutcomes) {
       meta.push({ member, ok: result.ok });
@@ -319,11 +319,11 @@ export function panelNode<T, V = unknown>(config: PanelConfig<T, V>): NodeEntry 
 
   return {
     fn,
-    displayName: config.displayName ?? '(panel)',
+    displayName: config.displayName ?? '(quorum)',
     nodeType: 'agent',
     output: config.output,
     reads: config.reads,
     model: config.members[0]?.model ?? DEFAULT_REVIEWER_MODEL,
-    timeout: config.timeout ?? DEFAULT_PANEL_TIMEOUT_SECS,
+    timeout: config.timeout ?? DEFAULT_QUORUM_TIMEOUT_SECS,
   };
 }

@@ -9,7 +9,7 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
-import type { AdvisorConfig, PanelToolConfig } from '../../src/types';
+import type { AdvisorConfig, StandInConfig } from '../../src/types';
 import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
 export interface MCPServerConfig {
@@ -55,7 +55,7 @@ export interface SessionConfig extends SubagentLimits {
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
-  readonly panel?: PanelToolConfig;
+  readonly standIn?: StandInConfig;
   /** MCP server configurations for the root session, or false to disable them. */
   readonly mcpServers?: Readonly<Record<string, MCPServerConfig>> | false;
   /** Working directory for the agent (repo root) */
