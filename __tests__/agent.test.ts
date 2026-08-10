@@ -176,6 +176,7 @@ describe('agent factory', () => {
         thinkingBudget: 'high',
         contextTier: 'long_context',
         compactionMode: undefined,
+        mode: 'autopilot',
         advisor: undefined,
         panel: undefined,
         cwd: '/tmp/test-agent',
@@ -197,6 +198,22 @@ describe('agent factory', () => {
         memberId: undefined,
         artifactFilename: undefined,
       },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
+  it('forwards an explicit plan mode to the session', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await agent({
+      promptBuilder: () => 'test prompt',
+      mode: 'plan',
+    })(createMockInput(), createMockContext(mockRuntime));
+
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'plan' }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

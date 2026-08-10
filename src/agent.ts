@@ -294,6 +294,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     // can opt out of long context and not merely into it.
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
     compactionMode: config.compactionMode,
+    mode: config.mode ?? 'autopilot',
     advisor: config.advisor,
     panel: config.panel,
     ...(mcpServers !== undefined ? { mcpServers } : {}),

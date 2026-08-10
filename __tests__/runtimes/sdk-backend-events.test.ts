@@ -607,6 +607,20 @@ describe('SdkBackend event mapping', () => {
     expect(mockCreateSession).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { mode: undefined, expected: 'autopilot' },
+    { mode: 'plan' as const, expected: 'plan' },
+  ])('sets SDK mode to $expected', async ({ mode, expected }) => {
+    const { session, mock } = await createTestSession({}, {
+      ...(mode === undefined ? {} : { mode }),
+    });
+    session.send('root prompt');
+
+    await vi.waitFor(() => {
+      expect(mock.rpc.mode.set).toHaveBeenCalledWith({ mode: expected });
+    });
+  });
+
   it('registers the panel tool only when configured', async () => {
     const withoutPanel = await createTestSession();
     withoutPanel.session.send('plain prompt');

@@ -402,6 +402,7 @@ export interface DefaultAgentConfig {
 }
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
+export type SessionMode = 'autopilot' | 'plan';
 
 export interface AdvisorConfig {
   readonly model: string;
@@ -439,6 +440,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  /** Session behavior mode. Defaults to autopilot. */
+  readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
   readonly panel?: PanelToolConfig;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
@@ -610,6 +613,8 @@ export interface AgentConfig extends SubagentLimits {
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  /** Session behavior mode. Defaults to autopilot. */
+  readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
   readonly panel?: PanelToolConfig;
   /**

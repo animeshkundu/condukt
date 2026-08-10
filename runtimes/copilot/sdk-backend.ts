@@ -1918,9 +1918,9 @@ class SdkSession implements CopilotSession {
       }
     }
 
-    // Set autopilot mode explicitly (matches SubprocessBackend's --autopilot flag)
+    // Preserve the established autonomous default while allowing plan-mode boundaries.
     try {
-      await sdkSession.rpc.mode.set({ mode: 'autopilot' });
+      await sdkSession.rpc.mode.set({ mode: this.config.mode ?? 'autopilot' });
     } catch {
       // SDK may not support mode.set — continue without it
     }

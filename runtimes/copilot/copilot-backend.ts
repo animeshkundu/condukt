@@ -41,6 +41,7 @@ export interface DefaultAgentConfig {
 }
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
+export type SessionMode = 'autopilot' | 'plan';
 
 export interface SessionConfig extends SubagentLimits {
   /** Model to use: "claude-opus-4.6", "gpt-5.4", etc. */
@@ -51,6 +52,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly contextTier?: 'default' | 'long_context';
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
+  /** Session behavior mode. Defaults to autopilot. */
+  readonly mode?: SessionMode;
   readonly advisor?: AdvisorConfig;
   readonly panel?: PanelToolConfig;
   /** MCP server configurations for the root session, or false to disable them. */

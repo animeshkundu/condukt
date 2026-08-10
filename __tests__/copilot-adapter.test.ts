@@ -98,7 +98,7 @@ describe('adaptCopilotBackend', () => {
     expect(mockSession.on).toHaveBeenCalledWith('text', textHandler);
   });
 
-  it('forwards systemMessage, tool filters, contextTier, and subagent config to the backend', async () => {
+  it('forwards mode, systemMessage, tool filters, contextTier, and subagent config to the backend', async () => {
     const createSession = vi.fn().mockResolvedValue(createMockSession());
     const backend = createMockBackend({ createSession });
     const runtime = adaptCopilotBackend(backend);
@@ -111,6 +111,7 @@ describe('adaptCopilotBackend', () => {
       heartbeatTimeout: 120,
       contextTier: 'long_context',
       compactionMode: 'aggressive',
+      mode: 'plan',
       advisor: { model: 'advisor-model', thinkingBudget: 'high' },
       panel: { memberCount: 3, thinkingBudget: 'high' },
       mcpServers: { browser: { command: 'browser-mcp' } },
@@ -142,6 +143,7 @@ describe('adaptCopilotBackend', () => {
       expect.objectContaining({
         contextTier: 'long_context',
         compactionMode: 'aggressive',
+        mode: 'plan',
         advisor: { model: 'advisor-model', thinkingBudget: 'high' },
         mcpServers: { browser: { command: 'browser-mcp' } },
         systemMessage: 'You are a reviewer. Respond with JSON.',
@@ -175,6 +177,7 @@ describe('adaptCopilotBackend', () => {
 
     const forwarded = createSession.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(forwarded).not.toHaveProperty('compactionMode');
+    expect(forwarded).not.toHaveProperty('mode');
     expect(forwarded).not.toHaveProperty('customAgents');
     expect(forwarded).not.toHaveProperty('subagentRoster');
     expect(forwarded).not.toHaveProperty('subagentsEnabled');
