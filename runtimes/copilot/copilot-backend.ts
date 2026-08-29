@@ -9,7 +9,7 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
-import type { AdvisorConfig, StandInConfig } from '../../src/types';
+import type { AdvisorConfig, RuntimeCapabilities, StandInConfig } from '../../src/types';
 import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
 export interface MCPServerConfig {
@@ -42,18 +42,25 @@ export interface DefaultAgentConfig {
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
 export type SessionMode = 'autopilot' | 'plan';
+export type PermissionPolicy = 'default' | 'read-only';
 
 export interface SessionConfig extends SubagentLimits {
   /** Model to use: "claude-opus-4.6", "gpt-5.4", etc. */
   readonly model: string;
   /** Thinking budget level for extended thinking models */
-  readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh';
+  readonly thinkingBudget?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Context-window tier to request from the Copilot SDK. */
   readonly contextTier?: 'default' | 'long_context';
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
+  /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** Require the requested mode to be applied before the prompt is sent. */
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /** MCP server configurations for the root session, or false to disable them. */
@@ -275,8 +282,11 @@ export interface SessionCreationOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Create a new agent session with the given configuration */
 export interface CopilotBackend {
-  /** Create a new agent session with the given configuration */
+  /** Runtime guarantees exposed by this backend implementation. */
+  readonly capabilities?: RuntimeCapabilities;
+
   createSession(
     config: SessionConfig,
     options?: SessionCreationOptions,

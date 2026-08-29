@@ -210,10 +210,16 @@ describe('agent factory', () => {
     await agent({
       promptBuilder: () => 'test prompt',
       mode: 'plan',
+      permissionPolicy: 'read-only',
+      requireMode: true,
     })(createMockInput(), createMockContext(mockRuntime));
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'plan' }),
+      expect.objectContaining({
+        mode: 'plan',
+        permissionPolicy: 'read-only',
+        requireMode: true,
+      }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -1076,6 +1082,18 @@ describe('agent factory', () => {
     expect(isRetriableModelError(new Error('unrecognized failure'), { attempt: 1 })).toBe(true);
   });
 
+  it.each([42, { malformed: true }, [], true])(
+    'falls back to message classification for malformed public errorCode %o',
+    (errorCode) => {
+      const meta = {
+        attempt: 1,
+        errorCode,
+      } as unknown as Parameters<typeof isRetriableModelError>[1];
+
+      expect(isRetriableModelError(new Error('invalid request from upstream'), meta)).toBe(false);
+    },
+  );
+
   it('lets a retriable status override a permanent text marker', () => {
     expect(isRetriableModelError(new Error('invalid request from upstream'), {
       attempt: 1,
@@ -1170,6 +1188,66 @@ describe('agent factory', () => {
       promptBuilder: () => 'go',
       retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
     })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(nestedError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the original error when malformed metadata reaches the retry flow', async () => {
+    const malformedError = Object.assign(new Error('invalid request from upstream'), {
+      statusCode: { malformed: true },
+      errorCode: ['not-a-code'],
+    });
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', malformedError);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(malformedError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('uses a valid code when errorCode metadata is malformed', async () => {
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'fallback-code-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const failedError = Object.assign(new Error('permission denied after upstream failure'), {
+      errorCode: { malformed: true },
+      code: 'ECONNRESET',
+    });
+    failed.send.mockImplementation(() => queueMicrotask(() => failed._emit('error', failedError)));
+    succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+    await agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime));
+
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('rethrows the original error when a custom retry classifier throws', async () => {
+    const originalError = Object.assign(new Error('upstream failure'), { statusCode: 503 });
+    const classifierError = new Error('classifier failed');
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', originalError);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: {
+        maxAttempts: 2,
+        isRetriable: () => {
+          throw classifierError;
+        },
+      },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(originalError);
     expect(mockRuntime.createSession).toHaveBeenCalledOnce();
   });
 

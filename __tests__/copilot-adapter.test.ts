@@ -27,6 +27,18 @@ describe('adaptCopilotBackend', () => {
     expect(runtime.name).toBe('test-backend');
   });
 
+  it('forwards runtime capabilities without manufacturing them', () => {
+    const capabilities = {
+      readOnlyPermissions: true as const,
+      requiredModeVerification: true as const,
+    };
+    const withCapabilities = adaptCopilotBackend(createMockBackend({ capabilities }));
+    expect(withCapabilities.capabilities).toBe(capabilities);
+
+    const withoutCapabilities = adaptCopilotBackend(createMockBackend());
+    expect(withoutCapabilities).not.toHaveProperty('capabilities');
+  });
+
   it('delegates isAvailable to backend', async () => {
     const backend = createMockBackend();
     const runtime = adaptCopilotBackend(backend);
@@ -112,6 +124,8 @@ describe('adaptCopilotBackend', () => {
       contextTier: 'long_context',
       compactionMode: 'aggressive',
       mode: 'plan',
+      permissionPolicy: 'read-only',
+      requireMode: true,
       advisor: { model: 'advisor-model', thinkingBudget: 'high' },
       standIn: { memberCount: 3, thinkingBudget: 'high' },
       mcpServers: { browser: { command: 'browser-mcp' } },
@@ -144,6 +158,8 @@ describe('adaptCopilotBackend', () => {
         contextTier: 'long_context',
         compactionMode: 'aggressive',
         mode: 'plan',
+        permissionPolicy: 'read-only',
+        requireMode: true,
         advisor: { model: 'advisor-model', thinkingBudget: 'high' },
         mcpServers: { browser: { command: 'browser-mcp' } },
         systemMessage: 'You are a reviewer. Respond with JSON.',
@@ -178,6 +194,8 @@ describe('adaptCopilotBackend', () => {
     const forwarded = createSession.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(forwarded).not.toHaveProperty('compactionMode');
     expect(forwarded).not.toHaveProperty('mode');
+    expect(forwarded).not.toHaveProperty('permissionPolicy');
+    expect(forwarded).not.toHaveProperty('requireMode');
     expect(forwarded).not.toHaveProperty('customAgents');
     expect(forwarded).not.toHaveProperty('subagentRoster');
     expect(forwarded).not.toHaveProperty('subagentsEnabled');

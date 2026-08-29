@@ -152,6 +152,8 @@ describe('agentNode', () => {
       contextTier: 'long_context',
       thinkingBudget: 'xhigh',
       mode: 'plan',
+      permissionPolicy: 'read-only',
+      requireMode: true,
       advisor: { model: 'advisor-model', contextTier: 'long_context' },
       standIn: { memberCount: 3, contextTier: 'long_context' },
       mcpServers: {
@@ -174,6 +176,8 @@ describe('agentNode', () => {
         contextTier: 'long_context',
         thinkingBudget: 'xhigh',
         mode: 'plan',
+        permissionPolicy: 'read-only',
+        requireMode: true,
         advisor: { model: 'advisor-model', contextTier: 'long_context' },
         standIn: { memberCount: 3, contextTier: 'long_context' },
         mcpServers: {

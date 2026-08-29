@@ -61,7 +61,10 @@ interface MockSdkSession {
   abort: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
   rpc: {
-    mode: { set: ReturnType<typeof vi.fn> };
+    mode: {
+      set: ReturnType<typeof vi.fn>;
+      get: ReturnType<typeof vi.fn>;
+    };
     tools: { updateSubagentSettings: ReturnType<typeof vi.fn> };
     history: {
       compact: ReturnType<typeof vi.fn>;
@@ -100,7 +103,13 @@ function createMockSdkSession(): MockSdkSession {
     abort: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: {
-      mode: { set: vi.fn().mockResolvedValue(undefined) },
+      mode: {
+        set: vi.fn().mockImplementation(async ({ mode }: { mode: string }) => {
+          session.rpc.mode.get.mockResolvedValue(mode);
+          return undefined;
+        }),
+        get: vi.fn().mockResolvedValue('autopilot'),
+      },
       tools: { updateSubagentSettings: vi.fn().mockResolvedValue({}) },
       history: {
         compact: vi.fn().mockResolvedValue({ success: true, tokensRemoved: 0, messagesRemoved: 0 }),
@@ -619,6 +628,189 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => {
       expect(mock.rpc.mode.set).toHaveBeenCalledWith({ mode: expected });
     });
+  });
+
+  it('confirms the effective mode after setting a required mode', async () => {
+    const { session, mock } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    session.send('root prompt');
+
+    await vi.waitFor(() => {
+      expect(mock.rpc.mode.set).toHaveBeenCalledWith({ mode: 'plan' });
+      expect(mock.rpc.mode.get).toHaveBeenCalledOnce();
+      expect(mock.send).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('fails required mode startup when the effective mode readback mismatches', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.get.mockResolvedValueOnce('autopilot');
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Effective SDK session mode 'autopilot' does not match required mode 'plan'"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+    expect(sdkSession.abort).toHaveBeenCalledOnce();
+    expect(sdkSession.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('fails required mode startup when effective mode readback throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.get.mockRejectedValueOnce(new Error('mode readback unavailable'));
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining('mode readback unavailable'),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+  });
+
+  it('allows ordinary reads and read-only MCP while denying every write-capable operation', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    const approved = [
+      { kind: 'read', path: '/repo/file.ts' },
+      { kind: 'mcp', toolName: 'list', readOnly: true },
+    ] as const;
+    for (const request of approved) {
+      expect(config.onPermissionRequest(request, { sessionId: 'session-1' })).toEqual({
+        kind: 'approve-once',
+      });
+    }
+
+    const denied = [
+      { kind: 'read', path: '/outside/file.ts', requestSandboxBypass: true },
+      { kind: 'read', path: '/repo/file.ts', managedApprovalRequired: true },
+      { kind: 'mcp', toolName: 'mutate', readOnly: false },
+      { kind: 'mcp', toolName: 'unknown' },
+      { kind: 'shell', fullCommandText: 'git status' },
+      { kind: 'write', fileName: '/repo/file.ts' },
+      { kind: 'custom-tool', toolName: 'helper' },
+      { kind: 'hook', toolName: 'helper' },
+      { kind: 'url', url: 'https://example.test' },
+      { kind: 'memory', action: 'store' },
+    ] as const;
+    for (const request of denied) {
+      expect(config.onPermissionRequest(request, { sessionId: 'session-1' })).toEqual({
+        kind: 'reject',
+        feedback: 'Permission denied by the read-only session policy.',
+      });
+    }
+  });
+
+  it('denies read-only MCP when the request omits the explicit readOnly marker', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'mcp', toolName: 'search_code' },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('denies a managed read request instead of bypassing the human approval boundary', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'read', path: '/repo/file.ts', managedApprovalRequired: true },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('does not approve read requests that request a sandbox bypass', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'read', path: '/outside/file.ts', requestSandboxBypass: true },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('fails required mode startup before sending the prompt when mode.set throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.set.mockRejectedValueOnce(new Error('mode unsupported'));
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Required SDK session mode 'plan' could not be applied"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+    expect(sdkSession.abort).toHaveBeenCalledOnce();
+    expect(sdkSession.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('fails required mode startup before sending the prompt on an explicit false result', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.set.mockResolvedValueOnce({ success: false });
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Required SDK session mode 'plan' could not be applied"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps mode startup best-effort by default when mode.set throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, { mode: 'plan' });
+    sdkSession.rpc.mode.set.mockRejectedValueOnce(new Error('mode unsupported'));
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(sdkSession.send).toHaveBeenCalledOnce());
   });
 
   it('registers the stand-in tool only when configured', async () => {
@@ -2054,6 +2246,26 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
+  it('forwards the SDK-only max thinking effort through SdkBackend', async () => {
+    const backend = new SdkBackend({ subagentRoster: false });
+    const thinkingBudget = 'max' as unknown as SessionConfig['thinkingBudget'];
+    const session = await backend.createSession({
+      model: 'test-model',
+      thinkingBudget,
+      cwd: '.',
+      addDirs: [],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+    });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        reasoningEffort: 'max',
+      }));
+    });
+  });
+
   it('resolves a fallback-chain env reference embedded in an MCP header', async () => {
     // The default GitHub header is `Bearer ${A|B|C}`. A matcher without the alternatives finds
     // no reference, leaves the value untouched, and ships the placeholder as a literal bearer
@@ -2082,6 +2294,118 @@ describe('SdkBackend event mapping', () => {
       expect(authorization).toBe('Bearer gh-token-value');
       expect(authorization).not.toContain('${');
     });
+  });
+
+  it('uses the explicit MCP working directory for file servers when the session cwd is detached', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        fileOnly: { command: 'file-server' },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession(
+        {
+          mcpConfigPath,
+          mcpServerWorkingDirectory: '/workspace/repository',
+        },
+        { cwd: '/detached/session' },
+      );
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            fileOnly: {
+              type: 'local',
+              command: 'file-server',
+              tools: ['*'],
+              workingDirectory: '/workspace/repository',
+            },
+          },
+        }));
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves generic file MCP config when no working directory option is provided', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        generic: {
+          command: 'file-server',
+          args: ['--cwd', '/server/argument'],
+        },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession(
+        { mcpConfigPath },
+        { cwd: '/detached/session' },
+      );
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            generic: {
+              type: 'local',
+              command: 'file-server',
+              args: ['--cwd', '/server/argument'],
+              tools: ['*'],
+            },
+          },
+        }));
+      });
+      expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty(
+        'mcpServers.generic.workingDirectory',
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves an explicit file MCP server working directory over the backend option', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        explicit: {
+          type: 'stdio',
+          command: 'file-server',
+          workingDirectory: '/server/specific',
+        },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession({
+        mcpConfigPath,
+        mcpServerWorkingDirectory: '/workspace/repository',
+      });
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            explicit: {
+              type: 'stdio',
+              command: 'file-server',
+              workingDirectory: '/server/specific',
+              tools: ['*'],
+            },
+          },
+        }));
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('merges backend MCP file servers with session servers, favoring the session', async () => {

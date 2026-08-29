@@ -27,6 +27,7 @@ import type {
   PermissionHandler as CopilotPermissionHandler,
   SessionConfig as CopilotSdkSessionConfig,
   SessionEvent as CopilotSdkSessionEvent,
+  SessionEventType,
   Tool as CopilotSdkTool,
   approveAll as approveAllPermissions,
   RuntimeConnection as CopilotRuntimeConnection,
@@ -81,6 +82,8 @@ export interface SdkBackendOptions extends SubagentLimits {
   readonly complementaryModelPolicy?: ComplementaryModelPolicy;
   /** Receives non-fatal backend diagnostics. */
   readonly logger?: Logger;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
 }
 
 /** Shape of the dynamically imported @github/copilot-sdk module. */
@@ -187,6 +190,18 @@ interface SdkEvent {
   readonly type?: string;
   readonly agentId?: string;
   readonly data?: Record<string, unknown>;
+}
+
+function onSdkEvent<T extends SessionEventType>(
+  session: SdkSessionHandle,
+  type: T,
+  handler: (event: SdkEvent) => void,
+): void {
+  session.on(type, (event) => handler(normalizeSdkEvent(event)));
+}
+
+function onAllSdkEvents(session: SdkSessionHandle, handler: (event: SdkEvent) => void): void {
+  session.on((event) => handler(normalizeSdkEvent(event)));
 }
 
 interface ContextUsage {
@@ -623,6 +638,35 @@ function informedStandInPrompt(
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isExplicitModeFailure(result: unknown): boolean {
+  if (result === false || !isRecord(result)) return result === false;
+  return ['success', 'ok', 'applied'].some((field) => (
+    Object.prototype.hasOwnProperty.call(result, field) && result[field] === false
+  ));
+}
+
+const READ_ONLY_PERMISSION_FEEDBACK = 'Permission denied by the read-only session policy.';
+
+function readOnlyPermissionHandler(
+  request: Parameters<CopilotPermissionHandler>[0],
+): ReturnType<CopilotPermissionHandler> {
+  // The SDK classifies filesystem reads and MCP tools independently. Permit
+  // only a normal in-sandbox read and an MCP operation explicitly marked
+  // read-only by the server metadata; shell commands remain denied even when
+  // their parsed command names look harmless.
+  if (
+    request.kind === 'read'
+    && request.requestSandboxBypass !== true
+    && request.managedApprovalRequired !== true
+  ) {
+    return { kind: 'approve-once' };
+  }
+  if (request.kind === 'mcp' && request.readOnly === true) {
+    return { kind: 'approve-once' };
+  }
+  return { kind: 'reject', feedback: READ_ONLY_PERMISSION_FEEDBACK };
 }
 
 function parseStandInBallot(raw: string, optionIds: readonly string[]): StandInBallot {
@@ -1086,7 +1130,10 @@ function parseMcpServer(
   };
 }
 
-function parseMcpConfig(configPath: string): Record<string, CopilotMcpServerConfig> | null {
+function parseMcpConfig(
+  configPath: string,
+  mcpServerWorkingDirectory?: string,
+): Record<string, CopilotMcpServerConfig> | null {
   try {
     if (!fs.existsSync(configPath)) return null;
     const raw: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -1098,7 +1145,19 @@ function parseMcpConfig(configPath: string): Record<string, CopilotMcpServerConf
     const result: Record<string, CopilotMcpServerConfig> = {};
     for (const [name, config] of Object.entries(servers)) {
       const parsed = parseMcpServer(config, true);
-      if (parsed) result[name] = parsed;
+      if (!parsed) continue;
+      if (
+        mcpServerWorkingDirectory !== undefined
+        && (parsed.type === 'stdio' || parsed.type === 'local')
+        && parsed.workingDirectory === undefined
+      ) {
+        result[name] = {
+          ...parsed,
+          workingDirectory: mcpServerWorkingDirectory,
+        };
+      } else {
+        result[name] = parsed;
+      }
     }
     return Object.keys(result).length > 0 ? result : null;
   } catch (err) {
@@ -1251,6 +1310,10 @@ interface SdkEventHandler {
  */
 export class SdkBackend implements CopilotBackend {
   readonly name = 'sdk';
+  readonly capabilities = Object.freeze({
+    readOnlyPermissions: true,
+    requiredModeVerification: true,
+  } as const);
   private readonly mcpConfigPath: string | undefined;
   private readonly configDirectory: string | undefined;
   private readonly subagentRoster: SubagentRoster | false | undefined;
@@ -1260,6 +1323,7 @@ export class SdkBackend implements CopilotBackend {
   private readonly maxConcurrency: number | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
+  private readonly mcpServerWorkingDirectory: string | undefined;
   private readonly logger: Logger;
   private modelListPromise: Promise<readonly CopilotSdkModelInfo[] | undefined> | undefined;
   private readonly modelCapabilityResolutions = new Map<
@@ -1278,6 +1342,7 @@ export class SdkBackend implements CopilotBackend {
     this.maxConcurrency = options.maxConcurrency;
     this.extraPathDirs = options.extraPathDirs ?? [];
     this.pathTools = options.pathTools ?? [];
+    this.mcpServerWorkingDirectory = options.mcpServerWorkingDirectory;
     this.logger = options.logger ?? NO_OP_LOGGER;
   }
 
@@ -1400,6 +1465,7 @@ export class SdkBackend implements CopilotBackend {
       this.extraPathDirs,
       this.pathTools,
       this.logger,
+      this.mcpServerWorkingDirectory,
       (client, model) => this.resolveModelCapabilities(client, model),
     );
   }
@@ -1433,6 +1499,7 @@ class SdkSession implements CopilotSession {
   private readonly backendMaxConcurrency: number | undefined;
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
+  private readonly mcpServerWorkingDirectory: string | undefined;
   private readonly logger: Logger;
   private readonly resolveModelCapabilities: (
     client: SdkClient,
@@ -1544,6 +1611,7 @@ class SdkSession implements CopilotSession {
     extraPathDirs: readonly string[],
     pathTools: readonly string[],
     logger: Logger,
+    mcpServerWorkingDirectory: string | undefined,
     resolveModelCapabilities: (
       client: SdkClient,
       model: string,
@@ -1559,6 +1627,7 @@ class SdkSession implements CopilotSession {
     this.backendMaxConcurrency = backendMaxConcurrency;
     this.extraPathDirs = extraPathDirs;
     this.pathTools = pathTools;
+    this.mcpServerWorkingDirectory = mcpServerWorkingDirectory;
     this.logger = logger;
     this.resolveModelCapabilities = resolveModelCapabilities;
   }
@@ -1633,7 +1702,7 @@ class SdkSession implements CopilotSession {
     // ---------------------------------------------------------------
     const configuredMcpServers = toSdkMcpServers(this.config.mcpServers);
     const fileMcpServers = this.mcpConfigPath
-      ? parseMcpConfig(this.mcpConfigPath)
+      ? parseMcpConfig(this.mcpConfigPath, this.mcpServerWorkingDirectory)
       : null;
     // Backend-level file servers remain available when authoring-layer defaults
     // are present. A session entry with the same name is the more specific value;
@@ -1774,22 +1843,24 @@ class SdkSession implements CopilotSession {
         ? [...this.config.excludedBuiltinAgents]
         : undefined;
 
-    const permissionHandler: CopilotPermissionHandler = subagentsEnabled
-      ? approveAll
-      : (request, invocation) => {
-          const toolName = request.kind === 'custom-tool'
-            || request.kind === 'mcp'
-            || request.kind === 'hook'
-            ? request.toolName
-            : undefined;
-          if (toolName === 'task') {
-            return {
-              kind: 'reject',
-              feedback: 'Model-issued sub-agent dispatch is disabled for this session.',
-            };
-          }
-          return approveAll(request, invocation);
-        };
+    const permissionHandler: CopilotPermissionHandler = this.config.permissionPolicy === 'read-only'
+      ? (request) => readOnlyPermissionHandler(request)
+      : subagentsEnabled
+        ? approveAll
+        : (request, invocation) => {
+            const toolName = request.kind === 'custom-tool'
+              || request.kind === 'mcp'
+              || request.kind === 'hook'
+              ? request.toolName
+              : undefined;
+            if (toolName === 'task') {
+              return {
+                kind: 'reject',
+                feedback: 'Model-issued sub-agent dispatch is disabled for this session.',
+              };
+            }
+            return approveAll(request, invocation);
+          };
 
     let sdkSession: SdkSessionHandle | undefined;
     const tools = [
@@ -1919,9 +1990,27 @@ class SdkSession implements CopilotSession {
     }
 
     // Preserve the established autonomous default while allowing plan-mode boundaries.
+    const requestedMode = this.config.mode ?? 'autopilot';
     try {
-      await sdkSession.rpc.mode.set({ mode: this.config.mode ?? 'autopilot' });
-    } catch {
+      const modeResult: unknown = await sdkSession.rpc.mode.set({ mode: requestedMode });
+      if (this.config.requireMode === true && isExplicitModeFailure(modeResult)) {
+        throw new Error(`SDK rejected required session mode: ${requestedMode}`);
+      }
+      if (this.config.requireMode === true) {
+        const effectiveMode = await sdkSession.rpc.mode.get();
+        if (effectiveMode !== requestedMode) {
+          throw new Error(
+            `Effective SDK session mode '${effectiveMode}' does not match required mode '${requestedMode}'`,
+          );
+        }
+      }
+    } catch (error) {
+      if (this.config.requireMode === true) {
+        await this._cleanup();
+        throw new Error(
+          `Required SDK session mode '${requestedMode}' could not be applied: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       // SDK may not support mode.set — continue without it
     }
 
@@ -1957,7 +2046,7 @@ class SdkSession implements CopilotSession {
     const isActive = (): boolean => this._sdkSession === sdkSession && !this.aborted;
 
     // --- Assistant text response ---
-    sdkSession.on('assistant.message', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.message', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
 
@@ -1985,7 +2074,7 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Assistant text delta (streaming) ---
-    sdkSession.on('assistant.message_delta', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.message_delta', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
@@ -1999,14 +2088,14 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Reasoning ---
-    sdkSession.on('assistant.reasoning', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.reasoning', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const content = typeof e.data?.content === 'string' ? e.data.content : '';
       if (content) this.emit('reasoning', content);
     });
 
-    sdkSession.on('assistant.reasoning_delta', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.reasoning_delta', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const delta = typeof e.data?.deltaContent === 'string' ? e.data.deltaContent : '';
@@ -2014,7 +2103,7 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Tool execution start ---
-    sdkSession.on('tool.execution_start', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'tool.execution_start', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
 
@@ -2044,7 +2133,7 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Tool execution complete ---
-    sdkSession.on('tool.execution_complete', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'tool.execution_complete', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
 
@@ -2080,7 +2169,7 @@ class SdkSession implements CopilotSession {
     // Note: tool.execution_partial_result does NOT carry parentToolCallId in
     // the SDK. We look it up from the _callIdToParent map populated by
     // tool.execution_start.
-    sdkSession.on('tool.execution_partial_result', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'tool.execution_partial_result', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
 
@@ -2104,14 +2193,14 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Session idle (agent finished all work) ---
-    sdkSession.on('session.idle', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.idle', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       if (!e.agentId) this.settleIdle();
     });
 
     // --- task_complete → idle (some models fire this instead of session.idle) ---
-    sdkSession.on('session.task_complete', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.task_complete', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       if (e.agentId) return;
@@ -2131,7 +2220,7 @@ class SdkSession implements CopilotSession {
 
     // The CLI normally follows an abort event with session.idle. If that
     // terminal event is lost, fail quickly rather than waiting for heartbeat.
-    sdkSession.on('abort', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'abort', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       if (this.logAgentScopedFailure(e)) return;
@@ -2145,7 +2234,7 @@ class SdkSession implements CopilotSession {
     });
 
     // --- Session/model errors ---
-    sdkSession.on('session.error', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.error', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       if (this.logAgentScopedFailure(e)) return;
@@ -2161,7 +2250,7 @@ class SdkSession implements CopilotSession {
     // no API to resume/retry that in-flight turn. A second send() would append a
     // duplicate user message rather than replaying the failed call, so fail the
     // condukt session immediately instead of waiting for its heartbeat timeout.
-    sdkSession.on('model.call_failure', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'model.call_failure', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       if (this.logAgentScopedFailure(e)) return;
@@ -2201,21 +2290,18 @@ class SdkSession implements CopilotSession {
       );
     });
 
-    sdkSession.on('session.usage_info', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.usage_info', (e: SdkEvent) => {
       if (!isActive()) return;
       this.handleContextUsage(sdkSession, e);
     });
 
-    sdkSession.on('assistant.turn_retry', (e: SdkEvent) => {
-      if (!isActive()) return;
-      if (e.agentId) this.retryingAgentIds.add(e.agentId);
-      else this.retryingParent = true;
-    });
+    // assistant.turn_retry is delivered through the catch-all handler below.
+    // SDK 1.0.11 does not include it in its typed SessionEventType union.
 
     // --- Context compaction (infinite sessions) ---
     // During compaction the model goes silent. SUSPEND the heartbeat entirely
     // (not reset) to prevent killing the session. Hard timeout remains as safety net.
-    sdkSession.on('session.compaction_start', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.compaction_start', (e: SdkEvent) => {
       if (!isActive()) return;
       if (e.agentId) return;
       this.resetHeartbeat();
@@ -2273,7 +2359,7 @@ class SdkSession implements CopilotSession {
       }, 3 * 60 * 1000);
     });
 
-    sdkSession.on('session.compaction_complete', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'session.compaction_complete', (e: SdkEvent) => {
       if (!isActive()) return;
       if (e.agentId) return;
       this.compactionInProgress = false;
@@ -2325,7 +2411,7 @@ class SdkSession implements CopilotSession {
     // Sub-agents use their own event path (subagent_start/subagent_end).
     // The synthetic tool_start/tool_complete dual-emit is removed — sub-agent
     // grouping is handled by SubagentSectionPart in the UI layer.
-    sdkSession.on('subagent.started', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'subagent.started', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
@@ -2334,7 +2420,7 @@ class SdkSession implements CopilotSession {
       this.emit('subagent_start', name, { ...data, toolCallId });
     });
 
-    sdkSession.on('subagent.completed', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'subagent.completed', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
@@ -2354,7 +2440,7 @@ class SdkSession implements CopilotSession {
       this.emit('subagent_end', name, { ...data, toolCallId });
     });
 
-    sdkSession.on('subagent.failed', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'subagent.failed', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const data = e.data;
@@ -2366,20 +2452,20 @@ class SdkSession implements CopilotSession {
 
     // --- Rich events (optional; consumers can subscribe or ignore) ---
 
-    sdkSession.on('assistant.intent', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.intent', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       const intent = typeof e.data?.intent === 'string' ? e.data.intent : '';
       if (intent) this.emit('intent', intent);
     });
 
-    sdkSession.on('assistant.usage', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'assistant.usage', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       this.emit('usage', e.data ?? {});
     });
 
-    sdkSession.on('permission.requested', (e: SdkEvent) => {
+    onSdkEvent(sdkSession, 'permission.requested', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
       this.emit('permission', e.data ?? {});
@@ -2388,7 +2474,7 @@ class SdkSession implements CopilotSession {
     // Class-level handling for the full SDK event surface. Named handlers above
     // retain payload-specific mapping; this dispatcher supplies liveness,
     // terminal fallbacks, pending-request policies, and future-event safety.
-    sdkSession.on((e: SdkEvent) => {
+    onAllSdkEvents(sdkSession, (e: SdkEvent) => {
       if (!isActive()) return;
       this.dispatchClassEvent(sdkSession, e);
     });
@@ -2540,6 +2626,11 @@ class SdkSession implements CopilotSession {
   private dispatchClassEvent(sdkSession: SdkSessionHandle, e: SdkEvent): void {
     if (!e || typeof e.type !== 'string') return;
     this.resetHeartbeat();
+    if (e.type === 'assistant.turn_retry') {
+      if (e.agentId) this.retryingAgentIds.add(e.agentId);
+      else this.retryingParent = true;
+      return;
+    }
     if (NAMED_SDK_EVENTS.has(e.type)) return;
     const eventClass = classifySdkEvent(e.type);
     if (e.type === 'session.shutdown' && e.data?.shutdownType === 'error') {

@@ -34,6 +34,9 @@ import type {
 export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
   return {
     name: backend.name,
+    ...(backend.capabilities !== undefined
+      ? { capabilities: backend.capabilities }
+      : {}),
 
     isAvailable(): Promise<boolean> {
       return backend.isAvailable();
@@ -64,6 +67,12 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
           : {}),
         ...(config.mode !== undefined
           ? { mode: config.mode }
+          : {}),
+        ...(config.permissionPolicy !== undefined
+          ? { permissionPolicy: config.permissionPolicy }
+          : {}),
+        ...(config.requireMode !== undefined
+          ? { requireMode: config.requireMode }
           : {}),
         ...(config.advisor !== undefined
           ? { advisor: config.advisor }
@@ -103,6 +112,9 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
           : {}),
         ...(config.excludedBuiltinAgents !== undefined
           ? { excludedBuiltinAgents: config.excludedBuiltinAgents }
+          : {}),
+        ...(config.mcpServerWorkingDirectory !== undefined
+          ? { mcpServerWorkingDirectory: config.mcpServerWorkingDirectory }
           : {}),
       };
 

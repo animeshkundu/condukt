@@ -15,6 +15,7 @@ import type {
   MCPServersOption,
   RetryPolicy,
   SessionMode,
+  PermissionPolicy,
   ThinkingBudget,
   ToolRef,
   SubagentLimits,
@@ -75,6 +76,10 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly contextTier?: ContextTier;
   readonly compactionMode?: CompactionMode;
   readonly mode?: SessionMode;
+  readonly permissionPolicy?: PermissionPolicy;
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
@@ -451,6 +456,9 @@ export async function produce<T>(
     contextTier: config.contextTier,
     compactionMode: config.compactionMode,
     mode: config.mode,
+    permissionPolicy: config.permissionPolicy,
+    requireMode: config.requireMode,
+    mcpServerWorkingDirectory: config.mcpServerWorkingDirectory,
     advisor: config.advisor,
     standIn: config.standIn,
     mcpServers: config.mcpServers,

@@ -244,6 +244,13 @@ export interface SessionCreationOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface RuntimeCapabilities {
+  /** Every permission callback rejects writes and permits only safe reads. */
+  readonly readOnlyPermissions: true;
+  /** Required mode startup performs a post-set effective-mode readback. */
+  readonly requiredModeVerification: true;
+}
+
 export interface AgentRuntime {
   createSession(
     config: SessionConfig,
@@ -251,9 +258,11 @@ export interface AgentRuntime {
   ): Promise<AgentSession>;
   isAvailable(): Promise<boolean>;
   readonly name: string;
+  /** Optional runtime guarantees that callers may require before session creation. */
+  readonly capabilities?: RuntimeCapabilities;
 }
 
-export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ContextTier = 'default' | 'long_context';
 
 export interface RetryMeta {
@@ -403,6 +412,7 @@ export interface DefaultAgentConfig {
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
 export type SessionMode = 'autopilot' | 'plan';
+export type PermissionPolicy = 'default' | 'read-only';
 
 export interface AdvisorConfig {
   readonly model: string;
@@ -442,6 +452,12 @@ export interface SessionConfig extends SubagentLimits {
   readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
+  /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** Require the requested mode to be applied before the prompt is sent. */
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
@@ -615,6 +631,12 @@ export interface AgentConfig extends SubagentLimits {
   readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
+  /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** Require the requested mode to be applied before the prompt is sent. */
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /**

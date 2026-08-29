@@ -142,10 +142,10 @@ const TRANSIENT_ERROR_CODES = new Set([
 ]);
 
 interface ErrorWithRetryMetadata extends Error {
-  readonly statusCode?: number | string;
-  readonly status?: number | string;
-  readonly errorCode?: string;
-  readonly code?: string;
+  readonly statusCode?: unknown;
+  readonly status?: unknown;
+  readonly errorCode?: unknown;
+  readonly code?: unknown;
   readonly cause?: unknown;
 }
 
@@ -183,8 +183,14 @@ function readRetryMetadata(error: Error): Omit<RetryMeta, 'attempt'> {
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current);
     const candidate = current as ErrorWithRetryMetadata;
-    statusCode ??= numericStatus(candidate.statusCode ?? candidate.status);
-    errorCode ??= candidate.errorCode ?? candidate.code;
+    statusCode ??= numericStatus(candidate.statusCode) ?? numericStatus(candidate.status);
+    if (errorCode === undefined) {
+      if (typeof candidate.errorCode === 'string') {
+        errorCode = candidate.errorCode;
+      } else if (typeof candidate.code === 'string') {
+        errorCode = candidate.code;
+      }
+    }
     current = candidate.cause;
   }
 
@@ -226,7 +232,7 @@ export function isRetriableModelError(error: Error, meta: RetryMeta): boolean {
       || statusCode === 422);
   }
 
-  const code = meta.errorCode?.toUpperCase();
+  const code = typeof meta.errorCode === 'string' ? meta.errorCode.toUpperCase() : undefined;
   if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
 
   const messages = errorChain(error)
@@ -295,6 +301,15 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
     compactionMode: config.compactionMode,
     mode: config.mode ?? 'autopilot',
+    ...(config.permissionPolicy !== undefined
+      ? { permissionPolicy: config.permissionPolicy }
+      : {}),
+    ...(config.requireMode !== undefined
+      ? { requireMode: config.requireMode }
+      : {}),
+    ...(config.mcpServerWorkingDirectory !== undefined
+      ? { mcpServerWorkingDirectory: config.mcpServerWorkingDirectory }
+      : {}),
     advisor: config.advisor,
     standIn: config.standIn,
     ...(mcpServers !== undefined ? { mcpServers } : {}),
@@ -661,7 +676,16 @@ export function agent(config: AgentConfig): NodeFn {
 
           const retryMetadata = readRetryMetadata(currentError);
           const meta: RetryMeta = { attempt, ...retryMetadata };
-          const retriable = (policy.isRetriable ?? isRetriableModelError)(currentError, meta);
+          let retriable: boolean;
+          if (policy.isRetriable) {
+            try {
+              retriable = policy.isRetriable(currentError, meta);
+            } catch {
+              throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            }
+          } else {
+            retriable = isRetriableModelError(currentError, meta);
+          }
           if (!retriable || attempt >= maxAttempts) {
             throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
           }
