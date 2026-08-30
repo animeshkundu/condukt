@@ -1883,21 +1883,28 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
     mock._emit('assistant.turn_retry');
 
-    await expect(sendObservedParentRequest('req-blocked-retry')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const blockedRetry = sendObservedParentRequest('req-blocked-retry');
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(0);
     releaseVerification();
     await vi.waitFor(() => expect(logger.info).toHaveBeenCalledWith(
       'Verified completed Copilot parent compaction',
       expect.any(Object),
     ));
+    await expect(blockedRetry).resolves.toMatchObject({ status: 204 });
+    expect(logger.info).toHaveBeenCalledWith(
+      'Copilot model request dispatch',
+      expect.objectContaining({
+        requestId: 'req-blocked-retry',
+        purpose: 'retry',
+      }),
+    );
     await sendObservedParentRequest('req-forwarded-retry');
-
     expect(logger.info).toHaveBeenCalledWith(
       'Copilot model request dispatch',
       expect.objectContaining({
         requestId: 'req-forwarded-retry',
-        purpose: 'retry',
+        purpose: 'normal-turn',
       }),
     );
   });
@@ -3456,6 +3463,17 @@ describe('SdkBackend event mapping', () => {
     session.on('error', errorHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 75_000,
+      systemTokenCount: 20_000,
+      successfulCompactions: 0,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    await sendObservedParentRequest('req-establish-policy');
+
     mock._emit('session.usage_info', {
       currentTokens: 270_000,
       tokenLimit: 300_000,
@@ -3504,8 +3522,8 @@ describe('SdkBackend event mapping', () => {
       postCompactionTokens: 150_000,
       tokensRemoved: 130_000,
     });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(1));
-    await expect(observedRequestHandler().sendRequest(
+    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(2));
+    const duringVerification = observedRequestHandler().sendRequest(
       new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
       {
         requestId: 'req-during-compaction-verification',
@@ -3513,9 +3531,21 @@ describe('SdkBackend event mapping', () => {
         agentId: 'session-1',
         interactionType: 'conversation-agent',
       },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mockForwardedRequests).toHaveLength(0);
+    );
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(1);
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 150_000,
+      recomputedTotalTokens: 145_000,
+      messagesTokenCount: 135_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
     releasePostCompactionMeasurement();
+    await expect(duringVerification).resolves.toMatchObject({ status: 204 });
+    expect(mockForwardedRequests).toHaveLength(2);
 
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
       'complete',
@@ -3534,13 +3564,13 @@ describe('SdkBackend event mapping', () => {
         measuredPostCompactionTokens: 145_000,
         beforeSuccessfulCompactions: 0,
         afterSuccessfulCompactions: 1,
-        adaptiveCompactionThreshold: 285_000,
-        adaptiveCompactionHeadroom: 15_000,
+        adaptiveCompactionThreshold: 275_000,
+        adaptiveCompactionHeadroom: 25_000,
       }),
     );
   });
 
-  it('blocks ordinary parent dispatch while stock compaction is in progress', async () => {
+  it('parks ordinary parent dispatch while stock compaction is in progress', async () => {
     const { session, mock } = await createTestSession();
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -3561,10 +3591,22 @@ describe('SdkBackend event mapping', () => {
     });
     mock._emit('session.compaction_start');
 
-    await expect(sendObservedParentRequest('req-during-stock-compaction')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const request = sendObservedParentRequest('req-during-stock-compaction');
+    await Promise.resolve();
     expect(mockForwardedRequests).toHaveLength(0);
+
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 85_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    mock._emit('session.compaction_complete', { success: true });
+    await expect(request).resolves.toMatchObject({ status: 204 });
+    expect(mockForwardedRequests).toHaveLength(1);
   });
 
   it('does not let stale verification reopen dispatch for a newer compaction', async () => {
@@ -3654,12 +3696,12 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledTimes(2));
     expect(compactionHandler).toHaveBeenNthCalledWith(1, 'start');
     expect(compactionHandler).toHaveBeenNthCalledWith(2, 'start');
-    await expect(sendObservedParentRequest('req-before-newer-verification')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const beforeNewerVerification = sendObservedParentRequest('req-before-newer-verification');
+    await Promise.resolve();
     expect(mockForwardedRequests).toHaveLength(0);
 
     releaseSecondVerification();
+    await expect(beforeNewerVerification).resolves.toMatchObject({ status: 204 });
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
       'complete',
       '145000 → 75000 exact tokens (compactions 1 → 2)',
@@ -3969,5 +4011,96 @@ describe('SdkBackend event mapping', () => {
     });
 
     expect(toolCompleteHandler).toHaveBeenCalledWith('Grep', 'verbose fallback result', 'tc-2', undefined);
+  });
+
+  it('defers parent session.idle and session.task_complete until after compaction verification settles', async () => {
+    const { session, mock } = await createTestSession();
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    mock._emit('session.usage_info', {
+      currentTokens: 200_000,
+      tokenLimit: 300_000,
+      messagesLength: 8,
+      systemTokens: 10_000,
+      conversationTokens: 185_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 200_000,
+      recomputedTotalTokens: 195_000,
+      messagesTokenCount: 185_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 0,
+    });
+    mock._emit('session.compaction_start');
+
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
+    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
+      await verificationGate;
+      return {
+        contextInfo: {
+          totalTokens: 100_000,
+          promptTokenLimit: 300_000,
+          systemTokens: 10_000,
+          conversationTokens: 85_000,
+          toolDefinitionsTokens: 5_000,
+        },
+      };
+    });
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 85_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+    });
+
+    mock._emit('session.compaction_complete', { success: true, tokensRemoved: 100_000 });
+    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
+
+    mock._emit('session.idle');
+    expect(idleHandler).not.toHaveBeenCalled();
+
+    releaseVerification();
+    await vi.waitFor(() => expect(idleHandler).toHaveBeenCalledOnce());
+  });
+
+  it('rejects parked parent request when compaction fails during verification', async () => {
+    const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 200_000,
+      recomputedTotalTokens: 195_000,
+      messagesTokenCount: 185_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 0,
+    });
+    mock._emit('session.compaction_start');
+
+    const request = sendObservedParentRequest('req-parked-failed-compaction');
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(0);
+
+    mock._emit('session.compaction_complete', {
+      success: false,
+      error: 'provider quota exceeded',
+      statusCode: 429,
+    });
+
+    await expect(request).rejects.toThrow();
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('provider quota exceeded'),
+    }));
+    expect(mockForwardedRequests).toHaveLength(0);
   });
 });

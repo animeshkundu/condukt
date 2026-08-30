@@ -186,6 +186,67 @@ interface ParentRequestMeasurement {
   readonly observedInterRequestGrowth: number;
 }
 
+interface ParentUsageMeasurementSnapshot {
+  readonly usage: ContextUsage;
+  readonly diagnostics: ContextDiagnosticSnapshot;
+}
+
+type CompactionBarrierOutcome =
+  | { readonly status: 'verified' }
+  | { readonly status: 'superseded' }
+  | { readonly status: 'failed'; readonly error: Error };
+
+class CompactionBarrier {
+  readonly generation: number;
+  readonly promise: Promise<CompactionBarrierOutcome>;
+  phase: 'pending' | 'forced-recovery' | 'verification' = 'pending';
+  forcedRecoveryIssued = false;
+  recoveryDeadline: number | undefined;
+  graceDeadline: number | undefined;
+  beforeUsage: ContextUsage | undefined;
+  baselinePromise: Promise<ContextDiagnosticSnapshot | undefined> | undefined;
+  nativeStarted = false;
+  completionSeen = false;
+
+  private outcome: CompactionBarrierOutcome | undefined;
+  private resolvePromise!: (outcome: CompactionBarrierOutcome) => void;
+
+  constructor(generation: number) {
+    this.generation = generation;
+    this.promise = new Promise<CompactionBarrierOutcome>((resolve) => {
+      this.resolvePromise = resolve;
+    });
+  }
+
+  get isPending(): boolean {
+    return this.outcome === undefined;
+  }
+
+  settleVerified(): void {
+    this.settle({ status: 'verified' });
+  }
+
+  settleSuperseded(): void {
+    this.settle({ status: 'superseded' });
+  }
+
+  settleFailed(error: Error): void {
+    this.settle({ status: 'failed', error });
+  }
+
+  private settle(outcome: CompactionBarrierOutcome): void {
+    if (this.outcome !== undefined) return;
+    this.outcome = outcome;
+    this.resolvePromise(outcome);
+  }
+}
+
+interface RequestObservation {
+  readonly purpose: ModelRequestPurpose;
+  readonly child: boolean;
+  readonly generation: number;
+}
+
 interface SdkEvent {
   readonly type?: string;
   readonly agentId?: string;
@@ -239,11 +300,24 @@ type ModelRequestUsageProvider = (agentId: string | undefined) => ContextUsage |
 type ParentRequestUsageRefresher = (
   purpose: ModelRequestPurpose,
 ) => Promise<ParentRequestMeasurement | undefined>;
+type ParentCompactionWaiter = () => Promise<CompactionBarrierOutcome>;
+type ParentCompactionStateProvider = () => {
+  readonly active: boolean;
+  readonly pending: boolean;
+  readonly generation: number;
+  readonly lastCompactionTerminalError?: Error;
+};
 type ModelRequestDispatchGuard = (
   context: CopilotRequestContext,
   purpose: ModelRequestPurpose,
   child: boolean,
   measurement: ParentRequestMeasurement | undefined,
+) => boolean;
+type ModelRequestFinalDispatchGuard = (
+  context: CopilotRequestContext,
+  purpose: ModelRequestPurpose,
+  child: boolean,
+  generation: number,
 ) => boolean;
 type RetryStateReader = (
   agentId: string | undefined,
@@ -887,8 +961,11 @@ function createObservedRequestHandler(
   observe: ModelRequestObserver,
   usageFor: ModelRequestUsageProvider,
   refreshParentUsage: ParentRequestUsageRefresher,
+  waitForParentCompaction: ParentCompactionWaiter,
+  parentCompactionState: ParentCompactionStateProvider,
   retryState: RetryStateReader,
   canDispatch: ModelRequestDispatchGuard,
+  finalDispatchGuard: ModelRequestFinalDispatchGuard,
 ): CopilotSdkRequestHandler {
   return new class extends RequestHandler {
     private parentObservationTail: Promise<void> = Promise.resolve();
@@ -909,45 +986,87 @@ function createObservedRequestHandler(
       } catch {
         // A bodyless or non-cloneable request still carries content-length when known.
       }
-      await this.observeRequest(context, serialized);
+      const child = isChildModelRequest(context);
+      const purpose = await this.observeRequest(context, serialized);
+      if (!finalDispatchGuard(context, purpose, child, parentCompactionState().generation)) {
+        throw new Error(
+          `Blocked ${purpose} model request ${context.requestId}: parent context headroom has not been restored`,
+        );
+      }
       return super.sendRequest(request, context);
     }
 
     protected override async openWebSocket(
       context: CopilotRequestContext,
     ): Promise<CopilotWebSocketHandler> {
-      await this.observeRequest(context, {});
+      const child = isChildModelRequest(context);
+      const purpose = await this.observeRequest(context, {});
+      if (!finalDispatchGuard(context, purpose, child, parentCompactionState().generation)) {
+        throw new Error(
+          `Blocked ${purpose} model request ${context.requestId}: parent context headroom has not been restored`,
+        );
+      }
       return new WebSocketForwarder(context);
     }
 
     private observeRequest(
       context: CopilotRequestContext,
       serialized: ReturnType<typeof observedRequestBodyTelemetry>,
-    ): Promise<void> {
+    ): Promise<ModelRequestPurpose> {
       const child = isChildModelRequest(context);
-      if (child) return this.observeRequestNow(context, serialized, true);
-
+      if (child || context.interactionType === 'conversation-compaction') {
+        return this.observeRequestNow(context, serialized, child);
+      }
       const previous = this.parentObservationTail;
-      const observation = previous.then(() => this.observeRequestNow(context, serialized, false));
-      this.parentObservationTail = observation.catch(() => undefined);
+      const observation = previous.then(() => this.observeParentRequest(context, serialized));
+      this.parentObservationTail = observation.then(() => undefined).catch(() => undefined);
       return observation;
+    }
+
+    private async observeParentRequest(
+      context: CopilotRequestContext,
+      serialized: ReturnType<typeof observedRequestBodyTelemetry>,
+    ): Promise<ModelRequestPurpose> {
+      for (;;) {
+        const state = parentCompactionState();
+        if (state.pending) {
+          const outcome = await waitForParentCompaction();
+          if (outcome.status === 'failed') throw outcome.error;
+          continue;
+        }
+        if (!state.active) {
+          if (state.lastCompactionTerminalError) throw state.lastCompactionTerminalError;
+          throw new Error(
+            `Blocked parent model request ${context.requestId}: active session is unavailable`,
+          );
+        }
+        const retry = retryState(undefined, false);
+        const measurement = await refreshParentUsage(modelRequestPurpose(
+          context.interactionType,
+          false,
+          retry,
+        ));
+        const current = parentCompactionState();
+        if (current.pending || current.generation !== state.generation) continue;
+        if (!current.active) {
+          if (current.lastCompactionTerminalError) throw current.lastCompactionTerminalError;
+          throw new Error(
+            `Blocked parent model request ${context.requestId}: active session is unavailable`,
+          );
+        }
+        return this.observeRequestWithMeasurement(context, serialized, false, measurement, retry);
+      }
     }
 
     private async observeRequestNow(
       context: CopilotRequestContext,
       serialized: ReturnType<typeof observedRequestBodyTelemetry>,
       child: boolean,
-    ): Promise<void> {
-      const compaction = context.interactionType === 'conversation-compaction';
+    ): Promise<ModelRequestPurpose> {
       const retryAgentId = child ? context.agentId : undefined;
-      const retry = compaction || (child && retryAgentId === undefined)
+      const retry = context.interactionType === 'conversation-compaction' || (child && retryAgentId === undefined)
         ? false
         : retryState(retryAgentId, false);
-      const purpose = modelRequestPurpose(
-        context.interactionType,
-        child,
-        retry,
-      );
       const childUsage = child && context.agentId !== undefined
         ? usageFor(context.agentId)
         : undefined;
@@ -955,7 +1074,18 @@ function createObservedRequestHandler(
         ? childUsage === undefined
           ? undefined
           : { usage: childUsage, observedInterRequestGrowth: 0 }
-        : await refreshParentUsage(purpose);
+        : await refreshParentUsage('compaction');
+      return this.observeRequestWithMeasurement(context, serialized, child, measurement, retry);
+    }
+
+    private observeRequestWithMeasurement(
+      context: CopilotRequestContext,
+      serialized: ReturnType<typeof observedRequestBodyTelemetry>,
+      child: boolean,
+      measurement: ParentRequestMeasurement | undefined,
+      retry: boolean,
+    ): ModelRequestPurpose {
+      const purpose = modelRequestPurpose(context.interactionType, child, retry);
       const usage = measurement?.usage;
       observe({
         requestId: context.requestId,
@@ -977,7 +1107,8 @@ function createObservedRequestHandler(
           `Blocked ${purpose} model request ${context.requestId}: parent context headroom has not been restored`,
         );
       }
-      if (retry) retryState(retryAgentId, true);
+      if (retry) retryState(child ? context.agentId : undefined, true);
+      return purpose;
     }
   }();
 }
@@ -1512,6 +1643,9 @@ class SdkSession implements CopilotSession {
   private compactionInProgress = false;
   private parentCompactionGeneration = 0;
   private verifiedParentCompactionGeneration = 0;
+  private lastCompactionTerminalError: Error | undefined;
+  private currentCompactionBarrier: CompactionBarrier | undefined;
+  private deferredIdle = false;
   private compactionBaselinePromise: Promise<ContextDiagnosticSnapshot | undefined> | undefined;
   private proactiveCompactionPromise: Promise<boolean> | undefined;
   private reportedPromptTokenLimit: number | undefined;
@@ -1599,6 +1733,28 @@ class SdkSession implements CopilotSession {
     return sdkSession;
   }
 
+  private parentCompactionState(): {
+    readonly active: boolean;
+    readonly pending: boolean;
+    readonly generation: number;
+    readonly lastCompactionTerminalError?: Error;
+  } {
+    const barrier = this.currentCompactionBarrier;
+    return {
+      active: !this.aborted && !this.turnSettled,
+      pending: barrier?.isPending ?? false,
+      generation: this.parentCompactionGeneration,
+      lastCompactionTerminalError: this.lastCompactionTerminalError,
+    };
+  }
+
+  private waitForParentCompactionBarrier(): Promise<CompactionBarrierOutcome> {
+    const barrier = this.currentCompactionBarrier;
+    return barrier?.isPending === true
+      ? barrier.promise
+      : Promise.resolve({ status: 'verified' });
+  }
+
   constructor(
     config: SessionConfig,
     mcpConfigPath: string | undefined,
@@ -1659,6 +1815,7 @@ class SdkSession implements CopilotSession {
     this.retryingParent = false;
     this.compactionBaselinePromise = undefined;
     this.proactiveCompactionPromise = undefined;
+    this.lastCompactionTerminalError = undefined;
     this.turnSettled = false;
     this._run(prompt).catch((err: unknown) => {
       this.fail(err instanceof Error ? err : new Error(String(err)), 'session.run');
@@ -1737,7 +1894,9 @@ class SdkSession implements CopilotSession {
                 ? undefined
                 : { usage: this.parentUsage, observedInterRequestGrowth: 0 });
         },
-        (agentId, consume) => {
+        () => this.waitForParentCompactionBarrier(),
+        () => this.parentCompactionState(),
+        (agentId: string | undefined, consume: boolean) => {
           if (agentId) {
             const retry = this.retryingAgentIds.has(agentId);
             if (retry && consume) this.retryingAgentIds.delete(agentId);
@@ -1750,7 +1909,7 @@ class SdkSession implements CopilotSession {
         // Capability discovery also uses this handler before createSession has
         // returned a session handle. Scope the allowance to traffic that has no
         // session provenance so a delayed createSession cannot open a parent turn.
-        (context, purpose, child, measurement) => {
+        (context: CopilotRequestContext, purpose: ModelRequestPurpose, child: boolean, measurement: ParentRequestMeasurement | undefined) => {
           if (this.aborted || this.turnSettled) return false;
           if (this._sdkSession === null) {
             return context.sessionId === undefined && context.agentId === undefined;
@@ -1763,6 +1922,7 @@ class SdkSession implements CopilotSession {
           if (
             this.parentCompactionGeneration > this.verifiedParentCompactionGeneration
             || this.compactionInProgress
+            || this.currentCompactionBarrier?.isPending === true
           ) return false;
           if (measurement === undefined) return false;
           const measuredUsage = measurement.usage;
@@ -1772,6 +1932,17 @@ class SdkSession implements CopilotSession {
           ) return false;
           if (this.config.compactionMode !== 'adaptive') return true;
           return this.canDispatchParentRequest(measuredUsage);
+        },
+        (context: CopilotRequestContext, purpose: ModelRequestPurpose, child: boolean, generation: number) => {
+          if (this.aborted || this.turnSettled) return false;
+          if (this._sdkSession === null) {
+            return context.sessionId === undefined && context.agentId === undefined;
+          }
+          if (child || purpose === 'compaction') return true;
+          return !this.compactionInProgress
+            && this.currentCompactionBarrier === undefined
+            && generation === this.parentCompactionGeneration
+            && generation === this.verifiedParentCompactionGeneration;
         },
       ),
     });
@@ -2196,7 +2367,7 @@ class SdkSession implements CopilotSession {
     onSdkEvent(sdkSession, 'session.idle', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
-      if (!e.agentId) this.settleIdle();
+      if (!e.agentId) this.handleParentIdle();
     });
 
     // --- task_complete → idle (some models fire this instead of session.idle) ---
@@ -2215,7 +2386,7 @@ class SdkSession implements CopilotSession {
         } catch { /* closed stream */ }
         return;
       }
-      this.settleIdle();
+      this.handleParentIdle();
     });
 
     // The CLI normally follows an abort event with session.idle. If that
@@ -2302,108 +2473,44 @@ class SdkSession implements CopilotSession {
     // During compaction the model goes silent. SUSPEND the heartbeat entirely
     // (not reset) to prevent killing the session. Hard timeout remains as safety net.
     onSdkEvent(sdkSession, 'session.compaction_start', (e: SdkEvent) => {
-      if (!isActive()) return;
-      if (e.agentId) return;
-      this.resetHeartbeat();
-      this.compactionInProgress = true;
-      this.parentCompactionGeneration += 1;
-      this.compactionBaselinePromise = this.captureContextDiagnostics(sdkSession, 'pre-compaction');
-      // SUSPEND heartbeat — compaction silence is expected
-      if (this.heartbeatTimer) {
-        clearTimeout(this.heartbeatTimer);
-        this.heartbeatTimer = null;
-      }
-      // Clear any existing stuck timer (handles double compaction_start)
-      if (this.compactionTimer) {
-        clearTimeout(this.compactionTimer);
-        this.compactionTimer = null;
-      }
+      if (!isActive() || e.agentId) return;
+      const barrier = this.beginCompactionBarrier();
+      barrier.nativeStarted = true;
+      barrier.beforeUsage = this.parentUsage;
+      barrier.baselinePromise = this.captureContextDiagnostics(sdkSession, 'pre-compaction');
+      this.compactionBaselinePromise = barrier.baselinePromise;
+      if (this.compactionTimer) clearTimeout(this.compactionTimer);
+      this.compactionTimer = setTimeout(() => {
+        void this.recoverCompaction(sdkSession, barrier);
+      }, 180_000);
       this.emit('compaction', 'start');
-
-      // Recovery: if compaction doesn't complete within 3 min, escalate.
-      // Capture session to local to avoid TOCTOU null dereference after await.
-      const session = this._sdkSession;
-      if (!session || !isActive()) return;
-      this.compactionTimer = setTimeout(async () => {
-        if (!this.compactionInProgress || !isActive() || !session) return;
-        try {
-          try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
-          await session.rpc.history.compact();
-          // Re-check guards after await — session may have been torn down
-          if (!this.compactionInProgress || !isActive()) return;
-          // If force-compact works, compaction_complete will fire naturally
-        } catch (err) {
-          if (!isActive()) return;
-          const usage = this.parentUsage;
-          const detail = err instanceof Error ? err.message : String(err);
-          const fields = {
-            requestPurpose: 'compaction',
-            error: detail,
-            ...(usage !== undefined
-              ? {
-                  currentTokens: usage.currentTokens,
-                  tokenLimit: usage.tokenLimit,
-                  messagesLength: usage.messagesLength,
-                  systemTokens: usage.systemTokens,
-                  conversationTokens: usage.conversationTokens,
-                  toolDefinitionsTokens: usage.toolDefinitionsTokens,
-                }
-              : {}),
-          };
-          this.fail(
-            new Error(`Compaction recovery request failed: ${detail}`),
-            'compaction.recovery_failure',
-            fields,
-          );
-        }
-      }, 3 * 60 * 1000);
     });
 
     onSdkEvent(sdkSession, 'session.compaction_complete', (e: SdkEvent) => {
-      if (!isActive()) return;
-      if (e.agentId) return;
-      this.compactionInProgress = false;
+      if (!isActive() || e.agentId) return;
+      const barrier = this.currentCompactionBarrier;
+      if (!barrier || !barrier.isPending || barrier.completionSeen) return;
+      barrier.completionSeen = true;
+      barrier.phase = 'verification';
+      this.compactionInProgress = true;
       if (this.compactionTimer) { clearTimeout(this.compactionTimer); this.compactionTimer = null; }
-      // Restart heartbeat while the asynchronous verification RPC runs. Any
-      // ordinary parent request remains guarded at the request-handler seam.
-      this.resetHeartbeat();
+      this.suspendHeartbeat();
       const data = e.data as Record<string, unknown> | undefined;
       if (data?.success === false) {
         const errMsg = typeof data.error === 'string' ? data.error : 'unknown reason';
         const rawStatusCode = data.statusCode;
-        const statusCode = typeof rawStatusCode === 'number'
-          ? ` (HTTP ${rawStatusCode})`
-          : '';
-        const usage = this.parentUsage;
-        const fields = {
-          ...data,
-          requestPurpose: 'compaction',
-          ...(usage !== undefined
-            ? {
-                currentTokens: usage.currentTokens,
-                tokenLimit: usage.tokenLimit,
-                messagesLength: usage.messagesLength,
-                systemTokens: usage.systemTokens,
-                conversationTokens: usage.conversationTokens,
-                toolDefinitionsTokens: usage.toolDefinitionsTokens,
-              }
-            : {}),
-        };
-        this.fail(
-          new Error(`Compaction model call failed${statusCode}: ${errMsg}`),
-          'compaction.call_failure',
-          fields,
-        );
+        const statusCode = typeof rawStatusCode === 'number' ? ` (HTTP ${rawStatusCode})` : '';
+        const error = new Error(`Compaction model call failed${statusCode}: ${errMsg}`);
+        this.settleCurrentCompactionBarrierFailed(error);
+        this.fail(error, 'compaction.call_failure', data);
         return;
       }
-      const generation = this.parentCompactionGeneration;
-      const baselinePromise = this.compactionBaselinePromise;
-      this.compactionBaselinePromise = undefined;
       void this.verifyCompletedCompaction(
         sdkSession,
         data,
-        generation,
-        baselinePromise,
+        barrier.generation,
+        barrier.baselinePromise,
+        barrier,
       );
     });
 
@@ -2510,8 +2617,10 @@ class SdkSession implements CopilotSession {
    */
   async abort(): Promise<void> {
     if (this.aborted) return;
+    const error = new Error('Session aborted');
+    this.settleCurrentCompactionBarrierFailed(error);
     this.clearTimers();
-    this.emitError(new Error('Session aborted'));
+    this.emitError(error);
     this.aborted = true;
     await this._cleanup();
   }
@@ -2523,6 +2632,7 @@ class SdkSession implements CopilotSession {
   private async _cleanup(): Promise<void> {
     const sdkSession = this._sdkSession;
     const client = this._client;
+    this.settleCurrentCompactionBarrierFailed(new Error('SDK session cleanup started'));
     this._sdkSession = null;
     this._client = null;
 
@@ -2565,6 +2675,7 @@ class SdkSession implements CopilotSession {
 
   private fail(err: Error, eventType: string, data?: Record<string, unknown>): void {
     if (this.aborted || this.turnSettled) return;
+    this.settleCurrentCompactionBarrierFailed(err);
     this.turnSettled = true;
     this.clearTimers();
     try {
@@ -2642,7 +2753,7 @@ class SdkSession implements CopilotSession {
       return;
     }
     if (eventClass === 'terminal-success') {
-      if (!e.agentId) this.settleIdle();
+      if (!e.agentId) this.handleParentIdle();
       return;
     }
     if (eventClass === 'terminal-failure') {
@@ -2760,10 +2871,10 @@ class SdkSession implements CopilotSession {
     }
   }
 
-  private async measureParentUsage(
+  private async measureParentUsageSnapshot(
     sdkSession: SdkSessionHandle,
     reason: 'pre-request' | 'post-compaction',
-  ): Promise<ContextUsage | undefined> {
+  ): Promise<ParentUsageMeasurementSnapshot | undefined> {
     const previous = this.parentUsage;
     try {
       const [contextResult, diagnostics] = await Promise.all([
@@ -2784,8 +2895,6 @@ class SdkSession implements CopilotSession {
         });
         return undefined;
       }
-      const completeDiagnostics = diagnostics;
-      this.latestContextDiagnostics = completeDiagnostics;
       const usage: ContextUsage = {
         currentTokens: diagnostics.attribution?.totalTokens ?? diagnostics.recomputed.totalTokens,
         tokenLimit: contextInfo.promptTokenLimit,
@@ -2794,20 +2903,7 @@ class SdkSession implements CopilotSession {
         conversationTokens: diagnostics.recomputed.messagesTokenCount,
         toolDefinitionsTokens: contextInfo.toolDefinitionsTokens,
       };
-      this.parentUsage = usage;
-      this.updateAdaptiveCompactionPolicy(usage, completeDiagnostics);
-      this.logger.info('Measured Copilot parent context', {
-        reason,
-        ...usage,
-        successfulCompactions: diagnostics.attribution?.compactions.count,
-        fixedPromptOverhead: diagnostics.fixedPromptOverhead,
-        contextAttribution: diagnostics.attribution,
-        heaviestMessages: diagnostics.heaviestMessages,
-        recomputedContextTokens: diagnostics.recomputed,
-        usageMetrics: diagnostics.usageMetrics,
-        ...this.adaptivePolicyFields(),
-      });
-      return usage;
+      return { usage, diagnostics };
     } catch (err) {
       this.logger.warn('Failed to measure Copilot parent context', {
         reason,
@@ -2818,34 +2914,70 @@ class SdkSession implements CopilotSession {
     }
   }
 
-  private shouldCaptureRequestDiagnostics(purpose: ModelRequestPurpose): boolean {
-    if (purpose === 'compaction') return false;
-    const usage = this.parentUsage;
-    if (!usage) return true;
-    const contextInfoThreshold = this.config.compactionMode === 'aggressive'
-      ? usage.tokenLimit * 0.60
-      : usage.tokenLimit * 0.80;
-    return usage.currentTokens >= contextInfoThreshold;
+  private commitParentUsageMeasurement(
+    snapshot: ParentUsageMeasurementSnapshot,
+    reason: 'pre-request' | 'post-compaction',
+    observedInterRequestGrowth = 0,
+  ): ContextUsage {
+    const { usage, diagnostics } = snapshot;
+    this.latestContextDiagnostics = diagnostics;
+    this.parentUsage = usage;
+    this.updateAdaptiveCompactionPolicy(usage, diagnostics);
+    if (observedInterRequestGrowth > this.largestObservedInterRequestGrowth) {
+      this.largestObservedInterRequestGrowth = observedInterRequestGrowth;
+      this.updateAdaptiveCompactionPolicy(usage, diagnostics);
+    }
+    this.logger.info('Measured Copilot parent context', {
+      reason,
+      ...usage,
+      successfulCompactions: diagnostics.attribution?.compactions.count,
+      fixedPromptOverhead: diagnostics.fixedPromptOverhead,
+      contextAttribution: diagnostics.attribution,
+      heaviestMessages: diagnostics.heaviestMessages,
+      recomputedContextTokens: diagnostics.recomputed,
+      usageMetrics: diagnostics.usageMetrics,
+      ...this.adaptivePolicyFields(),
+    });
+    return usage;
+  }
+
+  private async measureParentUsage(
+    sdkSession: SdkSessionHandle,
+    reason: 'pre-request' | 'post-compaction',
+  ): Promise<ContextUsage | undefined> {
+    const snapshot = await this.measureParentUsageSnapshot(sdkSession, reason);
+    return snapshot === undefined ? undefined : this.commitParentUsageMeasurement(snapshot, reason);
+  }
+
+  private commitParentUsageSnapshotIfCurrent(
+    sdkSession: SdkSessionHandle,
+    generation: number,
+    barrier: CompactionBarrier,
+    snapshot: ParentUsageMeasurementSnapshot,
+  ): ContextUsage | undefined {
+    if (
+      this.aborted
+      || this.turnSettled
+      || this._sdkSession !== sdkSession
+      || this.parentCompactionGeneration !== generation
+      || this.currentCompactionBarrier !== barrier
+      || !barrier.isPending
+    ) return undefined;
+    return this.commitParentUsageMeasurement(snapshot, 'post-compaction');
   }
 
   private async refreshParentUsageBeforeRequest(
     sdkSession: SdkSessionHandle,
     purpose: ModelRequestPurpose,
   ): Promise<ParentRequestMeasurement | undefined> {
-    const usage = await this.measureParentUsage(sdkSession, 'pre-request');
-    if (!usage) return undefined;
-
+    const snapshot = await this.measureParentUsageSnapshot(sdkSession, 'pre-request');
+    if (snapshot === undefined) return undefined;
     const previousRequestTokens = this.previousParentRequestTokens;
     const observedInterRequestGrowth = previousRequestTokens === undefined
       ? 0
-      : Math.max(0, usage.currentTokens - previousRequestTokens);
-    if (observedInterRequestGrowth > this.largestObservedInterRequestGrowth) {
-      this.largestObservedInterRequestGrowth = observedInterRequestGrowth;
-      if (this.latestContextDiagnostics) {
-        this.updateAdaptiveCompactionPolicy(usage);
-      }
-    }
-    this.previousParentRequestTokens = usage.currentTokens;
+      : Math.max(0, snapshot.usage.currentTokens - previousRequestTokens);
+    this.previousParentRequestTokens = snapshot.usage.currentTokens;
+    const usage = this.commitParentUsageMeasurement(snapshot, 'pre-request', observedInterRequestGrowth);
     this.logger.info('Refreshed Copilot parent context before model request', {
       purpose,
       ...usage,
@@ -2854,6 +2986,16 @@ class SdkSession implements CopilotSession {
       ...this.adaptivePolicyFields(),
     });
     return { usage, observedInterRequestGrowth };
+  }
+
+  private shouldCaptureRequestDiagnostics(purpose: ModelRequestPurpose): boolean {
+    if (purpose === 'compaction') return false;
+    const usage = this.parentUsage;
+    if (!usage) return true;
+    const contextInfoThreshold = this.config.compactionMode === 'aggressive'
+      ? usage.tokenLimit * 0.60
+      : usage.tokenLimit * 0.80;
+    return usage.currentTokens >= contextInfoThreshold;
   }
 
   private updateAdaptiveCompactionPolicy(
@@ -3100,17 +3242,37 @@ class SdkSession implements CopilotSession {
     data: Record<string, unknown> | undefined,
     generation: number,
     baselinePromise: Promise<ContextDiagnosticSnapshot | undefined> | undefined,
+    barrier: CompactionBarrier,
   ): Promise<void> {
-    const beforeUsage = this.parentUsage;
+    const beforeUsage = barrier.beforeUsage;
     const beforeDiagnostics = await baselinePromise;
-    const after = await this.measureParentUsage(sdkSession, 'post-compaction');
+    const snapshot = await this.measureParentUsageSnapshot(sdkSession, 'post-compaction');
+    if (snapshot === undefined) {
+      const usage = beforeUsage;
+      if (usage) {
+        this.failUnsafeContext(
+          'compaction-complete',
+          usage,
+          this.adaptiveCompactionPolicy,
+          nonNegativeFiniteNumber(data?.tokensRemoved) ?? 0,
+          'successful compaction could not be verified with exact token recomputation and attribution counts',
+        );
+      } else {
+        this.fail(new Error('Successful compaction could not be re-measured'), 'compaction.verification_failure', data);
+      }
+      return;
+    }
     if (
       this.aborted
       || this.turnSettled
       || this._sdkSession !== sdkSession
       || generation !== this.parentCompactionGeneration
+      || this.currentCompactionBarrier !== barrier
+      || !barrier.isPending
     ) return;
-    const afterDiagnostics = this.latestContextDiagnostics;
+    const after = this.commitParentUsageSnapshotIfCurrent(sdkSession, generation, barrier, snapshot);
+    if (after === undefined) return;
+    const afterDiagnostics = snapshot?.diagnostics;
     const policy = this.adaptiveCompactionPolicy;
     const beforeCompactions = beforeDiagnostics?.attribution?.compactions.count;
     const afterCompactions = afterDiagnostics?.attribution?.compactions.count;
@@ -3191,6 +3353,7 @@ class SdkSession implements CopilotSession {
     });
     const summary = `${beforeDiagnostics.recomputed.totalTokens} → ${afterDiagnostics.recomputed.totalTokens} exact tokens (compactions ${beforeCompactions} → ${afterCompactions})`;
     this.verifiedParentCompactionGeneration = generation;
+    this.settleCurrentCompactionBarrierVerified(generation);
     this.emit('compaction', 'complete', summary);
   }
 
@@ -3278,7 +3441,105 @@ class SdkSession implements CopilotSession {
     }, this.config.heartbeatTimeout * 1000);
   }
 
+  private suspendHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private handleParentIdle(): void {
+    if (this.currentCompactionBarrier?.isPending === true || this.compactionInProgress) {
+      this.deferredIdle = true;
+      this.suspendHeartbeat();
+      return;
+    }
+    this.settleIdle();
+  }
+
+  private beginCompactionBarrier(): CompactionBarrier {
+    const previous = this.currentCompactionBarrier;
+    if (previous?.isPending === true) previous.settleSuperseded();
+    const barrier = new CompactionBarrier(this.parentCompactionGeneration + 1);
+    this.currentCompactionBarrier = barrier;
+    this.parentCompactionGeneration = barrier.generation;
+    this.compactionInProgress = true;
+    this.suspendHeartbeat();
+    return barrier;
+  }
+
+  private settleCurrentCompactionBarrierVerified(generation: number): void {
+    const barrier = this.currentCompactionBarrier;
+    if (!barrier || barrier.generation !== generation || !barrier.isPending) return;
+    this.verifiedParentCompactionGeneration = generation;
+    this.currentCompactionBarrier = undefined;
+    this.compactionInProgress = false;
+    this.compactionBaselinePromise = undefined;
+    barrier.settleVerified();
+    if (this.deferredIdle) {
+      this.deferredIdle = false;
+      this.settleIdle();
+    } else {
+      this.resetHeartbeat();
+    }
+  }
+
+  private settleCurrentCompactionBarrierFailed(error: Error): void {
+    const barrier = this.currentCompactionBarrier;
+    this.lastCompactionTerminalError = error;
+    this.currentCompactionBarrier = undefined;
+    this.compactionInProgress = false;
+    this.compactionBaselinePromise = undefined;
+    if (barrier?.isPending === true) barrier.settleFailed(error);
+    this.suspendHeartbeat();
+  }
+
+  private async recoverCompaction(
+    sdkSession: SdkSessionHandle,
+    barrier: CompactionBarrier,
+  ): Promise<void> {
+    if (
+      this.aborted
+      || this.turnSettled
+      || this._sdkSession !== sdkSession
+      || this.currentCompactionBarrier !== barrier
+      || !barrier.isPending
+      || barrier.completionSeen
+    ) return;
+    barrier.graceDeadline = Date.now() + 30_000;
+    barrier.phase = 'forced-recovery';
+    barrier.forcedRecoveryIssued = true;
+    try {
+      try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
+      await Promise.race([
+        sdkSession.rpc.history.compact(),
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error('Compaction recovery request timed out')),
+          30_000,
+        )),
+      ]);
+      if (
+        this.currentCompactionBarrier === barrier
+        && barrier.isPending
+        && !barrier.completionSeen
+      ) {
+        this.compactionTimer = setTimeout(() => {
+          if (this.currentCompactionBarrier !== barrier || !barrier.isPending) return;
+          this.settleCurrentCompactionBarrierFailed(new Error('Compaction recovery did not complete'));
+          this.fail(new Error('Compaction recovery did not complete'), 'compaction.recovery_timeout');
+        }, Math.max(0, (barrier.graceDeadline ?? Date.now()) - Date.now()));
+      }
+    } catch (err) {
+      if (this.currentCompactionBarrier !== barrier || !barrier.isPending) return;
+      const detail = err instanceof Error ? err.message : String(err);
+      const error = new Error(`Compaction recovery request failed: ${detail}`);
+      this.settleCurrentCompactionBarrierFailed(error);
+      this.fail(error, 'compaction.recovery_failure');
+    }
+  }
+
   private clearTimers(): void {
+    this.settleCurrentCompactionBarrierFailed(new Error('SDK session timers cleared'));
     if (this.timeoutTimer) {
       clearTimeout(this.timeoutTimer);
       this.timeoutTimer = null;
