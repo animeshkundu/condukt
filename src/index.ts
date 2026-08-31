@@ -63,6 +63,7 @@ export {
   DEFAULT_RETRY_POLICY,
   DEFAULT_SESSION_RECOVERY_POLICY,
   SessionRecoveryExhaustedError,
+  MissingRequiredOutputError,
   getParams,
   FlowAbortedError,
   FlowValidationError,

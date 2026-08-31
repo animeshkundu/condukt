@@ -292,7 +292,7 @@ export interface RetryPolicy {
 }
 
 /**
- * Same-session recovery after a transient root model-call failure.
+ * Same-session recovery after a transient root model-call failure or a stalled unmatched turn.
  *
  * Recovery is enabled by default on capable runtimes. Set `sessionRecovery: false`
  * on a node to opt out. Supplying a policy object explicitly requires runtime
@@ -349,6 +349,24 @@ export class SessionRecoveryExhaustedError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = 'SessionRecoveryExhaustedError';
+  }
+}
+
+/**
+ * Thrown when an agent session completes successfully but the required output artifact
+ * is missing or contains only whitespace.
+ */
+export class MissingRequiredOutputError extends Error {
+  readonly suppressFreshSessionRetry = true;
+  readonly outputPath: string;
+
+  constructor(outputPath: string, message?: string, options?: ErrorOptions) {
+    super(
+      message ?? (outputPath ? `Required output artifact was missing or empty at '${outputPath}'` : 'Required output artifact was missing or empty'),
+      options,
+    );
+    this.name = 'MissingRequiredOutputError';
+    this.outputPath = outputPath;
   }
 }
 
@@ -508,7 +526,7 @@ export interface SessionConfig extends SubagentLimits {
   readonly cwd: string;
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
-  readonly heartbeatTimeout: number; // seconds
+  readonly heartbeatTimeout: number; // seconds without meaningful model/tool progress
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
@@ -688,6 +706,11 @@ export interface AgentConfig extends SubagentLimits {
    */
   readonly tools?: readonly ToolRef[];
   readonly output?: string;
+  /**
+   * Fail closed if the configured `output` artifact is missing or contains only whitespace upon session completion.
+   * Invalid or inert when `output` is not specified.
+   */
+  readonly requireOutput?: boolean;
   readonly reads?: readonly string[];
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
@@ -713,7 +736,7 @@ export interface AgentConfig extends SubagentLimits {
   readonly isolation?: boolean;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
   readonly timeout?: number;
-  /** Dead-session limit in seconds without SDK events. Default: 900. */
+  /** Session-progress limit in seconds without meaningful model/tool progress. Default: 900. */
   readonly heartbeatTimeout?: number;
   /** Override session cwd. Default: input.dir. Use for running in repo dir while artifacts go to input.dir. */
   readonly cwdResolver?: (input: NodeInput) => string;

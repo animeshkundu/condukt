@@ -30,6 +30,7 @@ import {
   DEFAULT_PRODUCER_MODEL,
   DEFAULT_THINKING_BUDGET,
   FlowAbortedError,
+  MissingRequiredOutputError,
 } from './types';
 import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
 import type { ToolSpecificData, ImageToolData, ResourceToolData } from '../ui/tool-display/types';
@@ -607,6 +608,10 @@ async function runSessionAttempt(
  * 9. Calls config.teardown(input) in finally block
  */
 export function agent(config: AgentConfig): NodeFn {
+  if (config.requireOutput && !config.output) {
+    throw new Error("AgentConfig 'requireOutput' is invalid without 'output'");
+  }
+
   return async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
     if (ctx.signal.aborted) {
       throw new FlowAbortedError('Aborted before agent start');
@@ -768,11 +773,26 @@ export function agent(config: AgentConfig): NodeFn {
       if (!result) throw new Error('Agent session exhausted without a result');
 
       let content: string | undefined;
-      if (config.output) {
+      const artifactPath = config.output ? path.join(input.dir, config.output) : undefined;
+      if (artifactPath) {
         try {
-          content = fs.readFileSync(path.join(input.dir, config.output), 'utf-8');
+          content = fs.readFileSync(artifactPath, 'utf-8');
         } catch {
           content = undefined;
+        }
+      }
+
+      if (config.requireOutput && config.output) {
+        if (content === undefined || content.trim().length === 0) {
+          const outputPath = config.output;
+          throw withNodeUsage(
+            new MissingRequiredOutputError(
+              outputPath,
+              `Required output artifact '${outputPath}' was missing or empty after successful agent session`,
+            ),
+            failedUsage,
+            failedSubagentUsage,
+          );
         }
       }
 

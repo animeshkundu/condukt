@@ -14,6 +14,7 @@ import type {
   DefaultAgentConfig,
   MCPServersOption,
   RetryPolicy,
+  SessionRecoveryPolicy,
   SessionMode,
   PermissionPolicy,
   ThinkingBudget,
@@ -70,6 +71,8 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly schema?: AgentNodeSchema<T>;
   readonly system?: string;
   readonly output?: string;
+  /** Require the producer session to persist non-empty output before routing. */
+  readonly requireOutput?: boolean;
   readonly reads?: readonly string[];
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
@@ -89,6 +92,8 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly isolation?: boolean;
   readonly tools?: readonly ToolRef[] | readonly string[];
   readonly retry?: RetryPolicy;
+  /** Same-session recovery is on by default; false opts this node out. */
+  readonly sessionRecovery?: SessionRecoveryPolicy | false;
   readonly customAgents?: readonly CustomAgentConfig[];
   readonly subagentRoster?: SubagentRosterOption;
   readonly defaultAgent?: DefaultAgentConfig;
@@ -451,6 +456,7 @@ export async function produce<T>(
   const text: string[] = [];
   const producer = agent({
     output: config.output,
+    requireOutput: config.requireOutput,
     model: config.model,
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
@@ -467,6 +473,7 @@ export async function produce<T>(
     systemMessage: config.system,
     availableTools: toolIds(config.tools),
     retry: config.retry,
+    sessionRecovery: config.sessionRecovery,
     customAgents: config.customAgents,
     subagentRoster: config.subagentRoster,
     subagentsEnabled: config.subagentsEnabled,

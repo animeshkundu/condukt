@@ -14,7 +14,7 @@ import type {
 } from '../src/types';
 import type { OutputEvent } from '../src/events';
 import { DEFAULT_MCP_SERVERS } from '../src';
-import { DEFAULT_RETRY_POLICY, FlowAbortedError } from '../src/types';
+import { DEFAULT_RETRY_POLICY, FlowAbortedError, MissingRequiredOutputError } from '../src/types';
 import {
   agent,
   isRetriableModelError,
@@ -1398,6 +1398,181 @@ describe('agent factory', () => {
 
     expect(lateSession.abort).toHaveBeenCalledOnce();
     expect(lateSession.send).not.toHaveBeenCalled();
+  });
+
+  describe('required output contract', () => {
+    it('throws synchronously on agent creation when requireOutput is true without output', () => {
+      expect(() => agent({
+        promptBuilder: () => 'go',
+        requireOutput: true,
+      })).toThrow("AgentConfig 'requireOutput' is invalid without 'output'");
+    });
+
+    it('fails closed when output artifact is missing on normal idle', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when output artifact contains only whitespace', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('   \n\t  \r\n  ');
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('succeeds and parses action when output artifact has non-empty content', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('ACTION: APPROVE\nAll checks passed.');
+
+      const actionParser = vi.fn().mockReturnValue('approve');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('approve');
+      expect(result.artifact).toBe('ACTION: APPROVE\nAll checks passed.');
+      expect(actionParser).toHaveBeenCalledWith('ACTION: APPROVE\nAll checks passed.');
+    });
+
+    it('preserves backwards compatibility when requireOutput is false/omitted with missing artifact', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('default');
+      expect(result.artifact).toBeUndefined();
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('does not trigger outer session retry or replay prompt when requireOutput fails with maxAttempts > 1', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        retry: { maxAttempts: 3, backoffBaseMs: 50, jitter: false },
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+      expect(mockSession.send).toHaveBeenCalledOnce();
+    });
+
+    it('runs teardown even when requireOutput fails closed', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      let teardownCalled = false;
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        teardown: async () => {
+          teardownCalled = true;
+        },
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(teardownCalled).toBe(true);
+    });
+
+    it('preserves GT-3 crash recovery when output artifact exists with real content', async () => {
+      const fs = await import('node:fs');
+      (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+        'Investigation completed. All sections written properly.',
+      );
+
+      const nodeFn = agent({
+        output: 'report.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        completionIndicators: ['completed'],
+        actionParser: (content) => (content.includes('completed') ? 'pass' : 'default'),
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('text', 'Investigation completed successfully.');
+        mockSession._emit('error', new Error('Late model error'));
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('pass');
+      expect(result.artifact).toContain('Investigation completed');
+    });
   });
 });
 
