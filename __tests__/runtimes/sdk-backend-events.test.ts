@@ -55,12 +55,14 @@ interface MockModelInfo {
 }
 
 interface MockSdkSession {
+  sessionId: string;
   send: ReturnType<typeof vi.fn>;
   sendAndWait: ReturnType<typeof vi.fn>;
   getEvents: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
   rpc: {
+    sendMessages: ReturnType<typeof vi.fn>;
     mode: {
       set: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
@@ -94,7 +96,8 @@ function createMockSdkSession(): MockSdkSession {
   const catchAll: SdkEventHandler[] = [];
 
   const session: MockSdkSession = {
-    send: vi.fn().mockResolvedValue(undefined),
+    sessionId: 'session-1',
+    send: vi.fn().mockResolvedValue('message-1'),
     sendAndWait: vi.fn().mockResolvedValue({
       type: 'assistant.message',
       data: { content: 'advisor response' },
@@ -103,6 +106,7 @@ function createMockSdkSession(): MockSdkSession {
     abort: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: {
+      sendMessages: vi.fn().mockResolvedValue({ messageIds: [] }),
       mode: {
         set: vi.fn().mockImplementation(async ({ mode }: { mode: string }) => {
           session.rpc.mode.get.mockResolvedValue(mode);
@@ -218,6 +222,7 @@ let MockCopilotRequestHandlerClass: {
 };
 let MockCopilotWebSocketForwarderClass: new (context: Record<string, unknown>) => unknown;
 let mockCreateSession: ReturnType<typeof vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>>;
+let mockResumeSession: ReturnType<typeof vi.fn<(sessionId: string, config: Record<string, unknown>) => Promise<MockSdkSession>>>;
 let mockStart: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let mockListModels: ReturnType<typeof vi.fn<() => Promise<MockModelInfo[]>>>;
 let mockStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
@@ -395,7 +400,17 @@ beforeEach(() => {
     }
   };
   mockCreateSession = vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>()
-    .mockImplementation(async () => mockSdkSessions.shift() ?? mockSdkSession);
+    .mockImplementation(async (config) => {
+      const session = mockSdkSessions.shift() ?? mockSdkSession;
+      session.sessionId = typeof config.sessionId === 'string' ? config.sessionId : 'session-1';
+      return session;
+    });
+  mockResumeSession = vi.fn<(sessionId: string, config: Record<string, unknown>) => Promise<MockSdkSession>>()
+    .mockImplementation(async (sessionId) => {
+      const session = mockSdkSessions.shift() ?? createMockSdkSession();
+      session.sessionId = sessionId;
+      return session;
+    });
   mockStart = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockForceStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -434,6 +449,9 @@ beforeEach(() => {
             const onEvent = config.onEvent as SdkEventHandler | undefined;
             for (const event of mockEarlyEvents) onEvent?.(event);
             return mockCreateSession(config);
+          }
+          resumeSession(sessionId: string, config: Record<string, unknown>) {
+            return mockResumeSession(sessionId, config);
           }
           stop() { return mockStop(); }
           forceStop() { return mockForceStop(); }
@@ -1573,8 +1591,11 @@ describe('SdkBackend event mapping', () => {
 
   it('permits capability discovery but blocks parent-scoped traffic before a session handle exists', async () => {
     let releaseSession!: () => void;
-    mockCreateSession.mockImplementationOnce(() => new Promise((resolve) => {
-      releaseSession = () => resolve(mockSdkSession);
+    mockCreateSession.mockImplementationOnce((config) => new Promise((resolve) => {
+      releaseSession = () => {
+        mockSdkSession.sessionId = String(config.sessionId ?? 'session-1');
+        resolve(mockSdkSession);
+      };
     }));
     const { session } = await createTestSession();
     session.send('test prompt');
@@ -2885,8 +2906,15 @@ describe('SdkBackend event mapping', () => {
     let resolveSecond!: (session: MockSdkSession) => void;
     const secondCreation = new Promise<MockSdkSession>(resolve => { resolveSecond = resolve; });
     mockCreateSession
-      .mockResolvedValueOnce(mockSdkSession)
-      .mockReturnValueOnce(secondCreation);
+      .mockImplementationOnce(async (config) => {
+        mockSdkSession.sessionId = String(config.sessionId);
+        return mockSdkSession;
+      })
+      .mockImplementationOnce(async (config) => {
+        const resolved = await secondCreation;
+        resolved.sessionId = String(config.sessionId);
+        return resolved;
+      });
 
     const { session, mock: firstMock } = await createTestSession();
     const idleHandler = vi.fn();
@@ -3374,34 +3402,208 @@ describe('SdkBackend event mapping', () => {
     expect(toolStartHandler).not.toHaveBeenCalled();
   });
 
-  it('model.call_failure emits error instead of hanging', async () => {
-    const { session, mock } = await createTestSession();
+  it('resumes a transient model.call_failure in the same persisted session', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      const recoveryHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('recovery', recoveryHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
 
+      mock._emit('model.call_failure', {
+        errorMessage: 'transient upstream failure',
+        statusCode: 503,
+        failureKind: 'api',
+        transport: 'http',
+        model: 'test-model',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.abort).not.toHaveBeenCalled();
+      expect(mock.disconnect).toHaveBeenCalledOnce();
+      expect(mockResumeSession).toHaveBeenCalledWith(
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryHandler).toHaveBeenCalledWith(expect.objectContaining({
+        phase: 'continuation-sent',
+        continuation: 1,
+        sessionId: mock.sessionId,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honors a 23-continuation ceiling without a 24th resume', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumedSessions = Array.from({ length: 23 }, () => createMockSdkSession());
+      const safeHistory = [{ type: 'user.message', data: { content: 'test prompt' } }];
+      for (const handle of [mockSdkSession, ...resumedSessions]) {
+        handle.getEvents.mockResolvedValue(safeHistory);
+        handle.rpc.metadata.contextInfo.mockResolvedValue({
+          contextInfo: {
+            totalTokens: 1_000,
+            promptTokenLimit: 100_000,
+            systemTokens: 100,
+            conversationTokens: 900,
+            toolDefinitionsTokens: 0,
+          },
+        });
+      }
+      mockSdkSessions.push(...resumedSessions);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 23,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      let active = mock;
+      for (let continuation = 1; continuation <= 23; continuation += 1) {
+        active._emit('model.call_failure', {
+          errorMessage: `connection lost ${continuation}`,
+          apiCallId: `call-${continuation}`,
+          failureKind: 'transport',
+          transport: 'http',
+          source: 'top_level',
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledTimes(continuation));
+        active = resumedSessions[continuation - 1];
+      }
+
+      active._emit('model.call_failure', {
+        errorMessage: 'connection lost 24',
+        apiCallId: 'call-24',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      expect(mockResumeSession).toHaveBeenCalledTimes(23);
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        suppressFreshSessionRetry: true,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when recovered history has unresolved permission work', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'permission.requested', data: { requestId: 'pending-1' } },
+      ]);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('model.call_failure', {
+        errorMessage: 'connection lost',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        suppressFreshSessionRetry: true,
+      }));
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets an SDK-native retry suppress manual recovery during grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 1_000,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('model.call_failure', {
+        errorMessage: 'connection lost',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      mock._emit('assistant.turn_retry');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opts out of same-session recovery explicitly', async () => {
+    const { session, mock } = await createTestSession({}, { sessionRecovery: false });
     const errorHandler = vi.fn();
-    const idleHandler = vi.fn();
     session.on('error', errorHandler);
-    session.on('idle', idleHandler);
     session.send('test prompt');
-
-    await new Promise(r => setTimeout(r, 50));
-
+    await new Promise(resolve => setTimeout(resolve, 50));
     mock._emit('model.call_failure', {
-      errorMessage: 'transient upstream failure',
-      statusCode: 503,
-      model: 'test-model',
+      errorMessage: 'connection lost',
+      failureKind: 'transport',
+      transport: 'http',
       source: 'top_level',
     });
-
     expect(errorHandler).toHaveBeenCalledOnce();
-    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('transient upstream failure'),
-      statusCode: 503,
-    }));
-    expect(idleHandler).not.toHaveBeenCalled();
-    await vi.waitFor(() => {
-      expect(mock.abort).toHaveBeenCalledOnce();
-      expect(mock.disconnect).toHaveBeenCalledOnce();
-    });
+    expect(mockResumeSession).not.toHaveBeenCalled();
   });
 
   it('classifies compaction model rejection as a first-class terminal failure', async () => {
@@ -3849,7 +4051,7 @@ describe('SdkBackend event mapping', () => {
     );
   });
 
-  it('preserves string status codes from model.call_failure', async () => {
+  it('normalizes string status codes from model.call_failure', async () => {
     const { session, mock } = await createTestSession();
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
@@ -3863,7 +4065,7 @@ describe('SdkBackend event mapping', () => {
 
     expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining('HTTP 401'),
-      statusCode: '401',
+      statusCode: 401,
     }));
   });
 

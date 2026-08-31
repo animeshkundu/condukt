@@ -116,6 +116,9 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.mcpServerWorkingDirectory !== undefined
           ? { mcpServerWorkingDirectory: config.mcpServerWorkingDirectory }
           : {}),
+        ...(config.sessionRecovery !== undefined
+          ? { sessionRecovery: config.sessionRecovery }
+          : {}),
       };
 
       const session: CopilotSession = await backend.createSession(copilotConfig, options);

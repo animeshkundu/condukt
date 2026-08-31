@@ -9,7 +9,13 @@
  * The orchestrator depends on this interface, not on any implementation.
  */
 
-import type { AdvisorConfig, RuntimeCapabilities, StandInConfig } from '../../src/types';
+import type {
+  AdvisorConfig,
+  RuntimeCapabilities,
+  SessionRecoveryEvent,
+  SessionRecoveryPolicy,
+  StandInConfig,
+} from '../../src/types';
 import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
 export interface MCPServerConfig {
@@ -87,6 +93,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly defaultAgent?: DefaultAgentConfig;
   /** Built-in subagents unavailable to this session (SdkBackend only). */
   readonly excludedBuiltinAgents?: readonly string[];
+  /** Same-session recovery is on by default; false opts this session out. */
+  readonly sessionRecovery?: SessionRecoveryPolicy | false;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +281,8 @@ export interface CopilotSession {
   on(event: 'permission', handler: (data: PermissionInfo) => void): void;
   /** Context compaction started or completed (infinite sessions) */
   on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
+  /** Same-session recovery lifecycle. */
+  on(event: 'recovery', handler: (event: SessionRecoveryEvent) => void): void;
 
   /** Abort the session -- kill the agent process */
   abort(): Promise<void>;

@@ -151,6 +151,7 @@ interface ErrorWithRetryMetadata extends Error {
 
 interface AttemptUsage {
   readonly usage?: Record<string, unknown>;
+  readonly rootUsage?: readonly Record<string, unknown>[];
   readonly subagentUsage: readonly Record<string, unknown>[];
 }
 
@@ -334,18 +335,23 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     nodeId: ctx.nodeId,
     memberId: config.memberId,
     artifactFilename: config.output,
+    ...(config.sessionRecovery !== undefined
+      ? { sessionRecovery: config.sessionRecovery }
+      : {}),
   };
 }
 
 interface SessionAttemptResult extends AttemptUsage {
   readonly outputLines: readonly string[];
+  readonly rootUsage: readonly Record<string, unknown>[];
 }
 
 function attemptUsage(
   usage: Record<string, unknown> | undefined,
+  rootUsage: readonly Record<string, unknown>[],
   subagentUsage: readonly Record<string, unknown>[],
 ): AttemptUsage {
-  return { usage, subagentUsage: [...subagentUsage] };
+  return { usage, rootUsage: [...rootUsage], subagentUsage: [...subagentUsage] };
 }
 
 function withAttemptUsage(error: unknown, usage: AttemptUsage): ErrorWithAttemptUsage {
@@ -378,9 +384,20 @@ async function runSessionAttempt(
   let session: AgentSession | null = null;
   const outputLines: string[] = [];
   let lastUsage: Record<string, unknown> | undefined;
+  const rootUsage: Record<string, unknown>[] = [];
+  const rootUsageKeys = new Set<string>();
   const subagentUsage: Record<string, unknown>[] = [];
 
   try {
+    if (
+      config.sessionRecovery !== undefined
+      && config.sessionRecovery !== false
+      && ctx.runtime.capabilities?.sessionRecovery !== true
+    ) {
+      throw new Error(
+        `Runtime '${ctx.runtime.name}' does not support the explicitly requested session recovery policy`,
+      );
+    }
     const creation = ctx.runtime.createSession(
       sessionConfig(config, input, ctx),
       { signal: ctx.signal },
@@ -448,6 +465,13 @@ async function runSessionAttempt(
     });
     session.on('usage', (data: Record<string, unknown>) => {
       lastUsage = data;
+      const stableId = [data.apiCallId, data.providerCallId, data.serviceRequestId]
+        .find((value): value is string => typeof value === 'string' && value.length > 0);
+      const key = stableId ?? JSON.stringify(data);
+      if (!rootUsageKeys.has(key)) {
+        rootUsageKeys.add(key);
+        rootUsage.push(data);
+      }
       ctx.emitOutput({
         type: 'node:usage', executionId: ctx.executionId, nodeId: ctx.nodeId,
         inputTokens: typeof data.inputTokens === 'number' ? data.inputTokens : undefined,
@@ -509,6 +533,15 @@ async function runSessionAttempt(
         content: message, ts: Date.now(),
       });
     });
+    session.on('recovery', (event) => {
+      ctx.emitOutput({
+        type: 'node:recovery',
+        executionId: ctx.executionId,
+        nodeId: ctx.nodeId,
+        ...event,
+        ts: Date.now(),
+      });
+    });
 
     const activeSession = session;
     ctx.emitOutput({
@@ -536,14 +569,14 @@ async function runSessionAttempt(
       });
     });
 
-    return { outputLines, usage: lastUsage, subagentUsage };
+    return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
   } catch (error) {
     if (!ctx.signal.aborted && config.output && wasCompletedBeforeCrash(
       input.dir, config.output, outputLines, config.completionIndicators,
     )) {
-      return { outputLines, usage: lastUsage, subagentUsage };
+      return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
     }
-    throw withAttemptUsage(error, attemptUsage(lastUsage, subagentUsage));
+    throw withAttemptUsage(error, attemptUsage(lastUsage, rootUsage, subagentUsage));
   } finally {
     if (session) {
       try {
@@ -649,7 +682,11 @@ export function agent(config: AgentConfig): NodeFn {
         } catch (error) {
           const currentError = error instanceof Error ? error : new Error(String(error));
           const consumed = (currentError as ErrorWithAttemptUsage).attemptUsage;
-          if (consumed?.usage) failedUsage.push(consumed.usage);
+          if (consumed?.rootUsage && consumed.rootUsage.length > 0) {
+            failedUsage.push(...consumed.rootUsage);
+          } else if (consumed?.usage) {
+            failedUsage.push(consumed.usage);
+          }
           if (consumed) failedSubagentUsage.push(...consumed.subagentUsage);
           if (ctx.signal.aborted) {
             throw withNodeUsage(
@@ -670,6 +707,12 @@ export function agent(config: AgentConfig): NodeFn {
             );
           }
           if (currentError instanceof FlowAbortedError) {
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+          }
+          if (
+            'suppressFreshSessionRetry' in currentError
+            && currentError.suppressFreshSessionRetry === true
+          ) {
             throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
           }
           lastFailure = currentError;
@@ -737,7 +780,10 @@ export function agent(config: AgentConfig): NodeFn {
         ? config.actionParser(content)
         : 'default';
       const metadata: Record<string, unknown> = {};
-      const usage = [...failedUsage, ...(result.usage ? [result.usage] : [])];
+      const currentUsage = result.rootUsage.length > 0
+        ? result.rootUsage
+        : result.usage ? [result.usage] : [];
+      const usage = [...failedUsage, ...currentUsage];
       const subagentUsage = [...failedSubagentUsage, ...result.subagentUsage];
       if (usage.length > 0) metadata.usage = usage.at(-1);
       if (usage.length > 1) metadata.attemptUsage = usage;

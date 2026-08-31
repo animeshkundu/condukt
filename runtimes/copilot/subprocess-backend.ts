@@ -489,6 +489,7 @@ class SubprocessSession implements CopilotSession {
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'permission', handler: (data: PermissionInfo) => void): void;
   on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
+  on(event: 'recovery', handler: (event: import('../../src/types').SessionRecoveryEvent) => void): void;
   on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler } as EventHandler);
   }

@@ -134,6 +134,42 @@ describe('agent factory', () => {
     mockRuntime = createMockRuntime(mockSession);
   });
 
+  it('preserves existing runtime behavior when default recovery is unsupported', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await expect(agent({ promptBuilder: () => 'test prompt' })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    )).resolves.toMatchObject({ action: 'default' });
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when an explicit recovery policy is unsupported', async () => {
+    await expect(agent({
+      promptBuilder: () => 'test prompt',
+      sessionRecovery: { maxContinuations: 2 },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+      "Runtime 'test-runtime' does not support the explicitly requested session recovery policy",
+    );
+    expect(mockRuntime.createSession).not.toHaveBeenCalled();
+  });
+
+  it('forwards explicit recovery opt-out to the runtime', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+    await agent({ promptBuilder: () => 'test prompt', sessionRecovery: false })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    );
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionRecovery: false }),
+      expect.anything(),
+    );
+  });
+
   it('defaults the heartbeat timeout to 15 minutes', async () => {
     mockSession.send.mockImplementation(() => {
       queueMicrotask(() => mockSession._emit('idle'));
@@ -419,7 +455,13 @@ describe('agent factory', () => {
 
     const result = await nodeFn(createMockInput(), ctx);
 
-    expect(result.metadata).toEqual({ usage });
+    expect(result.metadata).toEqual({
+      usage,
+      attemptUsage: [
+        { totalTokens: 10, model: 'initial-model' },
+        usage,
+      ],
+    });
     expect(ctx.emitOutput).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'node:usage',
@@ -429,6 +471,27 @@ describe('agent factory', () => {
         model: 'test-model',
       }),
     );
+  });
+
+  it('deduplicates repeated usage records by provider call identity', async () => {
+    const nodeFn = agent({ promptBuilder: () => 'go' });
+    const usage = {
+      apiCallId: 'same-call',
+      inputTokens: 30,
+      outputTokens: 20,
+      totalTokens: 50,
+      model: 'test-model',
+    };
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => {
+        mockSession._emit('usage', usage);
+        mockSession._emit('usage', { ...usage });
+        mockSession._emit('idle');
+      });
+    });
+
+    const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+    expect(result.metadata).toEqual({ usage });
   });
 
   it('builds and sends prompt from promptBuilder', async () => {

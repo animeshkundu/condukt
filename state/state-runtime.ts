@@ -139,6 +139,19 @@ export class StateRuntime {
         : '';
       this.storage.appendOutput(event.executionId, event.nodeId,
         `\x00tool:${event.phase}\x00${event.tool}\x00${escapeForLog(event.summary)}${argsJson}`);
+    } else if (event.type === 'node:recovery') {
+      const details = [
+        `continuation ${event.continuation}/${event.maxContinuations}`,
+        event.transport ? `transport=${event.transport}` : undefined,
+        event.failureKind ? `kind=${event.failureKind}` : undefined,
+        event.statusCode !== undefined ? `status=${event.statusCode}` : undefined,
+        event.reason,
+      ].filter((value): value is string => value !== undefined && value.length > 0);
+      this.storage.appendOutput(
+        event.executionId,
+        event.nodeId,
+        `\x00recovery:${event.phase}\x00${escapeForLog(details.join(' '))}`,
+      );
     }
     this.onOutput?.(event);
   }

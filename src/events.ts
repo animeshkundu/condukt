@@ -332,6 +332,25 @@ export interface NodePermissionEvent {
   readonly ts: number;
 }
 
+export interface NodeRecoveryEvent {
+  readonly type: 'node:recovery';
+  readonly executionId: string;
+  readonly nodeId: string;
+  readonly phase: 'scheduled' | 'native-retry' | 'resuming' | 'continuation-sent' | 'recovered' | 'exhausted';
+  readonly continuation: number;
+  readonly maxContinuations: number;
+  readonly sessionId: string;
+  readonly delayMs?: number;
+  readonly elapsedMs?: number;
+  readonly statusCode?: number;
+  readonly errorCode?: string;
+  readonly transport?: string;
+  readonly failureKind?: string;
+  readonly durationMs?: number;
+  readonly reason?: string;
+  readonly ts: number;
+}
+
 /** Discriminated union of output events (streamed, not persisted). */
 export type OutputEvent =
   | NodePromptEvent
@@ -341,4 +360,5 @@ export type OutputEvent =
   | NodeIntentEvent
   | NodeUsageEvent
   | NodeSubagentEvent
-  | NodePermissionEvent;
+  | NodePermissionEvent
+  | NodeRecoveryEvent;

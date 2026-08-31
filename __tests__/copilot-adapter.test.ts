@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { adaptCopilotBackend } from '../runtimes/copilot/copilot-adapter';
 import type { CopilotBackend, CopilotSession } from '../runtimes/copilot/copilot-backend';
+import { SdkBackend } from '../runtimes/copilot/sdk-backend';
 
 describe('adaptCopilotBackend', () => {
   function createMockBackend(overrides?: Partial<CopilotBackend>): CopilotBackend {
@@ -31,12 +32,18 @@ describe('adaptCopilotBackend', () => {
     const capabilities = {
       readOnlyPermissions: true as const,
       requiredModeVerification: true as const,
+      sessionRecovery: true as const,
     };
     const withCapabilities = adaptCopilotBackend(createMockBackend({ capabilities }));
     expect(withCapabilities.capabilities).toBe(capabilities);
 
     const withoutCapabilities = adaptCopilotBackend(createMockBackend());
     expect(withoutCapabilities).not.toHaveProperty('capabilities');
+  });
+
+  it('advertises same-session recovery from SdkBackend', () => {
+    const runtime = adaptCopilotBackend(new SdkBackend());
+    expect(runtime.capabilities?.sessionRecovery).toBe(true);
   });
 
   it('delegates isAvailable to backend', async () => {
@@ -151,6 +158,7 @@ describe('adaptCopilotBackend', () => {
       maxConcurrency: 2,
       defaultAgent: { excludedTools: ['task'] },
       excludedBuiltinAgents: ['explore'],
+      sessionRecovery: { maxContinuations: 23, jitter: false },
     });
 
     expect(createSession).toHaveBeenCalledWith(
@@ -174,6 +182,7 @@ describe('adaptCopilotBackend', () => {
         maxConcurrency: 2,
         defaultAgent: { excludedTools: ['task'] },
         excludedBuiltinAgents: ['explore'],
+        sessionRecovery: { maxContinuations: 23, jitter: false },
       }),
       undefined,
     );
@@ -203,6 +212,7 @@ describe('adaptCopilotBackend', () => {
     expect(forwarded).not.toHaveProperty('maxConcurrency');
     expect(forwarded).not.toHaveProperty('defaultAgent');
     expect(forwarded).not.toHaveProperty('excludedBuiltinAgents');
+    expect(forwarded).not.toHaveProperty('sessionRecovery');
   });
 
   it('handles unavailable backend', async () => {

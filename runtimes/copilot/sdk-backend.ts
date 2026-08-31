@@ -33,8 +33,18 @@ import type {
   RuntimeConnection as CopilotRuntimeConnection,
 } from '@github/copilot-sdk';
 import { createHash } from 'node:crypto';
-import type { AdvisorConfig, Logger, StandInConfig } from '../../src/types';
-import { NO_OP_LOGGER } from '../../src/types';
+import type {
+  AdvisorConfig,
+  Logger,
+  SessionRecoveryEvent,
+  SessionRecoveryPolicy,
+  StandInConfig,
+} from '../../src/types';
+import {
+  DEFAULT_SESSION_RECOVERY_POLICY,
+  NO_OP_LOGGER,
+  SessionRecoveryExhaustedError,
+} from '../../src/types';
 import type {
   CopilotBackend,
   CopilotSession,
@@ -100,6 +110,86 @@ type SdkSessionHandle = CopilotSdkSession;
 
 type ModelLimitSource = 'max_prompt_tokens' | 'max_context_window_tokens';
 type ModelRequestPurpose = 'normal-turn' | 'compaction' | 'child' | 'retry';
+
+interface EffectiveSessionRecoveryPolicy {
+  readonly maxContinuations: number;
+  readonly budgetMs: number;
+  readonly backoffBaseMs: number;
+  readonly backoffMaxMs: number;
+  readonly jitter: boolean;
+  readonly nativeRetryGraceMs: number;
+}
+
+function positiveIntegerOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : fallback;
+}
+
+function nonNegativeOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0
+    ? value
+    : fallback;
+}
+
+function effectiveSessionRecoveryPolicy(
+  policy: SessionRecoveryPolicy | false | undefined,
+): EffectiveSessionRecoveryPolicy | undefined {
+  if (policy === false) return undefined;
+  const configured = policy ?? {};
+  return {
+    maxContinuations: positiveIntegerOr(
+      configured.maxContinuations,
+      DEFAULT_SESSION_RECOVERY_POLICY.maxContinuations,
+    ),
+    budgetMs: nonNegativeOr(configured.budgetMs, DEFAULT_SESSION_RECOVERY_POLICY.budgetMs),
+    backoffBaseMs: positiveIntegerOr(
+      configured.backoffBaseMs,
+      DEFAULT_SESSION_RECOVERY_POLICY.backoffBaseMs,
+    ),
+    backoffMaxMs: positiveIntegerOr(
+      configured.backoffMaxMs,
+      DEFAULT_SESSION_RECOVERY_POLICY.backoffMaxMs,
+    ),
+    jitter: configured.jitter ?? DEFAULT_SESSION_RECOVERY_POLICY.jitter,
+    nativeRetryGraceMs: nonNegativeOr(
+      configured.nativeRetryGraceMs,
+      DEFAULT_SESSION_RECOVERY_POLICY.nativeRetryGraceMs,
+    ),
+  };
+}
+
+function recoveryDelayMs(policy: EffectiveSessionRecoveryPolicy, failedContinuation: number): number {
+  const exponent = Math.min(52, Math.max(0, failedContinuation));
+  const capped = Math.min(policy.backoffMaxMs, policy.backoffBaseMs * (2 ** exponent));
+  const delayed = policy.jitter ? Math.random() * capped : capped;
+  return Math.max(100, Number.isFinite(delayed) ? delayed : 100);
+}
+
+function numericStatusCode(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isRecoverableModelCallFailure(data: Record<string, unknown> | undefined): boolean {
+  if (!data) return false;
+  if (data.source !== 'top_level') return false;
+  if (data.initiator === 'compaction') return false;
+  const errorCode = typeof data.errorCode === 'string' ? data.errorCode.toLowerCase() : '';
+  if (/max_prompt|max_context|context_length|auth|permission|forbidden|invalid/.test(errorCode)) {
+    return false;
+  }
+  if (data.failureKind === 'transport') return true;
+  const status = numericStatusCode(data.statusCode);
+  if (status === 400) return data.badRequestKind === 'bodyless';
+  if (status !== undefined) {
+    return status === 408 || status === 425 || status === 429 || status === 499 || status >= 500;
+  }
+  const message = typeof data.errorMessage === 'string' ? data.errorMessage.toLowerCase() : '';
+  return /terminated|connection|socket|timeout|econn|network/.test(message);
+}
 
 // The CLI requires at least four messages before history.compact() can make
 // progress. This is a runtime constraint, not a tuned safety threshold.
@@ -248,6 +338,7 @@ interface RequestObservation {
 }
 
 interface SdkEvent {
+  readonly id?: string;
   readonly type?: string;
   readonly agentId?: string;
   readonly data?: Record<string, unknown>;
@@ -361,11 +452,13 @@ function parseContextUsage(data: Record<string, unknown> | undefined): ContextUs
 function normalizeSdkEvent(event: unknown): SdkEvent {
   if (typeof event !== 'object' || event === null) return {};
   const candidate = event as {
+    readonly id?: unknown;
     readonly type?: unknown;
     readonly agentId?: unknown;
     readonly data?: unknown;
   };
   return {
+    ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
     ...(typeof candidate.type === 'string' ? { type: candidate.type } : {}),
     ...(typeof candidate.agentId === 'string' ? { agentId: candidate.agentId } : {}),
     ...(typeof candidate.data === 'object' && candidate.data !== null
@@ -1444,6 +1537,7 @@ export class SdkBackend implements CopilotBackend {
   readonly capabilities = Object.freeze({
     readOnlyPermissions: true,
     requiredModeVerification: true,
+    sessionRecovery: true,
   } as const);
   private readonly mcpConfigPath: string | undefined;
   private readonly configDirectory: string | undefined;
@@ -1660,6 +1754,19 @@ class SdkSession implements CopilotSession {
   private retryingParent = false;
   private turnSettled = false;
   private aborted = false;
+  private sessionId: string | undefined;
+  private originalPrompt: string | undefined;
+  private recoveryStartedAt: number | undefined;
+  private recoveryDeadlineMs: number | undefined;
+  private recoveryContinuation = 0;
+  private recoveryInProgress: Promise<void> | undefined;
+  private nativeRetryGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  private sdkSessionConfigFactory: ((client: SdkClient) => CopilotSdkSessionConfig) | undefined;
+  private clientFactory: (() => SdkClient) | undefined;
+  private resumedSubagentSettings: Record<string, unknown> | undefined;
+  private sessionDeadlineMs: number | undefined;
+  private handleGeneration = 0;
+  private failedRequestKeys = new Set<string>();
   private _turnText = new Map<string, string>();
 
   /**
@@ -1797,6 +1904,17 @@ class SdkSession implements CopilotSession {
       this.emitError(new Error('Session is aborted'));
       return;
     }
+    this.originalPrompt = prompt;
+    this.sessionId = undefined;
+    this.sdkSessionConfigFactory = undefined;
+    this.clientFactory = undefined;
+    this.resumedSubagentSettings = undefined;
+    this.sessionDeadlineMs = undefined;
+    this.recoveryStartedAt = undefined;
+    this.recoveryDeadlineMs = undefined;
+    this.recoveryContinuation = 0;
+    this.recoveryInProgress = undefined;
+    this.failedRequestKeys.clear();
     // Detach the preceding SDK handle synchronously before resetting shared turn
     // state. Any late events from it then fail the per-handler isActive() guard.
     this.clearTimers();
@@ -1833,13 +1951,14 @@ class SdkSession implements CopilotSession {
     const sdkModuleName = '@github/copilot-sdk';
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
     const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<CopilotSdkModule>;
+    const sdkModule = await dynamicImport(sdkModuleName);
     const {
       CopilotClient,
       CopilotRequestHandler,
       CopilotWebSocketForwarder,
       RuntimeConnection,
       approveAll,
-    } = await dynamicImport(sdkModuleName);
+    } = sdkModule;
 
     // ---------------------------------------------------------------
     // Build hardened environment (strip NODE_OPTIONS, extend PATH)
@@ -1873,7 +1992,7 @@ class SdkSession implements CopilotSession {
     // ---------------------------------------------------------------
     // Create CopilotClient (process-per-session: new client each time)
     // ---------------------------------------------------------------
-    const client = new CopilotClient({
+    const createClient = (): SdkClient => new CopilotClient({
       connection: RuntimeConnection.forStdio(),
       env,
       logLevel: 'warning',
@@ -1946,6 +2065,8 @@ class SdkSession implements CopilotSession {
         },
       ),
     });
+    this.clientFactory = createClient;
+    const client = createClient();
     this._client = client;
 
     // ---------------------------------------------------------------
@@ -2034,82 +2155,92 @@ class SdkSession implements CopilotSession {
           };
 
     let sdkSession: SdkSessionHandle | undefined;
-    const tools = [
-      ...(this.config.advisor === undefined
-        ? []
-        : [advisorTool(client, this.config.advisor, () => sdkSession)]),
-      ...(this.config.standIn === undefined
-        ? []
-        : [standInTool(client, this.config.model, this.config.standIn)]),
-    ];
-    const sessionConfig: CopilotSdkSessionConfig = {
-      model: this.config.model,
-      streaming: true,
-      ...(tools.length > 0 ? { tools } : {}),
-      onPermissionRequest: permissionHandler,
-      workingDirectory: this.config.cwd,
-      reasoningEffort: this.config.thinkingBudget,
-      ...(this.config.contextTier !== undefined
-        ? { contextTier: this.config.contextTier }
-        : {}),
-      ...(this.configDirectory !== undefined
-        ? { configDirectory: this.configDirectory }
-        : {}),
-      ...(this.config.systemMessage !== undefined
-        ? { systemMessage: { mode: 'append', content: this.config.systemMessage } }
-        : {}),
-      ...(this.config.availableTools !== undefined
-        ? { availableTools: [...this.config.availableTools] }
-        : {}),
-      ...(() => {
-        const excludedTools = new Set(this.config.excludedTools ?? []);
-        if (!subagentsEnabled) excludedTools.add('task');
-        return excludedTools.size > 0 ? { excludedTools: [...excludedTools] } : {};
-      })(),
-      ...(customAgents.size > 0
-        ? { customAgents: [...customAgents.values()].map(toSdkCustomAgent) }
-        : {}),
-      ...(this.config.defaultAgent !== undefined
-        ? {
-            defaultAgent: {
-              ...(this.config.defaultAgent.excludedTools !== undefined
-                ? { excludedTools: [...this.config.defaultAgent.excludedTools] }
-                : {}),
+    const configuredSessionId = this.sessionId ?? `condukt-${createHash('sha256')
+      .update(`${this.config.cwd}\0${Date.now()}\0${Math.random()}`)
+      .digest('hex')
+      .slice(0, 24)}`;
+    this.sessionId = configuredSessionId;
+    const buildSessionConfig = (owner: SdkClient): CopilotSdkSessionConfig => {
+      const tools = [
+        ...(this.config.advisor === undefined
+          ? []
+          : [advisorTool(owner, this.config.advisor, () => this._sdkSession ?? undefined)]),
+        ...(this.config.standIn === undefined
+          ? []
+          : [standInTool(owner, this.config.model, this.config.standIn)]),
+      ];
+      return {
+        sessionId: configuredSessionId,
+        model: this.config.model,
+        streaming: true,
+        ...(tools.length > 0 ? { tools } : {}),
+        onPermissionRequest: permissionHandler,
+        workingDirectory: this.config.cwd,
+        reasoningEffort: this.config.thinkingBudget,
+        ...(this.config.contextTier !== undefined
+          ? { contextTier: this.config.contextTier }
+          : {}),
+        ...(this.configDirectory !== undefined
+          ? { configDirectory: this.configDirectory }
+          : {}),
+        ...(this.config.systemMessage !== undefined
+          ? { systemMessage: { mode: 'append', content: this.config.systemMessage } }
+          : {}),
+        ...(this.config.availableTools !== undefined
+          ? { availableTools: [...this.config.availableTools] }
+          : {}),
+        ...(() => {
+          const excludedTools = new Set(this.config.excludedTools ?? []);
+          if (!subagentsEnabled) excludedTools.add('task');
+          return excludedTools.size > 0 ? { excludedTools: [...excludedTools] } : {};
+        })(),
+        ...(customAgents.size > 0
+          ? { customAgents: [...customAgents.values()].map(toSdkCustomAgent) }
+          : {}),
+        ...(this.config.defaultAgent !== undefined
+          ? {
+              defaultAgent: {
+                ...(this.config.defaultAgent.excludedTools !== undefined
+                  ? { excludedTools: [...this.config.defaultAgent.excludedTools] }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(excludedBuiltinAgents !== undefined
+          ? { excludedBuiltinAgents }
+          : {}),
+        ...(mcpServers !== undefined ? { mcpServers } : {}),
+        coauthorEnabled: false,
+        infiniteSessions: this.config.compactionMode === 'aggressive'
+          ? {
+              enabled: true,
+              backgroundCompactionThreshold: 0.60,
+              bufferExhaustionThreshold: 0.75,
+            }
+          : {
+              enabled: true,
+              backgroundCompactionThreshold: 0.80,
+              bufferExhaustionThreshold: 0.95,
             },
-          }
-        : {}),
-      ...(excludedBuiltinAgents !== undefined
-        ? { excludedBuiltinAgents }
-        : {}),
-      ...(mcpServers !== undefined ? { mcpServers } : {}),
-      // The SDK defaults this on, so every commit an agent composes carries a
-      // Co-authored-by trailer. Output should read as the repository owner's work.
-      coauthorEnabled: false,
-      // Stock documented settings are the default and do not override model
-      // capabilities. The reduced legacy thresholds remain available for
-      // comparative diagnostics; the measured adaptive controller is opt-in.
-      infiniteSessions: this.config.compactionMode === 'aggressive'
-        ? {
-            enabled: true,
-            backgroundCompactionThreshold: 0.60,
-            bufferExhaustionThreshold: 0.75,
-          }
-        : {
-            enabled: true,
-            backgroundCompactionThreshold: 0.80,
-            bufferExhaustionThreshold: 0.95,
-          },
-      // Registered before createSession issues its RPC, closing the early-event
-      // gap for session.start and *_loaded events.
-      onEvent: (event) => this.handleEarlyEvent(normalizeSdkEvent(event)),
+        onEvent: (event) => this.handleEarlyEvent(normalizeSdkEvent(event)),
+      };
     };
+    this.sdkSessionConfigFactory = buildSessionConfig;
+    const sessionConfig = buildSessionConfig(client);
 
     sdkSession = await client.createSession(sessionConfig);
     if (this.aborted) {
       try { await sdkSession.disconnect(); } catch { /* Ignore inert early-abort handle */ }
       return;
     }
+    if (sdkSession.sessionId !== configuredSessionId) {
+      try { await sdkSession.disconnect(); } catch { /* Ignore mismatched inert handle. */ }
+      throw new Error(
+        `SDK created unexpected session '${sdkSession.sessionId}' instead of '${configuredSessionId}'`,
+      );
+    }
     this._sdkSession = sdkSession;
+    this.handleGeneration += 1;
 
     const resolvedRoster = roster === undefined || roster === false
       ? roster
@@ -2145,6 +2276,7 @@ class SdkSession implements CopilotSession {
       ...(maxDepth !== undefined ? { maxDepth } : {}),
       ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
     };
+    this.resumedSubagentSettings = subagentSettings;
 
     // Apply the live override before any prompt can dispatch a subagent.
     // This experimental RPC degrades safely if the installed CLI rejects it.
@@ -2194,6 +2326,7 @@ class SdkSession implements CopilotSession {
     // Set up turn timers only while this handle is still active
     // ---------------------------------------------------------------
     if (this.aborted || this._sdkSession !== sdkSession) return;
+    this.sessionDeadlineMs = Date.now() + this.config.timeout * 1000;
     this.timeoutTimer = setTimeout(() => {
       if (this.aborted || this._sdkSession !== sdkSession) return;
       this.fail(new Error(`Session timed out after ${this.config.timeout}s`), 'timeout');
@@ -2417,10 +2550,8 @@ class SdkSession implements CopilotSession {
       this.fail(new Error(msg), 'session.error', e.data);
     });
 
-    // model.call_failure is telemetry for a failed LLM request, but the SDK has
-    // no API to resume/retry that in-flight turn. A second send() would append a
-    // duplicate user message rather than replaying the failed call, so fail the
-    // condukt session immediately instead of waiting for its heartbeat timeout.
+    // The provider request itself cannot be resumed. Eligible root failures
+    // reconnect the persisted SDK session and run an empty turn over its history.
     onSdkEvent(sdkSession, 'model.call_failure', (e: SdkEvent) => {
       if (!isActive()) return;
       this.resetHeartbeat();
@@ -2431,19 +2562,31 @@ class SdkSession implements CopilotSession {
         : typeof data?.errorCode === 'string'
           ? data.errorCode
           : 'Unknown model call failure';
-      const rawStatusCode = data?.statusCode;
-      const statusCode = typeof rawStatusCode === 'number' || typeof rawStatusCode === 'string'
-        ? rawStatusCode
-        : undefined;
+      const statusCode = numericStatusCode(data?.statusCode);
       const errorCode = typeof data?.errorCode === 'string' ? data.errorCode : undefined;
       const status = statusCode !== undefined ? ` (HTTP ${statusCode})` : '';
       const error = new Error(`Model call failed${status}: ${detail}`);
       if (statusCode !== undefined) Object.assign(error, { statusCode });
       if (errorCode !== undefined) Object.assign(error, { errorCode });
+      Object.assign(error, {
+        transport: data?.transport,
+        failureKind: data?.failureKind,
+        durationMs: data?.durationMs,
+        errorType: data?.errorType,
+        badRequestKind: data?.badRequestKind,
+        apiEndpoint: data?.apiEndpoint,
+        providerCallId: data?.providerCallId,
+        serviceRequestId: data?.serviceRequestId,
+        requestFingerprint: data?.requestFingerprint,
+      });
       const compactionFailed = data?.initiator === 'compaction'
         || data?.source === 'compaction'
         || this.compactionInProgress
         || this.proactiveCompactionPromise !== undefined;
+      if (!compactionFailed && isRecoverableModelCallFailure(data)) {
+        this.scheduleRecovery(sdkSession, error, data, e.id);
+        return;
+      }
       this.fail(
         error,
         compactionFailed ? 'compaction.model.call_failure' : 'model.call_failure',
@@ -2587,6 +2730,343 @@ class SdkSession implements CopilotSession {
     });
   }
 
+  private scheduleRecovery(
+    failedHandle: SdkSessionHandle,
+    error: Error,
+    data: Record<string, unknown> | undefined,
+    eventId: string | undefined,
+  ): void {
+    const policy = effectiveSessionRecoveryPolicy(this.config.sessionRecovery);
+    if (!policy) {
+      this.fail(error, 'model.call_failure', data);
+      return;
+    }
+    if (this.recoveryInProgress || this.aborted || this.turnSettled) return;
+
+    const callKey = [
+      data?.apiCallId,
+      data?.providerCallId,
+      data?.serviceRequestId,
+    ].map(value => String(value ?? '')).join('|');
+    const requestKey = eventId ?? (callKey !== '||'
+      ? callKey
+      : createHash('sha256').update(safeJson(data ?? {})).digest('hex'));
+    if (this.failedRequestKeys.has(requestKey)) return;
+    this.failedRequestKeys.add(requestKey);
+
+    const sessionId = this.sessionId;
+    if (!sessionId) {
+      this.fail(error, 'model.call_failure.missing_session_id', data);
+      return;
+    }
+    if (this.recoveryContinuation >= policy.maxContinuations) {
+      this.exhaustRecovery(policy, sessionId, error, 'continuation limit exhausted', data);
+      return;
+    }
+
+    this.recoveryStartedAt ??= Date.now();
+    this.recoveryDeadlineMs ??= Math.min(
+      this.sessionDeadlineMs ?? Number.POSITIVE_INFINITY,
+      this.recoveryStartedAt + policy.budgetMs,
+    );
+    const delayMs = recoveryDelayMs(policy, this.recoveryContinuation);
+    this.emitRecovery('scheduled', policy, this.recoveryContinuation + 1, sessionId, {
+      delayMs,
+      ...this.recoveryMetadata(data),
+    });
+    this.suspendHeartbeat();
+
+    this.nativeRetryGraceTimer = setTimeout(() => {
+      this.nativeRetryGraceTimer = null;
+      if (this.aborted || this.turnSettled) return;
+      const recovery = this.recoverSameSession(failedHandle, policy, error, data, delayMs);
+      this.recoveryInProgress = recovery;
+      void recovery.finally(() => {
+        if (this.recoveryInProgress === recovery) this.recoveryInProgress = undefined;
+        if (this.deferredIdle && !this.turnSettled && !this.aborted) {
+          this.deferredIdle = false;
+          this.handleParentIdle();
+        }
+      });
+    }, policy.nativeRetryGraceMs);
+  }
+
+  private async recoverSameSession(
+    failedHandle: SdkSessionHandle,
+    policy: EffectiveSessionRecoveryPolicy,
+    originalError: Error,
+    data: Record<string, unknown> | undefined,
+    delayMs: number,
+  ): Promise<void> {
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    try {
+      await this.waitWithinRecoveryDeadline(delayMs);
+      const before = await this.auditRecoveryHistory(failedHandle, sessionId);
+      if (before.completed) {
+        this.emitRecovery('recovered', policy, this.recoveryContinuation, sessionId, {
+          reason: 'failed turn completed before recovery dispatch',
+        });
+        this.settleIdle();
+        return;
+      }
+
+      this.recoveryContinuation += 1;
+      this.emitRecovery('resuming', policy, this.recoveryContinuation, sessionId, {
+        ...this.recoveryMetadata(data),
+      });
+
+      // Fence the old handle synchronously before any asynchronous cleanup.
+      this._sdkSession = null;
+      this.handleGeneration += 1;
+      this.settleCurrentCompactionBarrierSuperseded();
+      if (this.compactionTimer) {
+        clearTimeout(this.compactionTimer);
+        this.compactionTimer = null;
+      }
+      this.suspendHeartbeat();
+      await failedHandle.disconnect().catch(() => undefined);
+      const oldClient = this._client;
+      this._client = null;
+      if (oldClient) {
+        await boundedCleanup(oldClient.stop()).catch(() => undefined);
+        await oldClient.forceStop().catch(() => undefined);
+      }
+
+      const clientFactory = this.clientFactory;
+      const configFactory = this.sdkSessionConfigFactory;
+      if (!clientFactory || !configFactory) {
+        throw new Error('SDK recovery configuration is unavailable');
+      }
+      const client = clientFactory();
+      this._client = client;
+      await client.start();
+      const { sessionId: _createSessionId, ...resumeConfig } = configFactory(client);
+      const resumed = await client.resumeSession(sessionId, {
+        ...resumeConfig,
+        continuePendingWork: false,
+      });
+      if (resumed.sessionId !== sessionId) {
+        await resumed.disconnect().catch(() => undefined);
+        throw new Error(
+          `SDK resumed unexpected session '${resumed.sessionId}' instead of '${sessionId}'`,
+        );
+      }
+      if (this.aborted || this.turnSettled) {
+        await resumed.disconnect().catch(() => undefined);
+        return;
+      }
+
+      this._sdkSession = resumed;
+      this.handleGeneration += 1;
+      this.resetStateAfterResume();
+      this.rearmHardTimeout(resumed);
+      await this.applyResumedSessionConfiguration(resumed);
+      this._wireEvents(resumed);
+      await this.auditRecoveryHistory(resumed, sessionId);
+      await this.rebaselineResumedSession(resumed);
+      if (this.config.compactionMode === 'adaptive'
+        && !(await this.ensureCompactionHeadroom(resumed, 'pre-send'))) return;
+
+      this.resetHeartbeat();
+      await resumed.rpc.sendMessages({ messages: [], wait: false });
+      this.emitRecovery('continuation-sent', policy, this.recoveryContinuation, sessionId, {
+        ...this.recoveryMetadata(data),
+      });
+    } catch (recoveryError) {
+      if (this.aborted || this.turnSettled) return;
+      const normalized = recoveryError instanceof Error
+        ? recoveryError
+        : new Error(String(recoveryError));
+      if (this.recoveryContinuation >= policy.maxContinuations
+        || (this.recoveryDeadlineMs !== undefined && Date.now() >= this.recoveryDeadlineMs)) {
+        this.exhaustRecovery(policy, sessionId, originalError, normalized.message, data);
+        return;
+      }
+      // Resume failures are unsafe to replay blindly. They exhaust this logical
+      // turn even when numerical continuations remain.
+      this.exhaustRecovery(policy, sessionId, originalError, normalized.message, data);
+    }
+  }
+
+  private async auditRecoveryHistory(
+    handle: SdkSessionHandle,
+    sessionId: string,
+  ): Promise<{ readonly completed: boolean }> {
+    const events = await handle.getEvents();
+    const expectedPrompt = this.originalPrompt;
+    const rootUserMessages = events.filter(event => (
+      event.type === 'user.message' && !event.agentId
+    ));
+    const originalMessages = rootUserMessages.filter(event => {
+      const data = event.data as Record<string, unknown>;
+      return expectedPrompt === undefined || data.content === expectedPrompt;
+    });
+    if (originalMessages.length !== 1) {
+      throw new Error(
+        `Unsafe recovery history for ${sessionId}: expected one original root user message, found ${originalMessages.length}`,
+      );
+    }
+
+    const pendingPairs = [
+      ['permission.requested', 'permission.completed'],
+      ['external_tool.requested', 'external_tool.completed'],
+      ['sampling.requested', 'sampling.completed'],
+      ['user_input.requested', 'user_input.completed'],
+      ['elicitation.requested', 'elicitation.completed'],
+    ] as const;
+    for (const [requested, completed] of pendingPairs) {
+      const starts = events.filter(event => event.type === requested).length;
+      const ends = events.filter(event => event.type === completed).length;
+      if (starts > ends) {
+        throw new Error(`Unsafe recovery history for ${sessionId}: pending ${requested}`);
+      }
+    }
+
+    const rootStarts = events.filter(event => event.type === 'assistant.turn_start' && !event.agentId).length;
+    const rootEnds = events.filter(event => event.type === 'assistant.turn_end' && !event.agentId).length;
+    return { completed: rootStarts > 0 && rootEnds >= rootStarts };
+  }
+
+  private async applyResumedSessionConfiguration(handle: SdkSessionHandle): Promise<void> {
+    const settings = this.resumedSubagentSettings;
+    if (settings && Object.keys(settings).length > 0) {
+      await handle.rpc.tools.updateSubagentSettings({ subagents: settings }).catch((error: unknown) => {
+        this.logger.warn('Failed to restore Copilot subagent settings after resume', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    const mode = this.config.mode ?? 'autopilot';
+    const result: unknown = await handle.rpc.mode.set({ mode });
+    if (this.config.requireMode === true && isExplicitModeFailure(result)) {
+      throw new Error(`SDK rejected required session mode after resume: ${mode}`);
+    }
+    if (this.config.requireMode === true) {
+      const effective = await handle.rpc.mode.get();
+      if (effective !== mode) {
+        throw new Error(
+          `Effective SDK session mode '${effective}' does not match required mode '${mode}' after resume`,
+        );
+      }
+    }
+  }
+
+  private resetStateAfterResume(): void {
+    this._turnText.clear();
+    this._toolCallNames.clear();
+    this._callIdToParent.clear();
+    this._pendingPartials.clear();
+    this.parentUsage = undefined;
+    this.latestContextDiagnostics = undefined;
+    this.adaptiveCompactionPolicy = undefined;
+    this.previousParentRequestTokens = undefined;
+    this.largestObservedInterRequestGrowth = 0;
+    this.childUsage.clear();
+    this.retryingAgentIds.clear();
+    this.retryingParent = false;
+    this.compactionInProgress = false;
+    this.currentCompactionBarrier = undefined;
+    this.parentCompactionGeneration = 0;
+    this.verifiedParentCompactionGeneration = 0;
+    this.compactionBaselinePromise = undefined;
+    this.proactiveCompactionPromise = undefined;
+    this.lastCompactionTerminalError = undefined;
+    this.deferredIdle = false;
+  }
+
+  private async rebaselineResumedSession(handle: SdkSessionHandle): Promise<void> {
+    const measurement = await this.measureParentUsageSnapshot(handle, 'pre-request');
+    if (!measurement) throw new Error('Failed to rebaseline resumed session context');
+    this.parentUsage = measurement.usage;
+    this.latestContextDiagnostics = measurement.diagnostics;
+    this.previousParentRequestTokens = measurement.usage.currentTokens;
+    this.parentCompactionGeneration = measurement.diagnostics.attribution?.compactions.count ?? 0;
+    this.verifiedParentCompactionGeneration = this.parentCompactionGeneration;
+  }
+
+  private settleCurrentCompactionBarrierSuperseded(): void {
+    const barrier = this.currentCompactionBarrier;
+    if (barrier?.isPending === true) barrier.settleSuperseded();
+    this.currentCompactionBarrier = undefined;
+  }
+
+  private waitWithinRecoveryDeadline(delayMs: number): Promise<void> {
+    const deadline = this.recoveryDeadlineMs;
+    if (deadline !== undefined && Date.now() + delayMs >= deadline) {
+      return Promise.reject(new Error('Session recovery deadline exhausted'));
+    }
+    return new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private rearmHardTimeout(handle: SdkSessionHandle): void {
+    if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
+    const remainingMs = (this.sessionDeadlineMs ?? Date.now()) - Date.now();
+    if (remainingMs <= 0) {
+      this.fail(new Error(`Session timed out after ${this.config.timeout}s`), 'timeout');
+      return;
+    }
+    this.timeoutTimer = setTimeout(() => {
+      if (this.aborted || this._sdkSession !== handle) return;
+      this.fail(new Error(`Session timed out after ${this.config.timeout}s`), 'timeout');
+    }, Math.min(remainingMs, 2_147_483_647));
+  }
+
+  private recoveryMetadata(
+    data: Record<string, unknown> | undefined,
+  ): Partial<SessionRecoveryEvent> {
+    const statusCode = numericStatusCode(data?.statusCode);
+    return {
+      ...(statusCode !== undefined ? { statusCode } : {}),
+      ...(typeof data?.errorCode === 'string' ? { errorCode: data.errorCode } : {}),
+      ...(typeof data?.transport === 'string' ? { transport: data.transport } : {}),
+      ...(typeof data?.failureKind === 'string' ? { failureKind: data.failureKind } : {}),
+      ...(typeof data?.durationMs === 'number' && Number.isFinite(data.durationMs)
+        ? { durationMs: data.durationMs }
+        : {}),
+    };
+  }
+
+  private emitRecovery(
+    phase: SessionRecoveryEvent['phase'],
+    policy: EffectiveSessionRecoveryPolicy,
+    continuation: number,
+    sessionId: string,
+    fields: Partial<SessionRecoveryEvent> = {},
+  ): void {
+    this.emit('recovery', {
+      phase,
+      continuation,
+      maxContinuations: policy.maxContinuations,
+      sessionId,
+      ...(this.recoveryStartedAt !== undefined
+        ? { elapsedMs: Date.now() - this.recoveryStartedAt }
+        : {}),
+      ...fields,
+    });
+  }
+
+  private exhaustRecovery(
+    policy: EffectiveSessionRecoveryPolicy,
+    sessionId: string,
+    cause: Error,
+    reason: string,
+    data: Record<string, unknown> | undefined,
+  ): void {
+    this.emitRecovery('exhausted', policy, this.recoveryContinuation, sessionId, {
+      reason,
+      ...this.recoveryMetadata(data),
+    });
+    this.fail(
+      new SessionRecoveryExhaustedError(
+        `Session recovery exhausted after ${this.recoveryContinuation} continuation(s): ${reason}`,
+        { cause },
+      ),
+      'session.recovery_exhausted',
+      data,
+    );
+  }
+
   // ── CopilotSession event subscription ────────────────────────────────────
   // Overloads match CopilotSession interface exactly.
 
@@ -2604,6 +3084,7 @@ class SdkSession implements CopilotSession {
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'permission', handler: (data: PermissionInfo) => void): void;
   on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
+  on(event: 'recovery', handler: (event: SessionRecoveryEvent) => void): void;
   on(event: string, handler: (...args: never[]) => void): void {
     this.handlers.push({ event, handler });
   }
@@ -2666,6 +3147,10 @@ class SdkSession implements CopilotSession {
 
   private settleIdle(): void {
     if (this.aborted || this.turnSettled) return;
+    const policy = effectiveSessionRecoveryPolicy(this.config.sessionRecovery);
+    if (policy && this.recoveryContinuation > 0 && this.sessionId) {
+      this.emitRecovery('recovered', policy, this.recoveryContinuation, this.sessionId);
+    }
     this.turnSettled = true;
     this._turnText.clear();
     this.clearTimers();
@@ -2738,8 +3223,19 @@ class SdkSession implements CopilotSession {
     if (!e || typeof e.type !== 'string') return;
     this.resetHeartbeat();
     if (e.type === 'assistant.turn_retry') {
-      if (e.agentId) this.retryingAgentIds.add(e.agentId);
-      else this.retryingParent = true;
+      if (e.agentId) {
+        this.retryingAgentIds.add(e.agentId);
+      } else {
+        this.retryingParent = true;
+        if (this.nativeRetryGraceTimer) {
+          clearTimeout(this.nativeRetryGraceTimer);
+          this.nativeRetryGraceTimer = null;
+          const policy = effectiveSessionRecoveryPolicy(this.config.sessionRecovery);
+          if (policy && this.sessionId) {
+            this.emitRecovery('native-retry', policy, this.recoveryContinuation, this.sessionId);
+          }
+        }
+      }
       return;
     }
     if (NAMED_SDK_EVENTS.has(e.type)) return;
@@ -3449,6 +3945,11 @@ class SdkSession implements CopilotSession {
   }
 
   private handleParentIdle(): void {
+    if (this.recoveryInProgress || this.nativeRetryGraceTimer) {
+      this.deferredIdle = true;
+      this.suspendHeartbeat();
+      return;
+    }
     if (this.currentCompactionBarrier?.isPending === true || this.compactionInProgress) {
       this.deferredIdle = true;
       this.suspendHeartbeat();
@@ -3540,6 +4041,10 @@ class SdkSession implements CopilotSession {
 
   private clearTimers(): void {
     this.settleCurrentCompactionBarrierFailed(new Error('SDK session timers cleared'));
+    if (this.nativeRetryGraceTimer) {
+      clearTimeout(this.nativeRetryGraceTimer);
+      this.nativeRetryGraceTimer = null;
+    }
     if (this.timeoutTimer) {
       clearTimeout(this.timeoutTimer);
       this.timeoutTimer = null;
