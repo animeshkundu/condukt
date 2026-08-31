@@ -33,17 +33,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
 import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
 
+const require = createRequire(import.meta.url);
+
 function resolveCliPath() {
-  if (process.env.COPILOT_CLI_PATH && existsSync(process.env.COPILOT_CLI_PATH)) {
-    return process.env.COPILOT_CLI_PATH;
+  const configuredPath = process.env.COPILOT_CLI_PATH?.trim();
+  if (configuredPath) {
+    const absolutePath = resolve(configuredPath);
+    if (!existsSync(absolutePath)) {
+      throw new Error(`COPILOT_CLI_PATH does not exist: ${absolutePath}`);
+    }
+    return absolutePath;
   }
-  const candidate1 = 'C:/Users/anikundu/Software/investigation/condukt/node_modules/@github/copilot-win32-x64/copilot.exe';
-  if (existsSync(candidate1)) return candidate1;
-  const candidate2 = 'C:/Users/anikundu/Software/investigation/taco-helper/node_modules/@github/copilot-win32-x64/copilot.exe';
-  if (existsSync(candidate2)) return candidate2;
-  return undefined;
+
+  const platformPackage = `@github/copilot-${process.platform}-${process.arch}`;
+  try {
+    const packageCliPath = require.resolve(platformPackage);
+    return existsSync(packageCliPath) ? packageCliPath : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function summarizeHistory(events) {
