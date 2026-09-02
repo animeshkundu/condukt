@@ -25,7 +25,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { agent } from '../../src/agent';
 import { adaptCopilotBackend } from '../../runtimes/copilot/copilot-adapter';
 import { SdkBackend } from '../../runtimes/copilot/sdk-backend';
-import { classifySdkEvent, KNOWN_SDK_EVENT_TYPES } from '../../runtimes/copilot/lifecycle-events';
+import {
+  classifySdkEvent,
+  isSdkForwardProgress,
+  KNOWN_SDK_EVENT_TYPES,
+} from '../../runtimes/copilot/lifecycle-events';
 import type { CopilotSession } from '../../runtimes/copilot/copilot-backend';
 import type { SessionConfig } from '../../src/types';
 
@@ -55,13 +59,18 @@ interface MockModelInfo {
 }
 
 interface MockSdkSession {
+  sessionId: string;
   send: ReturnType<typeof vi.fn>;
   sendAndWait: ReturnType<typeof vi.fn>;
   getEvents: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
   rpc: {
-    mode: { set: ReturnType<typeof vi.fn> };
+    sendMessages: ReturnType<typeof vi.fn>;
+    mode: {
+      set: ReturnType<typeof vi.fn>;
+      get: ReturnType<typeof vi.fn>;
+    };
     tools: { updateSubagentSettings: ReturnType<typeof vi.fn> };
     history: {
       compact: ReturnType<typeof vi.fn>;
@@ -91,7 +100,8 @@ function createMockSdkSession(): MockSdkSession {
   const catchAll: SdkEventHandler[] = [];
 
   const session: MockSdkSession = {
-    send: vi.fn().mockResolvedValue(undefined),
+    sessionId: 'session-1',
+    send: vi.fn().mockResolvedValue('message-1'),
     sendAndWait: vi.fn().mockResolvedValue({
       type: 'assistant.message',
       data: { content: 'advisor response' },
@@ -100,7 +110,14 @@ function createMockSdkSession(): MockSdkSession {
     abort: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: {
-      mode: { set: vi.fn().mockResolvedValue(undefined) },
+      sendMessages: vi.fn().mockResolvedValue({ messageIds: [] }),
+      mode: {
+        set: vi.fn().mockImplementation(async ({ mode }: { mode: string }) => {
+          session.rpc.mode.get.mockResolvedValue(mode);
+          return undefined;
+        }),
+        get: vi.fn().mockResolvedValue('autopilot'),
+      },
       tools: { updateSubagentSettings: vi.fn().mockResolvedValue({}) },
       history: {
         compact: vi.fn().mockResolvedValue({ success: true, tokensRemoved: 0, messagesRemoved: 0 }),
@@ -209,6 +226,7 @@ let MockCopilotRequestHandlerClass: {
 };
 let MockCopilotWebSocketForwarderClass: new (context: Record<string, unknown>) => unknown;
 let mockCreateSession: ReturnType<typeof vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>>;
+let mockResumeSession: ReturnType<typeof vi.fn<(sessionId: string, config: Record<string, unknown>) => Promise<MockSdkSession>>>;
 let mockStart: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let mockListModels: ReturnType<typeof vi.fn<() => Promise<MockModelInfo[]>>>;
 let mockStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
@@ -386,7 +404,17 @@ beforeEach(() => {
     }
   };
   mockCreateSession = vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>()
-    .mockImplementation(async () => mockSdkSessions.shift() ?? mockSdkSession);
+    .mockImplementation(async (config) => {
+      const session = mockSdkSessions.shift() ?? mockSdkSession;
+      session.sessionId = typeof config.sessionId === 'string' ? config.sessionId : 'session-1';
+      return session;
+    });
+  mockResumeSession = vi.fn<(sessionId: string, config: Record<string, unknown>) => Promise<MockSdkSession>>()
+    .mockImplementation(async (sessionId) => {
+      const session = mockSdkSessions.shift() ?? createMockSdkSession();
+      session.sessionId = sessionId;
+      return session;
+    });
   mockStart = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockForceStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -425,6 +453,9 @@ beforeEach(() => {
             const onEvent = config.onEvent as SdkEventHandler | undefined;
             for (const event of mockEarlyEvents) onEvent?.(event);
             return mockCreateSession(config);
+          }
+          resumeSession(sessionId: string, config: Record<string, unknown>) {
+            return mockResumeSession(sessionId, config);
           }
           stop() { return mockStop(); }
           forceStop() { return mockForceStop(); }
@@ -619,6 +650,189 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => {
       expect(mock.rpc.mode.set).toHaveBeenCalledWith({ mode: expected });
     });
+  });
+
+  it('confirms the effective mode after setting a required mode', async () => {
+    const { session, mock } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    session.send('root prompt');
+
+    await vi.waitFor(() => {
+      expect(mock.rpc.mode.set).toHaveBeenCalledWith({ mode: 'plan' });
+      expect(mock.rpc.mode.get).toHaveBeenCalledOnce();
+      expect(mock.send).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('fails required mode startup when the effective mode readback mismatches', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.get.mockResolvedValueOnce('autopilot');
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Effective SDK session mode 'autopilot' does not match required mode 'plan'"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+    expect(sdkSession.abort).toHaveBeenCalledOnce();
+    expect(sdkSession.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('fails required mode startup when effective mode readback throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.get.mockRejectedValueOnce(new Error('mode readback unavailable'));
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining('mode readback unavailable'),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+  });
+
+  it('allows ordinary reads and read-only MCP while denying every write-capable operation', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    const approved = [
+      { kind: 'read', path: '/repo/file.ts' },
+      { kind: 'mcp', toolName: 'list', readOnly: true },
+    ] as const;
+    for (const request of approved) {
+      expect(config.onPermissionRequest(request, { sessionId: 'session-1' })).toEqual({
+        kind: 'approve-once',
+      });
+    }
+
+    const denied = [
+      { kind: 'read', path: '/outside/file.ts', requestSandboxBypass: true },
+      { kind: 'read', path: '/repo/file.ts', managedApprovalRequired: true },
+      { kind: 'mcp', toolName: 'mutate', readOnly: false },
+      { kind: 'mcp', toolName: 'unknown' },
+      { kind: 'shell', fullCommandText: 'git status' },
+      { kind: 'write', fileName: '/repo/file.ts' },
+      { kind: 'custom-tool', toolName: 'helper' },
+      { kind: 'hook', toolName: 'helper' },
+      { kind: 'url', url: 'https://example.test' },
+      { kind: 'memory', action: 'store' },
+    ] as const;
+    for (const request of denied) {
+      expect(config.onPermissionRequest(request, { sessionId: 'session-1' })).toEqual({
+        kind: 'reject',
+        feedback: 'Permission denied by the read-only session policy.',
+      });
+    }
+  });
+
+  it('denies read-only MCP when the request omits the explicit readOnly marker', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'mcp', toolName: 'search_code' },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('denies a managed read request instead of bypassing the human approval boundary', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'read', path: '/repo/file.ts', managedApprovalRequired: true },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('does not approve read requests that request a sandbox bypass', async () => {
+    const { session } = await createTestSession({}, { permissionPolicy: 'read-only' });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    const config = mockCreateSession.mock.calls[0]?.[0] as {
+      readonly onPermissionRequest: (request: Record<string, unknown>, invocation: { readonly sessionId: string }) => unknown;
+    };
+    expect(config.onPermissionRequest(
+      { kind: 'read', path: '/outside/file.ts', requestSandboxBypass: true },
+      { sessionId: 'session-1' },
+    )).toEqual({
+      kind: 'reject',
+      feedback: 'Permission denied by the read-only session policy.',
+    });
+  });
+
+  it('fails required mode startup before sending the prompt when mode.set throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.set.mockRejectedValueOnce(new Error('mode unsupported'));
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Required SDK session mode 'plan' could not be applied"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+    expect(sdkSession.abort).toHaveBeenCalledOnce();
+    expect(sdkSession.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('fails required mode startup before sending the prompt on an explicit false result', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, {
+      mode: 'plan',
+      requireMode: true,
+    });
+    sdkSession.rpc.mode.set.mockResolvedValueOnce({ success: false });
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+    expect(errorHandler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      message: expect.stringContaining("Required SDK session mode 'plan' could not be applied"),
+    }));
+    expect(sdkSession.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps mode startup best-effort by default when mode.set throws', async () => {
+    const { session, mock: sdkSession } = await createTestSession({}, { mode: 'plan' });
+    sdkSession.rpc.mode.set.mockRejectedValueOnce(new Error('mode unsupported'));
+    session.send('root prompt');
+
+    await vi.waitFor(() => expect(sdkSession.send).toHaveBeenCalledOnce());
   });
 
   it('registers the stand-in tool only when configured', async () => {
@@ -1381,8 +1595,11 @@ describe('SdkBackend event mapping', () => {
 
   it('permits capability discovery but blocks parent-scoped traffic before a session handle exists', async () => {
     let releaseSession!: () => void;
-    mockCreateSession.mockImplementationOnce(() => new Promise((resolve) => {
-      releaseSession = () => resolve(mockSdkSession);
+    mockCreateSession.mockImplementationOnce((config) => new Promise((resolve) => {
+      releaseSession = () => {
+        mockSdkSession.sessionId = String(config.sessionId ?? 'session-1');
+        resolve(mockSdkSession);
+      };
     }));
     const { session } = await createTestSession();
     session.send('test prompt');
@@ -1691,21 +1908,28 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
     mock._emit('assistant.turn_retry');
 
-    await expect(sendObservedParentRequest('req-blocked-retry')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const blockedRetry = sendObservedParentRequest('req-blocked-retry');
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(0);
     releaseVerification();
     await vi.waitFor(() => expect(logger.info).toHaveBeenCalledWith(
       'Verified completed Copilot parent compaction',
       expect.any(Object),
     ));
+    await expect(blockedRetry).resolves.toMatchObject({ status: 204 });
+    expect(logger.info).toHaveBeenCalledWith(
+      'Copilot model request dispatch',
+      expect.objectContaining({
+        requestId: 'req-blocked-retry',
+        purpose: 'retry',
+      }),
+    );
     await sendObservedParentRequest('req-forwarded-retry');
-
     expect(logger.info).toHaveBeenCalledWith(
       'Copilot model request dispatch',
       expect.objectContaining({
         requestId: 'req-forwarded-retry',
-        purpose: 'retry',
+        purpose: 'normal-turn',
       }),
     );
   });
@@ -2054,6 +2278,26 @@ describe('SdkBackend event mapping', () => {
     });
   });
 
+  it('forwards the SDK-only max thinking effort through SdkBackend', async () => {
+    const backend = new SdkBackend({ subagentRoster: false });
+    const thinkingBudget = 'max' as unknown as SessionConfig['thinkingBudget'];
+    const session = await backend.createSession({
+      model: 'test-model',
+      thinkingBudget,
+      cwd: '.',
+      addDirs: [],
+      timeout: 3600,
+      heartbeatTimeout: 120,
+    });
+    session.send('test prompt');
+
+    await vi.waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+        reasoningEffort: 'max',
+      }));
+    });
+  });
+
   it('resolves a fallback-chain env reference embedded in an MCP header', async () => {
     // The default GitHub header is `Bearer ${A|B|C}`. A matcher without the alternatives finds
     // no reference, leaves the value untouched, and ships the placeholder as a literal bearer
@@ -2082,6 +2326,118 @@ describe('SdkBackend event mapping', () => {
       expect(authorization).toBe('Bearer gh-token-value');
       expect(authorization).not.toContain('${');
     });
+  });
+
+  it('uses the explicit MCP working directory for file servers when the session cwd is detached', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        fileOnly: { command: 'file-server' },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession(
+        {
+          mcpConfigPath,
+          mcpServerWorkingDirectory: '/workspace/repository',
+        },
+        { cwd: '/detached/session' },
+      );
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            fileOnly: {
+              type: 'local',
+              command: 'file-server',
+              tools: ['*'],
+              workingDirectory: '/workspace/repository',
+            },
+          },
+        }));
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves generic file MCP config when no working directory option is provided', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        generic: {
+          command: 'file-server',
+          args: ['--cwd', '/server/argument'],
+        },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession(
+        { mcpConfigPath },
+        { cwd: '/detached/session' },
+      );
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            generic: {
+              type: 'local',
+              command: 'file-server',
+              args: ['--cwd', '/server/argument'],
+              tools: ['*'],
+            },
+          },
+        }));
+      });
+      expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty(
+        'mcpServers.generic.workingDirectory',
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves an explicit file MCP server working directory over the backend option', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'condukt-mcp-'));
+    const mcpConfigPath = join(directory, 'mcp.json');
+    writeFileSync(mcpConfigPath, JSON.stringify({
+      mcpServers: {
+        explicit: {
+          type: 'stdio',
+          command: 'file-server',
+          workingDirectory: '/server/specific',
+        },
+      },
+    }));
+
+    try {
+      const { session } = await createTestSession({
+        mcpConfigPath,
+        mcpServerWorkingDirectory: '/workspace/repository',
+      });
+      session.send('test prompt');
+
+      await vi.waitFor(() => {
+        expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+          mcpServers: {
+            explicit: {
+              type: 'stdio',
+              command: 'file-server',
+              workingDirectory: '/server/specific',
+              tools: ['*'],
+            },
+          },
+        }));
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('merges backend MCP file servers with session servers, favoring the session', async () => {
@@ -2554,8 +2910,15 @@ describe('SdkBackend event mapping', () => {
     let resolveSecond!: (session: MockSdkSession) => void;
     const secondCreation = new Promise<MockSdkSession>(resolve => { resolveSecond = resolve; });
     mockCreateSession
-      .mockResolvedValueOnce(mockSdkSession)
-      .mockReturnValueOnce(secondCreation);
+      .mockImplementationOnce(async (config) => {
+        mockSdkSession.sessionId = String(config.sessionId);
+        return mockSdkSession;
+      })
+      .mockImplementationOnce(async (config) => {
+        const resolved = await secondCreation;
+        resolved.sessionId = String(config.sessionId);
+        return resolved;
+      });
 
     const { session, mock: firstMock } = await createTestSession();
     const idleHandler = vi.fn();
@@ -2631,34 +2994,56 @@ describe('SdkBackend event mapping', () => {
     expect(toolOutputHandler).toHaveBeenCalledWith('Read', 'new output', 'new-parent');
   });
 
-  it('keeps an active session alive when only unknown events arrive', async () => {
+  it('does not treat informational or unknown transport chatter as forward progress', () => {
+    expect(isSdkForwardProgress('session.usage_checkpoint', {})).toBe(false);
+    expect(isSdkForwardProgress('hook.progress', { message: 'still here' })).toBe(false);
+    expect(isSdkForwardProgress('future.progress', { message: 'still here' })).toBe(false);
+  });
+
+  it('requires non-empty streaming payloads for forward progress', () => {
+    expect(isSdkForwardProgress('assistant.message_delta', { deltaContent: '' })).toBe(false);
+    expect(isSdkForwardProgress('assistant.reasoning_delta', { deltaContent: '' })).toBe(false);
+    expect(isSdkForwardProgress('tool.execution_partial_result', { partialOutput: '' })).toBe(false);
+    expect(isSdkForwardProgress('assistant.message_delta', { deltaContent: 'x' })).toBe(true);
+    expect(isSdkForwardProgress('assistant.reasoning_delta', { deltaContent: 'thinking' })).toBe(true);
+    expect(isSdkForwardProgress('tool.execution_partial_result', { partialOutput: 'line' })).toBe(true);
+  });
+
+  it('does not extend the heartbeat for duplicate model or streaming progress', async () => {
     vi.useFakeTimers();
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
       session.send('test prompt');
       await vi.advanceTimersByTimeAsync(0);
 
-      for (let eventCount = 0; eventCount < 6; eventCount += 1) {
-        await vi.advanceTimersByTimeAsync(1500);
-        mock._emit('future.progress');
-      }
+      mock._emit('model.call_start', { apiCallId: 'same-call' });
+      await vi.advanceTimersByTimeAsync(1_500);
+      mock._emit('model.call_start', { apiCallId: 'same-call' });
+      mock._emit('assistant.streaming_delta', { totalResponseSizeBytes: 10 });
+      await vi.advanceTimersByTimeAsync(1_500);
+      mock._emit('assistant.streaming_delta', { totalResponseSizeBytes: 10 });
+      await vi.advanceTimersByTimeAsync(500);
 
-      expect(errorHandler).not.toHaveBeenCalled();
-      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('Unknown event: future.progress'));
-      mock._emit('session.idle');
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('session progress timeout'),
+      }));
     } finally {
-      stderr.mockRestore();
       vi.useRealTimers();
     }
   });
 
-  it('keeps a long model call alive from model.call_start events', async () => {
+  it('lets novel model-call starts refresh the heartbeat', async () => {
     vi.useFakeTimers();
     try {
-      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 180 });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 180,
+        sessionRecovery: false,
+      });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
       session.send('test prompt');
@@ -2666,12 +3051,127 @@ describe('SdkBackend event mapping', () => {
 
       for (let elapsedSeconds = 0; elapsedSeconds < 12 * 60; elapsedSeconds += 150) {
         await vi.advanceTimersByTimeAsync(150 * 1000);
-        mock._emit('model.call_start');
+        mock._emit('model.call_start', { apiCallId: `call-${elapsedSeconds}` });
       }
 
       expect(errorHandler).not.toHaveBeenCalled();
       mock._emit('session.idle');
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when a tool stays silent for the progress deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('tool.execution_start', {
+        toolName: 'Read',
+        toolCallId: 'tool-1',
+        arguments: {},
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(errorHandler).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('session progress timeout'),
+      }));
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets novel tool progress keep a tool alive until it completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('tool.execution_start', {
+        toolName: 'Read',
+        toolCallId: 'tool-1',
+        arguments: {},
+      });
+
+      for (let i = 0; i < 3; i += 1) {
+        await vi.advanceTimersByTimeAsync(1_500);
+        mock._emit('tool.execution_progress', {
+          toolCallId: 'tool-1',
+          progressMessage: `page ${i}`,
+        });
+      }
+      expect(errorHandler).not.toHaveBeenCalled();
+      mock._emit('tool.execution_complete', {
+        toolCallId: 'tool-1',
+        result: { content: 'done' },
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(errorHandler).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when a pending external request loses its completion event', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('user_input.requested', { requestId: 'input-1' });
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('session progress timeout'),
+      }));
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails a silent opted-out session despite unknown event chatter', async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      mock._emit('future.progress');
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('session progress timeout'),
+      }));
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('Unknown event: future.progress'));
+    } finally {
+      stderr.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -2721,7 +3221,10 @@ describe('SdkBackend event mapping', () => {
   it('still fails terminal events immediately after liveness resets', async () => {
     vi.useFakeTimers();
     try {
-      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
       session.send('test prompt');
@@ -2779,7 +3282,10 @@ describe('SdkBackend event mapping', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const logger = createMockLogger();
-      const { session, mock } = await createTestSession({ logger }, { heartbeatTimeout: 2 });
+      const { session, mock } = await createTestSession({ logger }, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
       const errorHandler = vi.fn();
       const textHandler = vi.fn();
       session.on('error', errorHandler);
@@ -2811,7 +3317,7 @@ describe('SdkBackend event mapping', () => {
       await vi.advanceTimersByTimeAsync(2 * 1000);
       expect(errorHandler).toHaveBeenCalledOnce();
       expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-        message: expect.stringContaining('heartbeat timeout'),
+        message: expect.stringContaining('session progress timeout'),
       }));
     } finally {
       stderr.mockRestore();
@@ -2839,7 +3345,10 @@ describe('SdkBackend event mapping', () => {
   it('does not settle the parent from agent-scoped terminal-success events', async () => {
     vi.useFakeTimers();
     try {
-      const { session, mock } = await createTestSession({}, { heartbeatTimeout: 2 });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: false,
+      });
       const idleHandler = vi.fn();
       const errorHandler = vi.fn();
       session.on('idle', idleHandler);
@@ -2853,7 +3362,7 @@ describe('SdkBackend event mapping', () => {
       expect(idleHandler).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(2 * 1000);
       expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-        message: expect.stringContaining('heartbeat timeout'),
+        message: expect.stringContaining('session progress timeout'),
       }));
     } finally {
       vi.useRealTimers();
@@ -3043,34 +3552,533 @@ describe('SdkBackend event mapping', () => {
     expect(toolStartHandler).not.toHaveBeenCalled();
   });
 
-  it('model.call_failure emits error instead of hanging', async () => {
-    const { session, mock } = await createTestSession();
+  it('resumes a silent unmatched root turn after its progress heartbeat expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      const stalledHistory = [
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '12' } },
+      ];
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue(stalledHistory);
+      resumed.getEvents.mockResolvedValue(stalledHistory);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: {
+          maxContinuations: 1,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      const recoveryHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('recovery', recoveryHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
 
+      mock._emit('assistant.turn_start', { turnId: '12' });
+      mock._emit('assistant.message_delta', { deltaContent: 'partial' });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.abort).not.toHaveBeenCalled();
+      expect(mock.disconnect).toHaveBeenCalledOnce();
+      expect(mockResumeSession).toHaveBeenCalledWith(
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryHandler).toHaveBeenCalledWith(expect.objectContaining({
+        phase: 'continuation-sent',
+        continuation: 1,
+        failureKind: 'session-progress-timeout',
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays the production event shape without timing out healthy tool turns', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      const stalledHistory = [
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '0' } },
+        { type: 'assistant.message', data: { turnId: '0', toolRequests: [{ toolCallId: 'tool-0' }] } },
+        { type: 'tool.execution_start', data: { turnId: '0', toolCallId: 'tool-0' } },
+        { type: 'tool.execution_complete', data: { turnId: '0', toolCallId: 'tool-0' } },
+        { type: 'assistant.turn_end', data: { turnId: '0' } },
+        { type: 'assistant.turn_start', data: { turnId: '1' } },
+      ];
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue(stalledHistory);
+      resumed.getEvents.mockResolvedValue(stalledHistory);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 180,
+        sessionRecovery: {
+          maxContinuations: 1,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('assistant.turn_start', { turnId: '0' });
+      await vi.advanceTimersByTimeAsync(39_000);
+      mock._emit('assistant.message', { turnId: '0', toolRequests: [{ toolCallId: 'tool-0' }] });
+      mock._emit('tool.execution_start', { turnId: '0', toolCallId: 'tool-0', toolName: 'Read' });
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      expect(mockResumeSession).not.toHaveBeenCalled();
+      mock._emit('tool.execution_complete', { turnId: '0', toolCallId: 'tool-0', result: { content: 'done' } });
+      mock._emit('assistant.turn_end', { turnId: '0' });
+      mock._emit('assistant.turn_start', { turnId: '1' });
+
+      await vi.advanceTimersByTimeAsync(179_999);
+      expect(mockResumeSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles a balanced turn with a terminal response when its session idle event was lost', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '0' } },
+        { type: 'assistant.message', data: { turnId: '0', content: 'done' } },
+        { type: 'assistant.turn_end', data: { turnId: '0' } },
+      ]);
+      const { session } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: {
+          maxContinuations: 1,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const idleHandler = vi.fn();
+      session.on('idle', idleHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await vi.waitFor(() => expect(idleHandler).toHaveBeenCalledOnce());
+      expect(mockResumeSession).not.toHaveBeenCalled();
+      expect(mockSdkSession.rpc.sendMessages).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues when disconnect only balances the abandoned turn without a terminal response', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '12' } },
+      ]);
+      resumed.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '12' } },
+        { type: 'assistant.turn_end', data: { turnId: '12' } },
+      ]);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: {
+          maxContinuations: 1,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const idleHandler = vi.fn();
+      session.on('idle', idleHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(idleHandler).not.toHaveBeenCalled();
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed instead of recovering a heartbeat with an unmatched tool execution', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '1' } },
+        { type: 'tool.execution_start', data: { turnId: '1', toolCallId: 'tool-1' } },
+      ]);
+      const { session } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: {
+          maxContinuations: 1,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+      }));
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes a transient model.call_failure in the same persisted session', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      const recoveryHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('recovery', recoveryHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('model.call_failure', {
+        errorMessage: 'transient upstream failure',
+        statusCode: 503,
+        failureKind: 'api',
+        transport: 'http',
+        model: 'test-model',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.abort).not.toHaveBeenCalled();
+      expect(mock.disconnect).toHaveBeenCalledOnce();
+      expect(mockResumeSession).toHaveBeenCalledWith(
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryHandler).toHaveBeenCalledWith(expect.objectContaining({
+        phase: 'continuation-sent',
+        continuation: 1,
+        sessionId: mock.sessionId,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not resume after the shared recovery budget expires', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'assistant.turn_start', data: { turnId: '1' } },
+      ]);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 23,
+          budgetMs: 50,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('model.call_failure', {
+        errorMessage: 'connection lost',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockResumeSession).not.toHaveBeenCalled();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps explicit recovery policies at 23 continuations', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumedSessions = Array.from({ length: 23 }, () => createMockSdkSession());
+      const safeHistory = [{ type: 'user.message', data: { content: 'test prompt' } }];
+      for (const handle of [mockSdkSession, ...resumedSessions]) {
+        handle.getEvents.mockResolvedValue(safeHistory);
+        handle.rpc.metadata.contextInfo.mockResolvedValue({
+          contextInfo: {
+            totalTokens: 1_000,
+            promptTokenLimit: 100_000,
+            systemTokens: 100,
+            conversationTokens: 900,
+            toolDefinitionsTokens: 0,
+          },
+        });
+      }
+      mockSdkSessions.push(...resumedSessions);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 99,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      let active = mock;
+      for (let continuation = 1; continuation <= 23; continuation += 1) {
+        active._emit('model.call_failure', {
+          errorMessage: `connection lost ${continuation}`,
+          apiCallId: `capped-call-${continuation}`,
+          failureKind: 'transport',
+          transport: 'http',
+          source: 'top_level',
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledTimes(continuation));
+        active = resumedSessions[continuation - 1];
+      }
+
+      active._emit('model.call_failure', {
+        errorMessage: 'connection lost 24',
+        apiCallId: 'capped-call-24',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      expect(mockResumeSession).toHaveBeenCalledTimes(23);
+      expect(errorHandler).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honors a 23-continuation ceiling without a 24th resume', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumedSessions = Array.from({ length: 23 }, () => createMockSdkSession());
+      const safeHistory = [{ type: 'user.message', data: { content: 'test prompt' } }];
+      for (const handle of [mockSdkSession, ...resumedSessions]) {
+        handle.getEvents.mockResolvedValue(safeHistory);
+        handle.rpc.metadata.contextInfo.mockResolvedValue({
+          contextInfo: {
+            totalTokens: 1_000,
+            promptTokenLimit: 100_000,
+            systemTokens: 100,
+            conversationTokens: 900,
+            toolDefinitionsTokens: 0,
+          },
+        });
+      }
+      mockSdkSessions.push(...resumedSessions);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 23,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      let active = mock;
+      for (let continuation = 1; continuation <= 23; continuation += 1) {
+        active._emit('model.call_failure', {
+          errorMessage: `connection lost ${continuation}`,
+          apiCallId: `call-${continuation}`,
+          failureKind: 'transport',
+          transport: 'http',
+          source: 'top_level',
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledTimes(continuation));
+        active = resumedSessions[continuation - 1];
+      }
+
+      active._emit('model.call_failure', {
+        errorMessage: 'connection lost 24',
+        apiCallId: 'call-24',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      expect(mockResumeSession).toHaveBeenCalledTimes(23);
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        suppressFreshSessionRetry: true,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when recovered history has unresolved permission work', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSdkSession.getEvents.mockResolvedValue([
+        { type: 'user.message', data: { content: 'test prompt' } },
+        { type: 'permission.requested', data: { requestId: 'pending-1' } },
+      ]);
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('model.call_failure', {
+        errorMessage: 'connection lost',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        suppressFreshSessionRetry: true,
+      }));
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets an SDK-native retry suppress manual recovery during grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 1_000,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+      mock._emit('model.call_failure', {
+        errorMessage: 'connection lost',
+        failureKind: 'transport',
+        transport: 'http',
+        source: 'top_level',
+      });
+      mock._emit('assistant.turn_retry');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(mockResumeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opts out of same-session recovery explicitly', async () => {
+    const { session, mock } = await createTestSession({}, { sessionRecovery: false });
     const errorHandler = vi.fn();
-    const idleHandler = vi.fn();
     session.on('error', errorHandler);
-    session.on('idle', idleHandler);
     session.send('test prompt');
-
-    await new Promise(r => setTimeout(r, 50));
-
+    await new Promise(resolve => setTimeout(resolve, 50));
     mock._emit('model.call_failure', {
-      errorMessage: 'transient upstream failure',
-      statusCode: 503,
-      model: 'test-model',
+      errorMessage: 'connection lost',
+      failureKind: 'transport',
+      transport: 'http',
       source: 'top_level',
     });
-
     expect(errorHandler).toHaveBeenCalledOnce();
-    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('transient upstream failure'),
-      statusCode: 503,
-    }));
-    expect(idleHandler).not.toHaveBeenCalled();
-    await vi.waitFor(() => {
-      expect(mock.abort).toHaveBeenCalledOnce();
-      expect(mock.disconnect).toHaveBeenCalledOnce();
-    });
+    expect(mockResumeSession).not.toHaveBeenCalled();
   });
 
   it('classifies compaction model rejection as a first-class terminal failure', async () => {
@@ -3132,6 +4140,17 @@ describe('SdkBackend event mapping', () => {
     session.on('error', errorHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 75_000,
+      systemTokenCount: 20_000,
+      successfulCompactions: 0,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    await sendObservedParentRequest('req-establish-policy');
+
     mock._emit('session.usage_info', {
       currentTokens: 270_000,
       tokenLimit: 300_000,
@@ -3180,8 +4199,8 @@ describe('SdkBackend event mapping', () => {
       postCompactionTokens: 150_000,
       tokensRemoved: 130_000,
     });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(1));
-    await expect(observedRequestHandler().sendRequest(
+    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(2));
+    const duringVerification = observedRequestHandler().sendRequest(
       new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
       {
         requestId: 'req-during-compaction-verification',
@@ -3189,9 +4208,21 @@ describe('SdkBackend event mapping', () => {
         agentId: 'session-1',
         interactionType: 'conversation-agent',
       },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mockForwardedRequests).toHaveLength(0);
+    );
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(1);
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 150_000,
+      recomputedTotalTokens: 145_000,
+      messagesTokenCount: 135_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
     releasePostCompactionMeasurement();
+    await expect(duringVerification).resolves.toMatchObject({ status: 204 });
+    expect(mockForwardedRequests).toHaveLength(2);
 
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
       'complete',
@@ -3210,13 +4241,13 @@ describe('SdkBackend event mapping', () => {
         measuredPostCompactionTokens: 145_000,
         beforeSuccessfulCompactions: 0,
         afterSuccessfulCompactions: 1,
-        adaptiveCompactionThreshold: 285_000,
-        adaptiveCompactionHeadroom: 15_000,
+        adaptiveCompactionThreshold: 275_000,
+        adaptiveCompactionHeadroom: 25_000,
       }),
     );
   });
 
-  it('blocks ordinary parent dispatch while stock compaction is in progress', async () => {
+  it('parks ordinary parent dispatch while stock compaction is in progress', async () => {
     const { session, mock } = await createTestSession();
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
@@ -3237,10 +4268,22 @@ describe('SdkBackend event mapping', () => {
     });
     mock._emit('session.compaction_start');
 
-    await expect(sendObservedParentRequest('req-during-stock-compaction')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const request = sendObservedParentRequest('req-during-stock-compaction');
+    await Promise.resolve();
     expect(mockForwardedRequests).toHaveLength(0);
+
+    queueParentMeasurement(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 85_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+      promptTokenLimit: 300_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    mock._emit('session.compaction_complete', { success: true });
+    await expect(request).resolves.toMatchObject({ status: 204 });
+    expect(mockForwardedRequests).toHaveLength(1);
   });
 
   it('does not let stale verification reopen dispatch for a newer compaction', async () => {
@@ -3330,12 +4373,12 @@ describe('SdkBackend event mapping', () => {
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledTimes(2));
     expect(compactionHandler).toHaveBeenNthCalledWith(1, 'start');
     expect(compactionHandler).toHaveBeenNthCalledWith(2, 'start');
-    await expect(sendObservedParentRequest('req-before-newer-verification')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
+    const beforeNewerVerification = sendObservedParentRequest('req-before-newer-verification');
+    await Promise.resolve();
     expect(mockForwardedRequests).toHaveLength(0);
 
     releaseSecondVerification();
+    await expect(beforeNewerVerification).resolves.toMatchObject({ status: 204 });
     await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
       'complete',
       '145000 → 75000 exact tokens (compactions 1 → 2)',
@@ -3483,7 +4526,7 @@ describe('SdkBackend event mapping', () => {
     );
   });
 
-  it('preserves string status codes from model.call_failure', async () => {
+  it('normalizes string status codes from model.call_failure', async () => {
     const { session, mock } = await createTestSession();
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
@@ -3497,7 +4540,7 @@ describe('SdkBackend event mapping', () => {
 
     expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining('HTTP 401'),
-      statusCode: '401',
+      statusCode: 401,
     }));
   });
 
@@ -3645,5 +4688,96 @@ describe('SdkBackend event mapping', () => {
     });
 
     expect(toolCompleteHandler).toHaveBeenCalledWith('Grep', 'verbose fallback result', 'tc-2', undefined);
+  });
+
+  it('defers parent session.idle and session.task_complete until after compaction verification settles', async () => {
+    const { session, mock } = await createTestSession();
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    mock._emit('session.usage_info', {
+      currentTokens: 200_000,
+      tokenLimit: 300_000,
+      messagesLength: 8,
+      systemTokens: 10_000,
+      conversationTokens: 185_000,
+      toolDefinitionsTokens: 5_000,
+    });
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 200_000,
+      recomputedTotalTokens: 195_000,
+      messagesTokenCount: 185_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 0,
+    });
+    mock._emit('session.compaction_start');
+
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
+    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
+      await verificationGate;
+      return {
+        contextInfo: {
+          totalTokens: 100_000,
+          promptTokenLimit: 300_000,
+          systemTokens: 10_000,
+          conversationTokens: 85_000,
+          toolDefinitionsTokens: 5_000,
+        },
+      };
+    });
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 100_000,
+      recomputedTotalTokens: 95_000,
+      messagesTokenCount: 85_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 1,
+    });
+
+    mock._emit('session.compaction_complete', { success: true, tokensRemoved: 100_000 });
+    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
+
+    mock._emit('session.idle');
+    expect(idleHandler).not.toHaveBeenCalled();
+
+    releaseVerification();
+    await vi.waitFor(() => expect(idleHandler).toHaveBeenCalledOnce());
+  });
+
+  it('rejects parked parent request when compaction fails during verification', async () => {
+    const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    queueContextDiagnostics(mock, {
+      attributionTotalTokens: 200_000,
+      recomputedTotalTokens: 195_000,
+      messagesTokenCount: 185_000,
+      systemTokenCount: 10_000,
+      successfulCompactions: 0,
+    });
+    mock._emit('session.compaction_start');
+
+    const request = sendObservedParentRequest('req-parked-failed-compaction');
+    await Promise.resolve();
+    expect(mockForwardedRequests).toHaveLength(0);
+
+    mock._emit('session.compaction_complete', {
+      success: false,
+      error: 'provider quota exceeded',
+      statusCode: 429,
+    });
+
+    await expect(request).rejects.toThrow();
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('provider quota exceeded'),
+    }));
+    expect(mockForwardedRequests).toHaveLength(0);
   });
 });

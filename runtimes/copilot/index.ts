@@ -6,6 +6,7 @@ export type {
   CopilotSessionUsage,
   CompactionMode,
   SessionMode,
+  PermissionPolicy,
   SessionConfig as CopilotSessionConfig,
   UsageData,
   RichToolResult,

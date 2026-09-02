@@ -14,7 +14,7 @@ import type {
 } from '../src/types';
 import type { OutputEvent } from '../src/events';
 import { DEFAULT_MCP_SERVERS } from '../src';
-import { DEFAULT_RETRY_POLICY, FlowAbortedError } from '../src/types';
+import { DEFAULT_RETRY_POLICY, FlowAbortedError, MissingRequiredOutputError } from '../src/types';
 import {
   agent,
   isRetriableModelError,
@@ -134,6 +134,42 @@ describe('agent factory', () => {
     mockRuntime = createMockRuntime(mockSession);
   });
 
+  it('preserves existing runtime behavior when default recovery is unsupported', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+
+    await expect(agent({ promptBuilder: () => 'test prompt' })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    )).resolves.toMatchObject({ action: 'default' });
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when an explicit recovery policy is unsupported', async () => {
+    await expect(agent({
+      promptBuilder: () => 'test prompt',
+      sessionRecovery: { maxContinuations: 2 },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+      "Runtime 'test-runtime' does not support the explicitly requested session recovery policy",
+    );
+    expect(mockRuntime.createSession).not.toHaveBeenCalled();
+  });
+
+  it('forwards explicit recovery opt-out to the runtime', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+    await agent({ promptBuilder: () => 'test prompt', sessionRecovery: false })(
+      createMockInput(),
+      createMockContext(mockRuntime),
+    );
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionRecovery: false }),
+      expect.anything(),
+    );
+  });
+
   it('defaults the heartbeat timeout to 15 minutes', async () => {
     mockSession.send.mockImplementation(() => {
       queueMicrotask(() => mockSession._emit('idle'));
@@ -210,10 +246,16 @@ describe('agent factory', () => {
     await agent({
       promptBuilder: () => 'test prompt',
       mode: 'plan',
+      permissionPolicy: 'read-only',
+      requireMode: true,
     })(createMockInput(), createMockContext(mockRuntime));
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'plan' }),
+      expect.objectContaining({
+        mode: 'plan',
+        permissionPolicy: 'read-only',
+        requireMode: true,
+      }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -413,7 +455,13 @@ describe('agent factory', () => {
 
     const result = await nodeFn(createMockInput(), ctx);
 
-    expect(result.metadata).toEqual({ usage });
+    expect(result.metadata).toEqual({
+      usage,
+      attemptUsage: [
+        { totalTokens: 10, model: 'initial-model' },
+        usage,
+      ],
+    });
     expect(ctx.emitOutput).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'node:usage',
@@ -423,6 +471,27 @@ describe('agent factory', () => {
         model: 'test-model',
       }),
     );
+  });
+
+  it('deduplicates repeated usage records by provider call identity', async () => {
+    const nodeFn = agent({ promptBuilder: () => 'go' });
+    const usage = {
+      apiCallId: 'same-call',
+      inputTokens: 30,
+      outputTokens: 20,
+      totalTokens: 50,
+      model: 'test-model',
+    };
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => {
+        mockSession._emit('usage', usage);
+        mockSession._emit('usage', { ...usage });
+        mockSession._emit('idle');
+      });
+    });
+
+    const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+    expect(result.metadata).toEqual({ usage });
   });
 
   it('builds and sends prompt from promptBuilder', async () => {
@@ -1076,6 +1145,18 @@ describe('agent factory', () => {
     expect(isRetriableModelError(new Error('unrecognized failure'), { attempt: 1 })).toBe(true);
   });
 
+  it.each([42, { malformed: true }, [], true])(
+    'falls back to message classification for malformed public errorCode %o',
+    (errorCode) => {
+      const meta = {
+        attempt: 1,
+        errorCode,
+      } as unknown as Parameters<typeof isRetriableModelError>[1];
+
+      expect(isRetriableModelError(new Error('invalid request from upstream'), meta)).toBe(false);
+    },
+  );
+
   it('lets a retriable status override a permanent text marker', () => {
     expect(isRetriableModelError(new Error('invalid request from upstream'), {
       attempt: 1,
@@ -1173,6 +1254,66 @@ describe('agent factory', () => {
     expect(mockRuntime.createSession).toHaveBeenCalledOnce();
   });
 
+  it('preserves the original error when malformed metadata reaches the retry flow', async () => {
+    const malformedError = Object.assign(new Error('invalid request from upstream'), {
+      statusCode: { malformed: true },
+      errorCode: ['not-a-code'],
+    });
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', malformedError);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(malformedError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
+  it('uses a valid code when errorCode metadata is malformed', async () => {
+    const failed = createMockSession();
+    const succeeded = createMockSession();
+    const runtime: AgentRuntime = {
+      name: 'fallback-code-runtime',
+      createSession: vi.fn()
+        .mockResolvedValueOnce(failed as unknown as AgentSession)
+        .mockResolvedValueOnce(succeeded as unknown as AgentSession),
+      isAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const failedError = Object.assign(new Error('permission denied after upstream failure'), {
+      errorCode: { malformed: true },
+      code: 'ECONNRESET',
+    });
+    failed.send.mockImplementation(() => queueMicrotask(() => failed._emit('error', failedError)));
+    succeeded.send.mockImplementation(() => queueMicrotask(() => succeeded._emit('idle')));
+
+    await agent({
+      promptBuilder: () => 'go',
+      retry: { maxAttempts: 2, backoffBaseMs: 100, jitter: false },
+    })(createMockInput(), createMockContext(runtime));
+
+    expect(runtime.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('rethrows the original error when a custom retry classifier throws', async () => {
+    const originalError = Object.assign(new Error('upstream failure'), { statusCode: 503 });
+    const classifierError = new Error('classifier failed');
+    mockSession.send.mockImplementation(() => queueMicrotask(() => {
+      mockSession._emit('error', originalError);
+    }));
+
+    await expect(agent({
+      promptBuilder: () => 'go',
+      retry: {
+        maxAttempts: 2,
+        isRetriable: () => {
+          throw classifierError;
+        },
+      },
+    })(createMockInput(), createMockContext(mockRuntime))).rejects.toBe(originalError);
+    expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+  });
+
   it('retries a deeply nested string-status 503 from the runtime', async () => {
     const failed = createMockSession();
     const succeeded = createMockSession();
@@ -1257,6 +1398,181 @@ describe('agent factory', () => {
 
     expect(lateSession.abort).toHaveBeenCalledOnce();
     expect(lateSession.send).not.toHaveBeenCalled();
+  });
+
+  describe('required output contract', () => {
+    it('throws synchronously on agent creation when requireOutput is true without output', () => {
+      expect(() => agent({
+        promptBuilder: () => 'go',
+        requireOutput: true,
+      })).toThrow("AgentConfig 'requireOutput' is invalid without 'output'");
+    });
+
+    it('fails closed when output artifact is missing on normal idle', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when output artifact contains only whitespace', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('   \n\t  \r\n  ');
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('succeeds and parses action when output artifact has non-empty content', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('ACTION: APPROVE\nAll checks passed.');
+
+      const actionParser = vi.fn().mockReturnValue('approve');
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('approve');
+      expect(result.artifact).toBe('ACTION: APPROVE\nAll checks passed.');
+      expect(actionParser).toHaveBeenCalledWith('ACTION: APPROVE\nAll checks passed.');
+    });
+
+    it('preserves backwards compatibility when requireOutput is false/omitted with missing artifact', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const actionParser = vi.fn().mockReturnValue('parsed-action');
+      const nodeFn = agent({
+        output: 'result.md',
+        promptBuilder: () => 'go',
+        actionParser,
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('default');
+      expect(result.artifact).toBeUndefined();
+      expect(actionParser).not.toHaveBeenCalled();
+    });
+
+    it('does not trigger outer session retry or replay prompt when requireOutput fails with maxAttempts > 1', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        retry: { maxAttempts: 3, backoffBaseMs: 50, jitter: false },
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(mockRuntime.createSession).toHaveBeenCalledOnce();
+      expect(mockSession.send).toHaveBeenCalledOnce();
+    });
+
+    it('runs teardown even when requireOutput fails closed', async () => {
+      const fs = await import('node:fs');
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      let teardownCalled = false;
+      const nodeFn = agent({
+        output: 'result.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        teardown: async () => {
+          teardownCalled = true;
+        },
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('idle');
+      }));
+
+      await expect(nodeFn(createMockInput(), createMockContext(mockRuntime))).rejects.toThrow(
+        MissingRequiredOutputError,
+      );
+      expect(teardownCalled).toBe(true);
+    });
+
+    it('preserves GT-3 crash recovery when output artifact exists with real content', async () => {
+      const fs = await import('node:fs');
+      (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+        'Investigation completed. All sections written properly.',
+      );
+
+      const nodeFn = agent({
+        output: 'report.md',
+        requireOutput: true,
+        promptBuilder: () => 'go',
+        completionIndicators: ['completed'],
+        actionParser: (content) => (content.includes('completed') ? 'pass' : 'default'),
+      });
+
+      mockSession.send.mockImplementation(() => queueMicrotask(() => {
+        mockSession._emit('text', 'Investigation completed successfully.');
+        mockSession._emit('error', new Error('Late model error'));
+      }));
+
+      const result = await nodeFn(createMockInput(), createMockContext(mockRuntime));
+      expect(result.action).toBe('pass');
+      expect(result.artifact).toContain('Investigation completed');
+    });
   });
 });
 

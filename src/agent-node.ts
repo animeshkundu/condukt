@@ -14,7 +14,9 @@ import type {
   DefaultAgentConfig,
   MCPServersOption,
   RetryPolicy,
+  SessionRecoveryPolicy,
   SessionMode,
+  PermissionPolicy,
   ThinkingBudget,
   ToolRef,
   SubagentLimits,
@@ -69,12 +71,18 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly schema?: AgentNodeSchema<T>;
   readonly system?: string;
   readonly output?: string;
+  /** Require the producer session to persist non-empty output before routing. */
+  readonly requireOutput?: boolean;
   readonly reads?: readonly string[];
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
   readonly compactionMode?: CompactionMode;
   readonly mode?: SessionMode;
+  readonly permissionPolicy?: PermissionPolicy;
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /** Replaces DEFAULT_MCP_SERVERS; spread the default to extend it, or use false to disable MCP. */
@@ -84,6 +92,8 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly isolation?: boolean;
   readonly tools?: readonly ToolRef[] | readonly string[];
   readonly retry?: RetryPolicy;
+  /** Same-session recovery is on by default; false opts this node out. */
+  readonly sessionRecovery?: SessionRecoveryPolicy | false;
   readonly customAgents?: readonly CustomAgentConfig[];
   readonly subagentRoster?: SubagentRosterOption;
   readonly defaultAgent?: DefaultAgentConfig;
@@ -446,11 +456,15 @@ export async function produce<T>(
   const text: string[] = [];
   const producer = agent({
     output: config.output,
+    requireOutput: config.requireOutput,
     model: config.model,
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
     compactionMode: config.compactionMode,
     mode: config.mode,
+    permissionPolicy: config.permissionPolicy,
+    requireMode: config.requireMode,
+    mcpServerWorkingDirectory: config.mcpServerWorkingDirectory,
     advisor: config.advisor,
     standIn: config.standIn,
     mcpServers: config.mcpServers,
@@ -459,6 +473,7 @@ export async function produce<T>(
     systemMessage: config.system,
     availableTools: toolIds(config.tools),
     retry: config.retry,
+    sessionRecovery: config.sessionRecovery,
     customAgents: config.customAgents,
     subagentRoster: config.subagentRoster,
     subagentsEnabled: config.subagentsEnabled,

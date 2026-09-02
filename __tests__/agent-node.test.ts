@@ -125,16 +125,22 @@ describe('agentNode', () => {
     expect(captured[0]?.timeout).toBe(expected);
   });
 
-  it('forwards mode, contextTier, thinkingBudget, advisor, standIn, and MCP servers through the plain agent node', async () => {
+  it('forwards mode, context tier, recovery, output, advisor, stand-in, and MCP config', async () => {
     const dir = createTmpDir();
     dirs.push(dir);
     const runtime: AgentRuntime = {
       name: 'config-capture-runtime',
+      capabilities: {
+        readOnlyPermissions: true,
+        requiredModeVerification: true,
+        sessionRecovery: true,
+      },
       createSession: vi.fn().mockImplementation(async () => {
         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
         return {
           pid: null,
           send: () => queueMicrotask(() => {
+            fs.writeFileSync(path.join(dir, 'result.md'), 'done', 'utf-8');
             for (const handler of handlers.get('text') ?? []) handler('done');
             for (const handler of handlers.get('idle') ?? []) handler();
           }),
@@ -152,11 +158,16 @@ describe('agentNode', () => {
       contextTier: 'long_context',
       thinkingBudget: 'xhigh',
       mode: 'plan',
+      permissionPolicy: 'read-only',
+      requireMode: true,
       advisor: { model: 'advisor-model', contextTier: 'long_context' },
       standIn: { memberCount: 3, contextTier: 'long_context' },
       mcpServers: {
         node: { command: 'node-mcp', args: ['--stdio'] },
       },
+      output: 'result.md',
+      requireOutput: true,
+      sessionRecovery: { maxContinuations: 7 },
     });
     const context: ExecutionContext = {
       executionId: 'config-capture',
@@ -174,11 +185,15 @@ describe('agentNode', () => {
         contextTier: 'long_context',
         thinkingBudget: 'xhigh',
         mode: 'plan',
+        permissionPolicy: 'read-only',
+        requireMode: true,
         advisor: { model: 'advisor-model', contextTier: 'long_context' },
         standIn: { memberCount: 3, contextTier: 'long_context' },
         mcpServers: {
           node: { command: 'node-mcp', args: ['--stdio'] },
         },
+        artifactFilename: 'result.md',
+        sessionRecovery: { maxContinuations: 7 },
       }),
       expect.objectContaining({ signal: expect.anything() }),
     );

@@ -13,6 +13,7 @@ import {
 import type { ModelTier } from '../../runtimes/copilot/subagents';
 
 interface MockSdkSession {
+  sessionId: string;
   readonly send: ReturnType<typeof vi.fn>;
   readonly abort: ReturnType<typeof vi.fn>;
   readonly disconnect: ReturnType<typeof vi.fn>;
@@ -30,6 +31,7 @@ let callOrder: string[];
 
 function createMockSdkSession(): MockSdkSession {
   return {
+    sessionId: 'session-1',
     send: vi.fn().mockImplementation(async () => { callOrder.push('send'); }),
     abort: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
@@ -84,8 +86,9 @@ async function sendWithRoster(
 beforeEach(() => {
   callOrder = [];
   mockSdkSession = createMockSdkSession();
-  mockCreateSession = vi.fn().mockImplementation(async () => {
+  mockCreateSession = vi.fn().mockImplementation(async (config: Record<string, unknown>) => {
     callOrder.push('createSession');
+    mockSdkSession.sessionId = String(config.sessionId ?? 'session-1');
     return mockSdkSession;
   });
   originalFunction = globalThis.Function;

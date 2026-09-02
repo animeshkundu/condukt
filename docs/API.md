@@ -33,17 +33,21 @@ Parameters in `AgentConfig`:
 | `objective` | `string` | Human-readable objective (documentation only) |
 | `tools` | `readonly ToolRef[]` | Tools the agent can use |
 | `output` | `string?` | Output artifact filename |
+| `requireOutput` | `boolean?` | If true, fails closed with `MissingRequiredOutputError` if output artifact is missing or empty upon session completion |
 | `reads` | `readonly string[]?` | Artifact filenames this node reads |
 | `model` | `string?` | Model name (default: `'claude-opus-4.6'`) |
 | `isolation` | `boolean?` | If true, no extra dirs passed to session |
 | `timeout` | `number?` | Hard timeout in seconds (default: `DEFAULT_AGENT_TIMEOUT_SECS`, 18000) |
-| `heartbeatTimeout` | `number?` | No-output timeout in seconds (default: 900) |
+| `heartbeatTimeout` | `number?` | Meaningful model/tool progress timeout in seconds (default: 900). Safe unmatched turns recover in-session when recovery is enabled. |
+| `sessionRecovery` | `SessionRecoveryPolicy \| false?` | Default-on bounded same-session recovery; `false` opts out. Maximum continuations are capped at 23. |
 | `cwdResolver` | `(input: NodeInput) => string?` | Override session cwd. Default: `input.dir`. Use for running in a repo dir while artifacts go to `input.dir`. |
 | `setup` | `(input: NodeInput) => void \| Promise<void>?` | Pre-execution hook |
 | `teardown` | `(input: NodeInput) => void \| Promise<void>?` | Post-execution hook (always runs) |
 | `promptBuilder` | `(input: NodeInput) => PromptOutput` | **Required.** Builds the prompt |
 | `actionParser` | `(artifactContent: string) => string?` | Parses action from artifact |
 | `completionIndicators` | `readonly string[]?` | Strings that indicate completion (GT-3) |
+
+`agentNode()` forwards `requireOutput` and `sessionRecovery` to the underlying `agent()` producer, so the same completion and recovery contracts apply to both authoring surfaces.
 
 #### `deterministic(name: string, fn: (input: NodeInput) => Promise<NodeOutput>): NodeFn`
 
@@ -105,6 +109,16 @@ Thrown by `validateGraph()` when the graph has structural issues. Extends `Error
 ```typescript
 new FlowValidationError(issues: readonly string[])
 // .issues: readonly string[] — list of validation problems
+```
+
+#### `MissingRequiredOutputError`
+
+Thrown when an agent session completes successfully but its required output artifact is missing or whitespace-only. Extends `Error` with `name: 'MissingRequiredOutputError'` and `suppressFreshSessionRetry = true`.
+
+```typescript
+new MissingRequiredOutputError(outputPath: string, message?: string)
+// .outputPath: string — configured output artifact path
+// .suppressFreshSessionRetry: true — prevents outer session retry / prompt replay
 ```
 
 ### Types

@@ -244,6 +244,15 @@ export interface SessionCreationOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface RuntimeCapabilities {
+  /** Every permission callback rejects writes and permits only safe reads. */
+  readonly readOnlyPermissions: true;
+  /** Required mode startup performs a post-set effective-mode readback. */
+  readonly requiredModeVerification: true;
+  /** Failed model turns can continue through the same persisted session. */
+  readonly sessionRecovery?: true;
+}
+
 export interface AgentRuntime {
   createSession(
     config: SessionConfig,
@@ -251,9 +260,11 @@ export interface AgentRuntime {
   ): Promise<AgentSession>;
   isAvailable(): Promise<boolean>;
   readonly name: string;
+  /** Optional runtime guarantees that callers may require before session creation. */
+  readonly capabilities?: RuntimeCapabilities;
 }
 
-export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkingBudget = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ContextTier = 'default' | 'long_context';
 
 export interface RetryMeta {
@@ -278,6 +289,85 @@ export interface RetryPolicy {
   readonly jitter?: boolean;
   readonly budgetMs?: number;
   readonly isRetriable?: (error: Error, meta: RetryMeta) => boolean;
+}
+
+/**
+ * Same-session recovery after a transient root model-call failure or a stalled unmatched turn.
+ *
+ * Recovery is enabled by default on capable runtimes. Set `sessionRecovery: false`
+ * on a node to opt out. Supplying a policy object explicitly requires runtime
+ * support and fails before session creation when that capability is absent.
+ */
+export interface SessionRecoveryPolicy {
+  /** Maximum empty-turn continuations after the initial turn. */
+  readonly maxContinuations?: number;
+  /** Total recovery time within the enclosing session deadline. */
+  readonly budgetMs?: number;
+  readonly backoffBaseMs?: number;
+  readonly backoffMaxMs?: number;
+  readonly jitter?: boolean;
+  /** Time allowed for an SDK-native assistant.turn_retry before reconnecting. */
+  readonly nativeRetryGraceMs?: number;
+}
+
+export const DEFAULT_SESSION_RECOVERY_POLICY: Readonly<Required<SessionRecoveryPolicy>> = Object.freeze({
+  maxContinuations: 4,
+  budgetMs: 30 * 60 * 1000,
+  backoffBaseMs: 5_000,
+  backoffMaxMs: 120_000,
+  jitter: true,
+  nativeRetryGraceMs: 1_500,
+});
+
+export type SessionRecoveryPhase =
+  | 'scheduled'
+  | 'native-retry'
+  | 'resuming'
+  | 'continuation-sent'
+  | 'recovered'
+  | 'exhausted';
+
+export interface SessionRecoveryEvent {
+  readonly phase: SessionRecoveryPhase;
+  readonly continuation: number;
+  readonly maxContinuations: number;
+  readonly sessionId: string;
+  readonly delayMs?: number;
+  readonly elapsedMs?: number;
+  readonly statusCode?: number;
+  readonly errorCode?: string;
+  readonly transport?: string;
+  readonly failureKind?: string;
+  readonly durationMs?: number;
+  readonly reason?: string;
+}
+
+/** Terminal recovery failure that must never trigger whole-session prompt replay. */
+export class SessionRecoveryExhaustedError extends Error {
+  readonly suppressFreshSessionRetry = true;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'SessionRecoveryExhaustedError';
+  }
+}
+
+/**
+ * Thrown when an agent session completes successfully but the required output artifact
+ * is missing or contains only whitespace.
+ */
+export class MissingRequiredOutputError extends Error {
+  readonly suppressFreshSessionRetry = true;
+  readonly outputPath: string;
+
+  constructor(outputPath: string, message?: string, options?: ErrorOptions) {
+    super(
+      message ?? (outputPath ? `Required output artifact was missing or empty at '${outputPath}'` : 'Required output artifact was missing or empty'),
+      options,
+    );
+    this.name = 'MissingRequiredOutputError';
+    this.outputPath = outputPath;
+  }
 }
 
 /**
@@ -403,6 +493,7 @@ export interface DefaultAgentConfig {
 
 export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
 export type SessionMode = 'autopilot' | 'plan';
+export type PermissionPolicy = 'default' | 'read-only';
 
 export interface AdvisorConfig {
   readonly model: string;
@@ -435,13 +526,19 @@ export interface SessionConfig extends SubagentLimits {
   readonly cwd: string;
   readonly addDirs: readonly string[];
   readonly timeout: number;      // seconds
-  readonly heartbeatTimeout: number; // seconds
+  readonly heartbeatTimeout: number; // seconds without meaningful model/tool progress
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
   /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
   readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
+  /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** Require the requested mode to be applied before the prompt is sent. */
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /** Session MCP servers, or false to disable runtime-level MCP configuration. */
@@ -466,6 +563,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly memberId?: string;
   /** Set by agent() so a runtime can write the node's configured output; ignored by real backends. */
   readonly artifactFilename?: string;
+  /** Same-session recovery is on by default; false opts this session out. */
+  readonly sessionRecovery?: SessionRecoveryPolicy | false;
 }
 
 export interface ContextAttributionEntry {
@@ -580,6 +679,7 @@ export interface AgentSession {
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'permission', handler: (data: Record<string, unknown>) => void): void;
   on(event: 'compaction', handler: (phase: 'start' | 'complete', summary?: string) => void): void;
+  on(event: 'recovery', handler: (event: SessionRecoveryEvent) => void): void;
   abort(): Promise<void>;
 }
 
@@ -606,6 +706,11 @@ export interface AgentConfig extends SubagentLimits {
    */
   readonly tools?: readonly ToolRef[];
   readonly output?: string;
+  /**
+   * Fail closed if the configured `output` artifact is missing or contains only whitespace upon session completion.
+   * Invalid or inert when `output` is not specified.
+   */
+  readonly requireOutput?: boolean;
   readonly reads?: readonly string[];
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
@@ -615,6 +720,12 @@ export interface AgentConfig extends SubagentLimits {
   readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
+  /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** Require the requested mode to be applied before the prompt is sent. */
+  readonly requireMode?: boolean;
+  /** Optional working directory for file-backed stdio MCP servers. */
+  readonly mcpServerWorkingDirectory?: string;
   readonly advisor?: AdvisorConfig;
   readonly standIn?: StandInConfig;
   /**
@@ -625,7 +736,7 @@ export interface AgentConfig extends SubagentLimits {
   readonly isolation?: boolean;
   /** Total wall-clock limit in seconds. Defaults to DEFAULT_AGENT_TIMEOUT_SECS. */
   readonly timeout?: number;
-  /** Dead-session limit in seconds without SDK events. Default: 900. */
+  /** Session-progress limit in seconds without meaningful model/tool progress. Default: 900. */
   readonly heartbeatTimeout?: number;
   /** Override session cwd. Default: input.dir. Use for running in repo dir while artifacts go to input.dir. */
   readonly cwdResolver?: (input: NodeInput) => string;
@@ -642,6 +753,8 @@ export interface AgentConfig extends SubagentLimits {
   readonly excludedTools?: readonly string[];
   /** Opt-in whole-session retry policy. Use DEFAULT_RETRY_POLICY for batteries-included behavior. */
   readonly retry?: RetryPolicy;
+  /** Same-session recovery is on by default; false opts this node out. */
+  readonly sessionRecovery?: SessionRecoveryPolicy | false;
   /** Custom subagent definitions (SdkBackend only). */
   readonly customAgents?: readonly CustomAgentConfig[];
   /** Provider-specific subagent model/settings roster, or false to opt out. */

@@ -30,6 +30,7 @@ import {
   DEFAULT_PRODUCER_MODEL,
   DEFAULT_THINKING_BUDGET,
   FlowAbortedError,
+  MissingRequiredOutputError,
 } from './types';
 import type { ContentBlock } from '../runtimes/copilot/copilot-backend';
 import type { ToolSpecificData, ImageToolData, ResourceToolData } from '../ui/tool-display/types';
@@ -142,15 +143,16 @@ const TRANSIENT_ERROR_CODES = new Set([
 ]);
 
 interface ErrorWithRetryMetadata extends Error {
-  readonly statusCode?: number | string;
-  readonly status?: number | string;
-  readonly errorCode?: string;
-  readonly code?: string;
+  readonly statusCode?: unknown;
+  readonly status?: unknown;
+  readonly errorCode?: unknown;
+  readonly code?: unknown;
   readonly cause?: unknown;
 }
 
 interface AttemptUsage {
   readonly usage?: Record<string, unknown>;
+  readonly rootUsage?: readonly Record<string, unknown>[];
   readonly subagentUsage: readonly Record<string, unknown>[];
 }
 
@@ -183,8 +185,14 @@ function readRetryMetadata(error: Error): Omit<RetryMeta, 'attempt'> {
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current);
     const candidate = current as ErrorWithRetryMetadata;
-    statusCode ??= numericStatus(candidate.statusCode ?? candidate.status);
-    errorCode ??= candidate.errorCode ?? candidate.code;
+    statusCode ??= numericStatus(candidate.statusCode) ?? numericStatus(candidate.status);
+    if (errorCode === undefined) {
+      if (typeof candidate.errorCode === 'string') {
+        errorCode = candidate.errorCode;
+      } else if (typeof candidate.code === 'string') {
+        errorCode = candidate.code;
+      }
+    }
     current = candidate.cause;
   }
 
@@ -226,7 +234,7 @@ export function isRetriableModelError(error: Error, meta: RetryMeta): boolean {
       || statusCode === 422);
   }
 
-  const code = meta.errorCode?.toUpperCase();
+  const code = typeof meta.errorCode === 'string' ? meta.errorCode.toUpperCase() : undefined;
   if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
 
   const messages = errorChain(error)
@@ -295,6 +303,15 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
     compactionMode: config.compactionMode,
     mode: config.mode ?? 'autopilot',
+    ...(config.permissionPolicy !== undefined
+      ? { permissionPolicy: config.permissionPolicy }
+      : {}),
+    ...(config.requireMode !== undefined
+      ? { requireMode: config.requireMode }
+      : {}),
+    ...(config.mcpServerWorkingDirectory !== undefined
+      ? { mcpServerWorkingDirectory: config.mcpServerWorkingDirectory }
+      : {}),
     advisor: config.advisor,
     standIn: config.standIn,
     ...(mcpServers !== undefined ? { mcpServers } : {}),
@@ -319,18 +336,23 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     nodeId: ctx.nodeId,
     memberId: config.memberId,
     artifactFilename: config.output,
+    ...(config.sessionRecovery !== undefined
+      ? { sessionRecovery: config.sessionRecovery }
+      : {}),
   };
 }
 
 interface SessionAttemptResult extends AttemptUsage {
   readonly outputLines: readonly string[];
+  readonly rootUsage: readonly Record<string, unknown>[];
 }
 
 function attemptUsage(
   usage: Record<string, unknown> | undefined,
+  rootUsage: readonly Record<string, unknown>[],
   subagentUsage: readonly Record<string, unknown>[],
 ): AttemptUsage {
-  return { usage, subagentUsage: [...subagentUsage] };
+  return { usage, rootUsage: [...rootUsage], subagentUsage: [...subagentUsage] };
 }
 
 function withAttemptUsage(error: unknown, usage: AttemptUsage): ErrorWithAttemptUsage {
@@ -363,9 +385,20 @@ async function runSessionAttempt(
   let session: AgentSession | null = null;
   const outputLines: string[] = [];
   let lastUsage: Record<string, unknown> | undefined;
+  const rootUsage: Record<string, unknown>[] = [];
+  const rootUsageKeys = new Set<string>();
   const subagentUsage: Record<string, unknown>[] = [];
 
   try {
+    if (
+      config.sessionRecovery !== undefined
+      && config.sessionRecovery !== false
+      && ctx.runtime.capabilities?.sessionRecovery !== true
+    ) {
+      throw new Error(
+        `Runtime '${ctx.runtime.name}' does not support the explicitly requested session recovery policy`,
+      );
+    }
     const creation = ctx.runtime.createSession(
       sessionConfig(config, input, ctx),
       { signal: ctx.signal },
@@ -433,6 +466,13 @@ async function runSessionAttempt(
     });
     session.on('usage', (data: Record<string, unknown>) => {
       lastUsage = data;
+      const stableId = [data.apiCallId, data.providerCallId, data.serviceRequestId]
+        .find((value): value is string => typeof value === 'string' && value.length > 0);
+      const key = stableId ?? JSON.stringify(data);
+      if (!rootUsageKeys.has(key)) {
+        rootUsageKeys.add(key);
+        rootUsage.push(data);
+      }
       ctx.emitOutput({
         type: 'node:usage', executionId: ctx.executionId, nodeId: ctx.nodeId,
         inputTokens: typeof data.inputTokens === 'number' ? data.inputTokens : undefined,
@@ -494,6 +534,15 @@ async function runSessionAttempt(
         content: message, ts: Date.now(),
       });
     });
+    session.on('recovery', (event) => {
+      ctx.emitOutput({
+        type: 'node:recovery',
+        executionId: ctx.executionId,
+        nodeId: ctx.nodeId,
+        ...event,
+        ts: Date.now(),
+      });
+    });
 
     const activeSession = session;
     ctx.emitOutput({
@@ -521,14 +570,14 @@ async function runSessionAttempt(
       });
     });
 
-    return { outputLines, usage: lastUsage, subagentUsage };
+    return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
   } catch (error) {
     if (!ctx.signal.aborted && config.output && wasCompletedBeforeCrash(
       input.dir, config.output, outputLines, config.completionIndicators,
     )) {
-      return { outputLines, usage: lastUsage, subagentUsage };
+      return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
     }
-    throw withAttemptUsage(error, attemptUsage(lastUsage, subagentUsage));
+    throw withAttemptUsage(error, attemptUsage(lastUsage, rootUsage, subagentUsage));
   } finally {
     if (session) {
       try {
@@ -559,6 +608,10 @@ async function runSessionAttempt(
  * 9. Calls config.teardown(input) in finally block
  */
 export function agent(config: AgentConfig): NodeFn {
+  if (config.requireOutput && !config.output) {
+    throw new Error("AgentConfig 'requireOutput' is invalid without 'output'");
+  }
+
   return async (input: NodeInput, ctx: ExecutionContext): Promise<NodeOutput> => {
     if (ctx.signal.aborted) {
       throw new FlowAbortedError('Aborted before agent start');
@@ -634,7 +687,11 @@ export function agent(config: AgentConfig): NodeFn {
         } catch (error) {
           const currentError = error instanceof Error ? error : new Error(String(error));
           const consumed = (currentError as ErrorWithAttemptUsage).attemptUsage;
-          if (consumed?.usage) failedUsage.push(consumed.usage);
+          if (consumed?.rootUsage && consumed.rootUsage.length > 0) {
+            failedUsage.push(...consumed.rootUsage);
+          } else if (consumed?.usage) {
+            failedUsage.push(consumed.usage);
+          }
           if (consumed) failedSubagentUsage.push(...consumed.subagentUsage);
           if (ctx.signal.aborted) {
             throw withNodeUsage(
@@ -657,11 +714,26 @@ export function agent(config: AgentConfig): NodeFn {
           if (currentError instanceof FlowAbortedError) {
             throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
           }
+          if (
+            'suppressFreshSessionRetry' in currentError
+            && currentError.suppressFreshSessionRetry === true
+          ) {
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+          }
           lastFailure = currentError;
 
           const retryMetadata = readRetryMetadata(currentError);
           const meta: RetryMeta = { attempt, ...retryMetadata };
-          const retriable = (policy.isRetriable ?? isRetriableModelError)(currentError, meta);
+          let retriable: boolean;
+          if (policy.isRetriable) {
+            try {
+              retriable = policy.isRetriable(currentError, meta);
+            } catch {
+              throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            }
+          } else {
+            retriable = isRetriableModelError(currentError, meta);
+          }
           if (!retriable || attempt >= maxAttempts) {
             throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
           }
@@ -701,11 +773,26 @@ export function agent(config: AgentConfig): NodeFn {
       if (!result) throw new Error('Agent session exhausted without a result');
 
       let content: string | undefined;
-      if (config.output) {
+      const artifactPath = config.output ? path.join(input.dir, config.output) : undefined;
+      if (artifactPath) {
         try {
-          content = fs.readFileSync(path.join(input.dir, config.output), 'utf-8');
+          content = fs.readFileSync(artifactPath, 'utf-8');
         } catch {
           content = undefined;
+        }
+      }
+
+      if (config.requireOutput && config.output) {
+        if (content === undefined || content.trim().length === 0) {
+          const outputPath = config.output;
+          throw withNodeUsage(
+            new MissingRequiredOutputError(
+              outputPath,
+              `Required output artifact '${outputPath}' was missing or empty after successful agent session`,
+            ),
+            failedUsage,
+            failedSubagentUsage,
+          );
         }
       }
 
@@ -713,7 +800,10 @@ export function agent(config: AgentConfig): NodeFn {
         ? config.actionParser(content)
         : 'default';
       const metadata: Record<string, unknown> = {};
-      const usage = [...failedUsage, ...(result.usage ? [result.usage] : [])];
+      const currentUsage = result.rootUsage.length > 0
+        ? result.rootUsage
+        : result.usage ? [result.usage] : [];
+      const usage = [...failedUsage, ...currentUsage];
       const subagentUsage = [...failedSubagentUsage, ...result.subagentUsage];
       if (usage.length > 0) metadata.usage = usage.at(-1);
       if (usage.length > 1) metadata.attemptUsage = usage;

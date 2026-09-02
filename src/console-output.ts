@@ -398,6 +398,11 @@ export function createConsoleOutputRenderer(
             renderStream(event, streamKey, linePrefix(event.executionId, event.nodeId));
           }
           break;
+        case 'node:recovery': {
+          const status = `${event.phase} continuation ${event.continuation}/${event.maxContinuations}`;
+          process.stderr.write(`${linePrefix(event.executionId, event.nodeId)}recovery: ${status}\n`);
+          break;
+        }
         default:
           break;
       }

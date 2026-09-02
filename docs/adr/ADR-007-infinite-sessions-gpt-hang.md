@@ -48,7 +48,7 @@ sessionConfig.infiniteSessions = {
 - These documented stock values are the default. Callers can opt into the legacy aggressive 60%/75% thresholds or the exact-diagnostics adaptive pre-dispatch controller through `compactionMode`.
 - This allows sessions with unlimited tool calls
 
-The current runtime creates sessions without an explicit `sessionId`, so each SDK session is ephemeral and cannot be restarted by condukt. The SDK can resume an identified session with `client.resumeSession(sessionId)` and a fresh configuration, and persistent state is stored under `~/.copilot/session-state/{sessionId}/`. Exposing and retaining those IDs is a separate persistence change; ephemeral runners currently lose access to that state.
+The runtime assigns an explicit `sessionId` and can reconnect an interrupted model turn through the same persisted conversation. See [ADR-008](./ADR-008-sdk-session-recovery.md). This is separate from compaction: recovery cannot replay an in-flight provider stream, and instead resumes the same ID and runs an empty turn over audited history.
 
 ### Validation
 
