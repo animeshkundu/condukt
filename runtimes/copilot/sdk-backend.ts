@@ -77,6 +77,42 @@ import type {
 // Types
 // ---------------------------------------------------------------------------
 
+export type TerminalLogLevel = 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all';
+export type DiagnosticSeverity = 'error' | 'warning' | 'info';
+
+const SEVERITY_RANK: Record<DiagnosticSeverity, number> = {
+  error: 1,
+  warning: 2,
+  info: 3,
+};
+
+const LOG_LEVEL_RANK: Record<TerminalLogLevel, number> = {
+  none: 0,
+  error: 1,
+  warning: 2,
+  info: 3,
+  debug: 4,
+  all: 5,
+};
+
+function shouldWriteStderr(severity: DiagnosticSeverity, configuredLevel?: TerminalLogLevel): boolean {
+  if (configuredLevel === undefined) return true;
+  return SEVERITY_RANK[severity] <= LOG_LEVEL_RANK[configuredLevel];
+}
+
+function writeDiagnosticStderr(
+  severity: DiagnosticSeverity,
+  message: string,
+  configuredLevel?: TerminalLogLevel,
+): void {
+  if (!shouldWriteStderr(severity, configuredLevel)) return;
+  try {
+    process.stderr.write(message);
+  } catch {
+    /* closed stream */
+  }
+}
+
 export interface SdkBackendOptions extends SubagentLimits {
   /** .copilot/mcp.json servers merged beneath session servers unless MCP is disabled. */
   readonly mcpConfigPath?: string;
@@ -94,6 +130,8 @@ export interface SdkBackendOptions extends SubagentLimits {
   readonly logger?: Logger;
   /** Optional working directory for file-backed stdio MCP servers. */
   readonly mcpServerWorkingDirectory?: string;
+  /** Optional log level for the SDK client and backend diagnostic stderr filtering. */
+  readonly terminalLogLevel?: TerminalLogLevel;
 }
 
 /** Shape of the dynamically imported @github/copilot-sdk module. */
@@ -1362,6 +1400,7 @@ function parseMcpServer(
 function parseMcpConfig(
   configPath: string,
   mcpServerWorkingDirectory?: string,
+  terminalLogLevel?: TerminalLogLevel,
 ): Record<string, CopilotMcpServerConfig> | null {
   try {
     if (!fs.existsSync(configPath)) return null;
@@ -1390,7 +1429,11 @@ function parseMcpConfig(
     }
     return Object.keys(result).length > 0 ? result : null;
   } catch (err) {
-    process.stderr.write(`[SdkBackend] Failed to parse MCP config at ${configPath}: ${err}\n`);
+    writeDiagnosticStderr(
+      'warning',
+      `[SdkBackend] Failed to parse MCP config at ${configPath}: ${err}\n`,
+      terminalLogLevel,
+    );
     return null;
   }
 }
@@ -1435,6 +1478,7 @@ const HEADER_ENV_REFERENCE = /\$\{([A-Z_][A-Z0-9_]*(?:\|[A-Z_][A-Z0-9_]*)*)\}/g;
 
 function resolveMcpHeaders(
   headers: Record<string, string> | undefined,
+  terminalLogLevel?: TerminalLogLevel,
 ): Record<string, string> | undefined {
   if (headers === undefined) return undefined;
   const resolved: Record<string, string> = {};
@@ -1451,7 +1495,11 @@ function resolveMcpHeaders(
         // Dropping the header is deliberate — a missing credential must not abort a run — but
         // it is invisible at the server, which just answers with nothing.
         try {
-          process.stderr.write(`[SdkBackend] MCP header ${key} dropped: none of ${names.join(', ')} is set\n`);
+          writeDiagnosticStderr(
+            'warning',
+            `[SdkBackend] MCP header ${key} dropped: none of ${names.join(', ')} is set\n`,
+            terminalLogLevel,
+          );
         } catch { /* diagnostics must not break configuration */ }
         complete = false;
         break;
@@ -1465,15 +1513,19 @@ function resolveMcpHeaders(
 
 function toSdkMcpServers(
   servers: false,
+  terminalLogLevel?: TerminalLogLevel,
 ): false;
 function toSdkMcpServers(
   servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | undefined,
+  terminalLogLevel?: TerminalLogLevel,
 ): Record<string, CopilotMcpServerConfig> | undefined;
 function toSdkMcpServers(
   servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | false | undefined,
+  terminalLogLevel?: TerminalLogLevel,
 ): Record<string, CopilotMcpServerConfig> | false | undefined;
 function toSdkMcpServers(
   servers: Readonly<Record<string, import('./copilot-backend').MCPServerConfig>> | false | undefined,
+  terminalLogLevel?: TerminalLogLevel,
 ): Record<string, CopilotMcpServerConfig> | false | undefined {
   if (servers === undefined || servers === false) return servers;
   const converted: Record<string, CopilotMcpServerConfig> = {};
@@ -1481,7 +1533,7 @@ function toSdkMcpServers(
     const parsed = parseMcpServer(server);
     if (!parsed) continue;
     if ('url' in parsed) {
-      const headers = resolveMcpHeaders(parsed.headers);
+      const headers = resolveMcpHeaders(parsed.headers, terminalLogLevel);
       converted[name] = {
         ...parsed,
         ...(headers !== undefined ? { headers } : { headers: undefined }),
@@ -1499,6 +1551,7 @@ function toSdkMcpServers(
 
 function toSdkCustomAgent(
   agent: import('./copilot-backend').CustomAgentConfig,
+  terminalLogLevel?: TerminalLogLevel,
 ): CopilotSdkCustomAgentConfig {
   return {
     name: agent.name,
@@ -1509,7 +1562,7 @@ function toSdkCustomAgent(
       ? { tools: agent.tools === null ? null : [...agent.tools] }
       : {}),
     ...(agent.mcpServers !== undefined
-      ? { mcpServers: toSdkMcpServers(agent.mcpServers) }
+      ? { mcpServers: toSdkMcpServers(agent.mcpServers, terminalLogLevel) }
       : {}),
     ...(agent.infer !== undefined ? { infer: agent.infer } : {}),
     ...(agent.skills !== undefined ? { skills: [...agent.skills] } : {}),
@@ -1554,6 +1607,7 @@ export class SdkBackend implements CopilotBackend {
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
   private readonly mcpServerWorkingDirectory: string | undefined;
+  private readonly terminalLogLevel: TerminalLogLevel | undefined;
   private readonly logger: Logger;
   private modelListPromise: Promise<readonly CopilotSdkModelInfo[] | undefined> | undefined;
   private readonly modelCapabilityResolutions = new Map<
@@ -1573,6 +1627,7 @@ export class SdkBackend implements CopilotBackend {
     this.extraPathDirs = options.extraPathDirs ?? [];
     this.pathTools = options.pathTools ?? [];
     this.mcpServerWorkingDirectory = options.mcpServerWorkingDirectory;
+    this.terminalLogLevel = options.terminalLogLevel;
     this.logger = options.logger ?? NO_OP_LOGGER;
   }
 
@@ -1696,6 +1751,7 @@ export class SdkBackend implements CopilotBackend {
       this.pathTools,
       this.logger,
       this.mcpServerWorkingDirectory,
+      this.terminalLogLevel,
       (client, model) => this.resolveModelCapabilities(client, model),
     );
   }
@@ -1730,6 +1786,7 @@ class SdkSession implements CopilotSession {
   private readonly extraPathDirs: readonly string[];
   private readonly pathTools: readonly string[];
   private readonly mcpServerWorkingDirectory: string | undefined;
+  private readonly terminalLogLevel: TerminalLogLevel | undefined;
   private readonly logger: Logger;
   private readonly resolveModelCapabilities: (
     client: SdkClient,
@@ -1800,6 +1857,10 @@ class SdkSession implements CopilotSession {
   private _pendingPartials = new Map<string, string[]>();
   private activeToolCalls = new Set<string>();
   private pendingExternalRequests = new Set<string>();
+
+  private writeStderr(severity: DiagnosticSeverity, message: string): void {
+    writeDiagnosticStderr(severity, message, this.terminalLogLevel);
+  }
 
   get pid(): number | null {
     // SDK manages the CLI process internally; no direct PID access
@@ -1888,6 +1949,7 @@ class SdkSession implements CopilotSession {
     pathTools: readonly string[],
     logger: Logger,
     mcpServerWorkingDirectory: string | undefined,
+    terminalLogLevel: TerminalLogLevel | undefined,
     resolveModelCapabilities: (
       client: SdkClient,
       model: string,
@@ -1903,8 +1965,9 @@ class SdkSession implements CopilotSession {
     this.backendMaxConcurrency = backendMaxConcurrency;
     this.extraPathDirs = extraPathDirs;
     this.pathTools = pathTools;
-    this.mcpServerWorkingDirectory = mcpServerWorkingDirectory;
     this.logger = logger;
+    this.mcpServerWorkingDirectory = mcpServerWorkingDirectory;
+    this.terminalLogLevel = terminalLogLevel;
     this.resolveModelCapabilities = resolveModelCapabilities;
   }
 
@@ -1997,9 +2060,9 @@ class SdkSession implements CopilotSession {
     // ---------------------------------------------------------------
     // Parse MCP config
     // ---------------------------------------------------------------
-    const configuredMcpServers = toSdkMcpServers(this.config.mcpServers);
+    const configuredMcpServers = toSdkMcpServers(this.config.mcpServers, this.terminalLogLevel);
     const fileMcpServers = this.mcpConfigPath
-      ? parseMcpConfig(this.mcpConfigPath, this.mcpServerWorkingDirectory)
+      ? parseMcpConfig(this.mcpConfigPath, this.mcpServerWorkingDirectory, this.terminalLogLevel)
       : null;
     // Backend-level file servers remain available when authoring-layer defaults
     // are present. A session entry with the same name is the more specific value;
@@ -2016,7 +2079,7 @@ class SdkSession implements CopilotSession {
     const createClient = (): SdkClient => new CopilotClient({
       connection: RuntimeConnection.forStdio(),
       env,
-      logLevel: 'warning',
+      logLevel: this.terminalLogLevel ?? 'warning',
       requestHandler: createObservedRequestHandler(
         CopilotRequestHandler,
         CopilotWebSocketForwarder,
@@ -2216,7 +2279,7 @@ class SdkSession implements CopilotSession {
           return excludedTools.size > 0 ? { excludedTools: [...excludedTools] } : {};
         })(),
         ...(customAgents.size > 0
-          ? { customAgents: [...customAgents.values()].map(toSdkCustomAgent) }
+          ? { customAgents: [...customAgents.values()].map((agent) => toSdkCustomAgent(agent, this.terminalLogLevel)) }
           : {}),
         ...(this.config.defaultAgent !== undefined
           ? {
@@ -2535,7 +2598,7 @@ class SdkSession implements CopilotSession {
         };
         this.logger.warn('Copilot task completion failed; session remains active', fields);
         try {
-          process.stderr.write('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+          this.writeStderr('warning', '[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
         } catch { /* closed stream */ }
         return;
       }
@@ -3263,7 +3326,7 @@ class SdkSession implements CopilotSession {
   }
 
   private emitError(err: Error): void {
-    try { process.stderr.write(`[SdkBackend] ${err.message}\n`); } catch { /* closed stream */ }
+    try { this.writeStderr('error', `[SdkBackend] ${err.message}\n`); } catch { /* closed stream */ }
     this.emit('error', err);
   }
 
@@ -3286,7 +3349,7 @@ class SdkSession implements CopilotSession {
     this.turnSettled = true;
     this.clearTimers();
     try {
-      process.stderr.write(`[SdkBackend] ${eventType}: ${this.serializeEventDataCompact(eventType, data)}\n`);
+      this.writeStderr('error', `[SdkBackend] ${eventType}: ${this.serializeEventDataCompact(eventType, data)}\n`);
     } catch { /* closed stream */ }
     this.emitError(err);
     this.aborted = true;
@@ -3315,7 +3378,8 @@ class SdkSession implements CopilotSession {
     };
     this.logger.error('Copilot sub-agent failed; parent session remains active', fields);
     try {
-      process.stderr.write(
+      this.writeStderr(
+        'error',
         `[SdkBackend] AGENT-SCOPED FAILURE agentId=${e.agentId} event=${eventType} reason=${reason}\n`,
       );
     } catch { /* closed stream */ }
@@ -3336,7 +3400,7 @@ class SdkSession implements CopilotSession {
     if (this.isFailureShapedEvent(e)) {
       if (this.logAgentScopedFailure(e)) return;
       const payload = this.serializeEventDataCompact(e.type, e.data);
-      try { process.stderr.write(`[SdkBackend] Early failure event: ${e.type} data=${payload}\n`); } catch { /* */ }
+      try { this.writeStderr('error', `[SdkBackend] Early failure event: ${e.type} data=${payload}\n`); } catch { /* */ }
       this.fail(new Error(`Early SDK failure event: ${e.type}`), e.type, e.data);
     }
   }
@@ -3408,7 +3472,7 @@ class SdkSession implements CopilotSession {
     if (eventClass === 'informational') return;
 
     const payload = this.serializeEventDataCompact(e.type, e.data);
-    try { process.stderr.write(`[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
+    try { this.writeStderr('info', `[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
     if (this.isFailureShapedEvent(e)) {
       if (this.logAgentScopedFailure(e)) return;
       this.fail(new Error(`Unknown SDK failure event: ${e.type}`), e.type, e.data);
@@ -3696,7 +3760,8 @@ class SdkSession implements CopilotSession {
     };
     this.logger.info('Copilot model request dispatch', fields);
     try {
-      process.stderr.write(
+      this.writeStderr(
+        'info',
         `[SdkBackend] MODEL REQUEST requestId=${telemetry.requestId} sessionId=${telemetry.sessionId ?? 'unknown'} agentId=${telemetry.agentId ?? 'parent'} parentAgentId=${telemetry.parentAgentId ?? 'none'} purpose=${telemetry.purpose} interactionType=${telemetry.interactionType ?? 'unknown'} currentTokens=${telemetry.currentTokens ?? 'unknown'} tokenLimit=${telemetry.tokenLimit ?? 'unknown'} messagesLength=${telemetry.messagesLength ?? 'unknown'} systemTokens=${telemetry.systemTokens ?? 'unknown'} conversationTokens=${telemetry.conversationTokens ?? 'unknown'} toolDefinitionsTokens=${telemetry.toolDefinitionsTokens ?? 'unknown'} adaptiveHeadroom=${this.adaptiveCompactionPolicy?.headroom ?? 'unknown'} largestInterRequestGrowth=${this.largestObservedInterRequestGrowth} observedRequestBodyBytes=${telemetry.observedRequestBodyBytes ?? 'unknown'} observedRequestBodyTokens=${telemetry.observedRequestBodyTokens ?? 'unavailable'} observedRequestBodySha256=${telemetry.observedRequestBodySha256 ?? 'unknown'}\n`,
       );
     } catch { /* closed stream */ }
@@ -3733,7 +3798,8 @@ class SdkSession implements CopilotSession {
       fields,
     );
     try {
-      process.stderr.write(
+      this.writeStderr(
+        'info',
         `[SdkBackend] CONTEXT USAGE scope=${scope} currentTokens=${usage.currentTokens} tokenLimit=${usage.tokenLimit} messagesLength=${usage.messagesLength} systemTokens=${usage.systemTokens ?? 'unknown'} conversationTokens=${usage.conversationTokens ?? 'unknown'} toolDefinitionsTokens=${usage.toolDefinitionsTokens ?? 'unknown'} ceiling=${!e.agentId ? this.adaptiveCompactionPolicy?.threshold ?? 'unknown' : 'isolated'} headroom=${!e.agentId ? this.adaptiveCompactionPolicy?.headroom ?? 'unknown' : 'isolated'}\n`,
       );
     } catch { /* closed stream */ }
@@ -4022,7 +4088,7 @@ class SdkSession implements CopilotSession {
     };
     const message = `Unsafe parent context: currentTokens=${usage.currentTokens}, tokenLimit=${fields.tokenLimit}, ceiling=${policy?.threshold ?? 'unknown'}, headroom=${policy?.headroom ?? 'unknown'}, tokensRemoved=${tokensRemoved}, messagesLength=${usage.messagesLength}; ${reason}`;
     this.logger.error('Copilot parent context could not be compacted safely', fields);
-    try { process.stderr.write(`[SdkBackend] ADAPTIVE COMPACTION TERMINAL: ${message}\n`); } catch { /* closed stream */ }
+    try { this.writeStderr('error', `[SdkBackend] ADAPTIVE COMPACTION TERMINAL: ${message}\n`); } catch { /* closed stream */ }
     this.fail(new Error(message), 'adaptive-compaction', fields);
     return false;
   }
@@ -4255,7 +4321,7 @@ class SdkSession implements CopilotSession {
     barrier.phase = 'forced-recovery';
     barrier.forcedRecoveryIssued = true;
     try {
-      try { process.stderr.write('[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
+      try { this.writeStderr('warning', '[SdkBackend] Compaction stuck 3min — forcing compact\n'); } catch { /* */ }
       await Promise.race([
         sdkSession.rpc.history.compact(),
         new Promise<never>((_, reject) => setTimeout(

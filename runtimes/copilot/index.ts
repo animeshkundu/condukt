@@ -24,7 +24,7 @@ export type {
 } from './copilot-backend';
 export { SubprocessBackend } from './subprocess-backend';
 export { SdkBackend } from './sdk-backend';
-export type { SdkBackendOptions } from './sdk-backend';
+export type { SdkBackendOptions, TerminalLogLevel } from './sdk-backend';
 export {
   DEFAULT_COMPLEMENTARY_MODEL_POLICY,
   DEFAULT_COMPLEMENTARY_MODEL_PREFERENCE,

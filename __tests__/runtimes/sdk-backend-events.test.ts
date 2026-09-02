@@ -4780,4 +4780,155 @@ describe('SdkBackend event mapping', () => {
     }));
     expect(mockForwardedRequests).toHaveLength(0);
   });
+
+  describe('SdkBackend terminalLogLevel', () => {
+    it('preserves exact legacy behavior when terminalLogLevel is omitted (passes warning to SDK, emits all direct stderr writes, retains logger)', async () => {
+      const logger = createMockLogger();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { session, mock } = await createTestSession({ logger });
+        session.send('test prompt');
+        await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+        expect(mockClientConfig?.logLevel).toBe('warning');
+
+        // Trigger info-level write (Unknown event)
+        mock._emit('future.unknown_event', { key: 'value' });
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] Unknown event: future.unknown_event'));
+
+        // Trigger warning-level write (task completion failure)
+        mock._emit('session.task_complete', { success: false, summary: 'task issue' });
+        expect(stderr).toHaveBeenCalledWith('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+        expect(logger.warn).toHaveBeenCalledWith(
+          'Copilot task completion failed; session remains active',
+          expect.objectContaining({ summary: 'task issue' }),
+        );
+
+        // Trigger error-level write (agent failure)
+        mock._emit('session.error', { message: 'fatal agent crash' }, 'sub-1');
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] AGENT-SCOPED FAILURE agentId=sub-1'));
+        expect(logger.error).toHaveBeenCalledWith(
+          'Copilot sub-agent failed; parent session remains active',
+          expect.objectContaining({ agentId: 'sub-1', reason: 'fatal agent crash' }),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('suppresses all direct stderr writes when terminalLogLevel is none, while passing none to SDK and preserving logger and events', async () => {
+      const logger = createMockLogger();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { session, mock } = await createTestSession({ logger, terminalLogLevel: 'none' });
+        const errorHandler = vi.fn();
+        session.on('error', errorHandler);
+        session.send('test prompt');
+        await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+        expect(mockClientConfig?.logLevel).toBe('none');
+
+        // Trigger info-level write
+        mock._emit('future.unknown_event', { key: 'value' });
+
+        // Trigger warning-level write
+        mock._emit('session.task_complete', { success: false, summary: 'task issue' });
+        expect(logger.warn).toHaveBeenCalledWith(
+          'Copilot task completion failed; session remains active',
+          expect.objectContaining({ summary: 'task issue' }),
+        );
+
+        // Trigger error-level write
+        mock._emit('session.error', { message: 'fatal agent crash' }, 'sub-1');
+        expect(logger.error).toHaveBeenCalledWith(
+          'Copilot sub-agent failed; parent session remains active',
+          expect.objectContaining({ agentId: 'sub-1', reason: 'fatal agent crash' }),
+        );
+
+        // Stderr should have received 0 writes
+        expect(stderr).not.toHaveBeenCalled();
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('emits error-level writes but suppresses warning- and info-level writes when terminalLogLevel is error', async () => {
+      const logger = createMockLogger();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { session, mock } = await createTestSession({ logger, terminalLogLevel: 'error' });
+        session.send('test prompt');
+        await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+        expect(mockClientConfig?.logLevel).toBe('error');
+
+        // Info-level write should be suppressed
+        mock._emit('future.unknown_event', { key: 'value' });
+        expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] Unknown event:'));
+
+        // Warning-level write should be suppressed
+        mock._emit('session.task_complete', { success: false, summary: 'task issue' });
+        expect(stderr).not.toHaveBeenCalledWith('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+        expect(logger.warn).toHaveBeenCalled();
+
+        // Error-level write should emit
+        mock._emit('session.error', { message: 'child error' }, 'sub-1');
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] AGENT-SCOPED FAILURE agentId=sub-1'));
+        expect(logger.error).toHaveBeenCalled();
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('emits error- and warning-level writes but suppresses info-level writes when terminalLogLevel is warning', async () => {
+      const logger = createMockLogger();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { session, mock } = await createTestSession({ logger, terminalLogLevel: 'warning' });
+        session.send('test prompt');
+        await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+        expect(mockClientConfig?.logLevel).toBe('warning');
+
+        // Info-level write should be suppressed
+        mock._emit('future.unknown_event', { key: 'value' });
+        expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] Unknown event:'));
+
+        // Warning-level write should emit
+        mock._emit('session.task_complete', { success: false, summary: 'task issue' });
+        expect(stderr).toHaveBeenCalledWith('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+
+        // Error-level write should emit
+        mock._emit('session.error', { message: 'child error' }, 'sub-1');
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] AGENT-SCOPED FAILURE agentId=sub-1'));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it.each([
+      ['info' as const],
+      ['debug' as const],
+      ['all' as const],
+    ])('emits error, warning, and info writes when terminalLogLevel is %s', async (level) => {
+      const logger = createMockLogger();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { session, mock } = await createTestSession({ logger, terminalLogLevel: level });
+        session.send('test prompt');
+        await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+        expect(mockClientConfig?.logLevel).toBe(level);
+
+        // Info-level write should emit
+        mock._emit('future.unknown_event', { key: 'value' });
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] Unknown event: future.unknown_event'));
+
+        // Warning-level write should emit
+        mock._emit('session.task_complete', { success: false, summary: 'task issue' });
+        expect(stderr).toHaveBeenCalledWith('[SdkBackend] TASK COMPLETION FAILED; session remains active\n');
+
+        // Error-level write should emit
+        mock._emit('session.error', { message: 'child error' }, 'sub-1');
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SdkBackend] AGENT-SCOPED FAILURE agentId=sub-1'));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+  });
 });

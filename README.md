@@ -126,6 +126,17 @@ condukt is split into sub-path exports so you only pull in what you need.
 | `condukt/theme` | Tailwind preset, `STATUS_COLORS`, design tokens |
 | `condukt/utils` | Shared utilities |
 
+### Copilot SDK backend terminal log level
+
+`SdkBackend` supports an optional `terminalLogLevel: 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all'` option. When omitted, it preserves exact legacy behavior (`'warning'` passed to the SDK process and unsuppressed direct backend diagnostic stderr writes). When supplied, `terminalLogLevel` is passed to the SDK client and filters direct backend diagnostic stderr writes by call-site severity:
+
+- `'none'`: suppresses all backend diagnostic stderr writes.
+- `'error'`: emits only fatal errors and critical failures.
+- `'warning'`: emits errors and warnings (e.g. MCP parse errors, task completion failures).
+- `'info'`, `'debug'`, `'all'`: emits errors, warnings, and diagnostic info (model requests, context accounting, unknown events).
+
+Structured `Logger` routing and emitted session events remain untouched across all log levels.
+
 ### Bridge console output
 
 `createBridge` logs complete model requests and responses plus compact, redacted tool calls by default. Raw tool results are hidden. Set `renderPrompts: false` to omit requests, choose `toolOutputMode: 'preview' | 'full'` for tool diagnostics, and tune the 200-character compact preview with `toolPreviewMaxChars`. Tool completion events stay quiet because printing both start and completion would double per-call noise without adding the actionable call input.
