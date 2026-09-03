@@ -276,6 +276,27 @@ describe('reducer', () => {
       expect(nodeA.finishedAt).toBeUndefined();
       expect(nodeA.elapsedMs).toBeUndefined();
     });
+
+    it('does not increment an attempt reserved by node:retrying', () => {
+      let state = reduce(withRunStarted(), {
+        type: 'node:retrying',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        attempt: 2,
+        ts: 3000,
+      });
+      state = reduce(state, {
+        type: 'node:started',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        retry: true,
+        ts: 4000,
+      });
+
+      const nodeA = state.graph.nodes.find((n) => n.id === 'A')!;
+      expect(nodeA.status).toBe('running');
+      expect(nodeA.attempt).toBe(2);
+    });
   });
 
   describe('edge:traversed', () => {

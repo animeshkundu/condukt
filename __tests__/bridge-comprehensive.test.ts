@@ -1324,12 +1324,48 @@ describe('bridge — retry node', () => {
     const projection = stateRuntime.getProjection(executionId)!;
     expect(projection.graph.nodes.find(node => node.id === 'validator')).toMatchObject({
       status: 'completed',
-      attempt: 4,
+      attempt: 2,
     });
-    const resumed = storage.readEvents(executionId)
-      .filter(event => event.type === 'run:resumed')
-      .at(-1);
+    const events = storage.readEvents(executionId);
+    const retryEvents = events.filter(event => event.type === 'node:retrying');
+    expect(retryEvents).toHaveLength(2);
+    expect(retryEvents.map(event => event.attempt)).toEqual([2, 2]);
+    const resumed = events.filter(event => event.type === 'run:resumed').at(-1);
     expect(resumed).toMatchObject({ resumingFrom: ['validator'] });
+  });
+
+  it('retryNode counts one attempt for each actual node start', async () => {
+    const counts: Record<string, number> = {};
+    const graph: FlowGraph = {
+      nodes: {
+        producer: countedEntry(counts, 'producer'),
+        retried: countedEntry(counts, 'retried'),
+      },
+      edges: {
+        producer: { default: 'retried' },
+        retried: { default: 'end' },
+      },
+      start: ['producer'],
+    };
+    const executionId = 'retry-attempt-accounting';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    await bridge.retryNode(executionId, 'retried', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({ producer: 1, retried: 2 });
+    expect(stateRuntime.getProjection(executionId)!.graph.nodes
+      .find(node => node.id === 'retried')).toMatchObject({
+      status: 'completed',
+      attempt: 2,
+    });
   });
 
   it('retryNode inside a loop does not re-run its upstream producer', async () => {
