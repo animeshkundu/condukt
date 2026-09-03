@@ -282,7 +282,10 @@ export function createBridge(
     const node = projection.graph.nodes.find(n => n.id === nodeId);
     if (!node) throw new Error(`Node '${nodeId}' not found`);
 
-    if (!['failed', 'killed', 'completed'].includes(node.status)) {
+    // A previous retry can be stranded after persisting node:retrying but before
+    // the scheduler starts the node. With no local scheduler running, another
+    // explicit retry is the recovery path.
+    if (!['failed', 'killed', 'completed', 'retrying'].includes(node.status)) {
       throw new Error(`Cannot retry node in '${node.status}' status`);
     }
 
@@ -628,9 +631,11 @@ function resetNodeAndDownstream(
   nodeId: string,
   graph: FlowGraph,
 ): void {
-  // Reset this node
+  // An explicit retry is authoritative even when resetting downstream loop
+  // state removes every previously fired inbound edge to this node.
   (state.completedNodes as Map<string, unknown>).delete(nodeId);
   (state.nodeStatuses as Map<string, string>).set(nodeId, 'pending');
+  (state.readyNodes as Set<string> | undefined)?.add(nodeId);
 
   // Find and reset downstream nodes (BFS)
   const queue = [nodeId];
