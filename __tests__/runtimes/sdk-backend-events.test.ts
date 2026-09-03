@@ -43,21 +43,6 @@ type SdkEventHandler = (e: {
   data?: Record<string, unknown>;
 }) => void;
 
-interface MockModelInfo {
-  readonly id: string;
-  readonly name: string;
-  readonly capabilities: {
-    readonly supports: {
-      readonly vision: boolean;
-      readonly reasoningEffort: boolean;
-    };
-    readonly limits: {
-      readonly max_prompt_tokens?: number;
-      readonly max_context_window_tokens: number;
-    };
-  };
-}
-
 interface MockSdkSession {
   sessionId: string;
   send: ReturnType<typeof vi.fn>;
@@ -216,19 +201,9 @@ function createMockSdkSession(): MockSdkSession {
 let mockSdkSession: MockSdkSession;
 let mockSdkSessions: MockSdkSession[];
 let mockClientConfig: Record<string, unknown> | undefined;
-let mockForwardedRequests: Request[];
-let mockWebSocketContexts: Array<Record<string, unknown>>;
-let MockCopilotRequestHandlerClass: {
-  new (): {
-    sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-    openWebSocket(context: Record<string, unknown>): Promise<unknown>;
-  };
-};
-let MockCopilotWebSocketForwarderClass: new (context: Record<string, unknown>) => unknown;
 let mockCreateSession: ReturnType<typeof vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>>;
 let mockResumeSession: ReturnType<typeof vi.fn<(sessionId: string, config: Record<string, unknown>) => Promise<MockSdkSession>>>;
 let mockStart: ReturnType<typeof vi.fn<() => Promise<void>>>;
-let mockListModels: ReturnType<typeof vi.fn<() => Promise<MockModelInfo[]>>>;
 let mockStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let mockForceStop: ReturnType<typeof vi.fn<() => Promise<void>>>;
 let mockEarlyEvents: Array<{
@@ -237,7 +212,6 @@ let mockEarlyEvents: Array<{
   readonly agentId?: string;
 }>;
 let originalFunction: typeof globalThis.Function;
-let NativeRequest: typeof Request;
 
 /**
  * Creates a SdkBackend session with a mock SDK module.
@@ -267,81 +241,6 @@ function createMockLogger() {
     warn: vi.fn(),
     error: vi.fn(),
   };
-}
-
-interface MockContextDiagnostics {
-  readonly attributionTotalTokens: number | null;
-  readonly recomputedTotalTokens: number;
-  readonly messagesTokenCount: number;
-  readonly systemTokenCount: number;
-  readonly successfulCompactions: number;
-}
-
-function queueContextDiagnostics(
-  mock: MockSdkSession,
-  diagnostics: MockContextDiagnostics,
-): void {
-  mock.rpc.metadata.getContextAttribution.mockResolvedValueOnce({
-    contextAttribution: diagnostics.attributionTotalTokens === null
-      ? null
-      : {
-          totalTokens: diagnostics.attributionTotalTokens,
-          entries: [],
-          compactions: { count: diagnostics.successfulCompactions },
-        },
-  });
-  mock.rpc.metadata.getContextHeaviestMessages.mockResolvedValueOnce({
-    totalTokens: diagnostics.recomputedTotalTokens,
-    messages: [],
-  });
-  mock.rpc.metadata.recomputeContextTokens.mockResolvedValueOnce({
-    totalTokens: diagnostics.recomputedTotalTokens,
-    messagesTokenCount: diagnostics.messagesTokenCount,
-    systemTokenCount: diagnostics.systemTokenCount,
-  });
-}
-
-function queueParentMeasurement(
-  mock: MockSdkSession,
-  measurement: MockContextDiagnostics & {
-    readonly promptTokenLimit: number;
-    readonly toolDefinitionsTokens: number;
-  },
-): void {
-  mock.rpc.metadata.contextInfo.mockResolvedValueOnce({
-    contextInfo: {
-      totalTokens: measurement.attributionTotalTokens
-        ?? measurement.recomputedTotalTokens,
-      promptTokenLimit: measurement.promptTokenLimit,
-      systemTokens: measurement.systemTokenCount,
-      conversationTokens: measurement.messagesTokenCount,
-      toolDefinitionsTokens: measurement.toolDefinitionsTokens,
-    },
-  });
-  queueContextDiagnostics(mock, measurement);
-}
-
-function observedRequestHandler(): {
-  sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-} {
-  return mockClientConfig?.requestHandler as {
-    sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-  };
-}
-
-async function sendObservedParentRequest(requestId: string): Promise<Response> {
-  return observedRequestHandler().sendRequest(
-    new NativeRequest('https://example.test/inference', {
-      method: 'POST',
-      body: '{}',
-    }),
-    {
-      requestId,
-      sessionId: 'session-1',
-      agentId: 'session-1',
-      interactionType: 'conversation-agent',
-    },
-  );
 }
 
 interface JsonSchemaDefinition {
@@ -386,23 +285,6 @@ beforeEach(() => {
   mockSdkSession = createMockSdkSession();
   mockSdkSessions = [mockSdkSession];
   mockClientConfig = undefined;
-  mockForwardedRequests = [];
-  mockWebSocketContexts = [];
-  MockCopilotRequestHandlerClass = class MockCopilotRequestHandler {
-    async sendRequest(request: Request): Promise<Response> {
-      mockForwardedRequests.push(request);
-      return new Response(null, { status: 204 });
-    }
-    openWebSocket(context: Record<string, unknown>): Promise<Record<string, never>> {
-      mockWebSocketContexts.push(context);
-      return Promise.resolve({});
-    }
-  };
-  MockCopilotWebSocketForwarderClass = class MockCopilotWebSocketForwarder {
-    constructor(context: Record<string, unknown>) {
-      mockWebSocketContexts.push(context);
-    }
-  };
   mockCreateSession = vi.fn<(config: Record<string, unknown>) => Promise<MockSdkSession>>()
     .mockImplementation(async (config) => {
       const session = mockSdkSessions.shift() ?? mockSdkSession;
@@ -419,19 +301,7 @@ beforeEach(() => {
   mockStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockForceStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   mockEarlyEvents = [{ type: 'session.start', data: { early: true } }];
-  mockListModels = vi.fn<() => Promise<MockModelInfo[]>>().mockResolvedValue([{
-    id: 'test-model',
-    name: 'Test Model',
-    capabilities: {
-      supports: { vision: false, reasoningEffort: true },
-      limits: {
-        max_prompt_tokens: 922_000,
-        max_context_window_tokens: 1_050_000,
-      },
-    },
-  }]);
   originalFunction = globalThis.Function;
-  NativeRequest = globalThis.Request;
 
   // Replace Function constructor so that when SdkBackend creates its dynamic import
   // function, we intercept and return our mock SDK module.
@@ -441,14 +311,11 @@ beforeEach(() => {
         RuntimeConnection: {
           forStdio: vi.fn(() => ({ kind: 'stdio' as const })),
         },
-        CopilotRequestHandler: MockCopilotRequestHandlerClass,
-        CopilotWebSocketForwarder: MockCopilotWebSocketForwarderClass,
         CopilotClient: class MockCopilotClient {
           constructor(config: Record<string, unknown>) {
             mockClientConfig = config;
           }
           start() { return mockStart(); }
-          listModels() { return mockListModels(); }
           async createSession(config: Record<string, unknown>) {
             const onEvent = config.onEvent as SdkEventHandler | undefined;
             for (const event of mockEarlyEvents) onEvent?.(event);
@@ -477,6 +344,15 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('SdkBackend event mapping', () => {
+  it('uses native provider transport and runtime-selected infinite sessions', async () => {
+    const { session } = await createTestSession();
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    expect(mockClientConfig).not.toHaveProperty('requestHandler');
+    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('infiniteSessions');
+  });
+
   it('classifies every event in the authoritative installed SDK schema', () => {
     const eventTypes = authoritativeSdkEventTypes();
     const unclassified = eventTypes.filter(type => classifySdkEvent(type) === undefined);
@@ -1134,365 +1010,25 @@ describe('SdkBackend event mapping', () => {
     expect(String(result).length).toBeLessThanOrEqual(260);
   });
 
-  it('defaults to stock compaction and bootstraps adaptive headroom from exact fixed overhead when opted in', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, {
-      compactionMode: 'adaptive',
-    });
-    session.send('test prompt');
+  ;
 
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
-      infiniteSessions: {
-        enabled: true,
-        backgroundCompactionThreshold: 0.80,
-        bufferExhaustionThreshold: 0.95,
-      },
-    }));
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(mockStart.mock.invocationCallOrder[0]).toBeLessThan(mockListModels.mock.invocationCallOrder[0]!);
-    expect(logger.info).toHaveBeenCalledWith('Resolved Copilot model prompt-token limit', {
-      model: 'test-model',
-      reportedPromptTokenLimit: 922_000,
-      limitSource: 'max_prompt_tokens',
-    });
+  ;
 
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 80_000,
-      messagesTokenCount: 50_000,
-      systemTokenCount: 30_000,
-      successfulCompactions: 0,
-      promptTokenLimit: 922_000,
-      toolDefinitionsTokens: 20_000,
-    });
-    await sendObservedParentRequest('req-bootstrap-attribution');
+  ;
 
-    expect(logger.info).toHaveBeenCalledWith(
-      'Refreshed Copilot parent context before model request',
-      expect.objectContaining({
-        adaptiveCompactionHeadroom: 50_000,
-        adaptiveCompactionThreshold: 872_000,
-        adaptiveBootstrapSource: 'context-attribution',
-        largestObservedInterRequestGrowth: 0,
-      }),
-    );
-  });
+  ;
 
-  it('uses the first exact recomputation as bootstrap when attribution has no fixed overhead', async () => {
-    mockListModels.mockResolvedValueOnce([{
-      id: 'test-model',
-      name: 'Test Model',
-      capabilities: {
-        supports: { vision: false, reasoningEffort: true },
-        limits: { max_context_window_tokens: 400_000 },
-      },
-    }]);
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, {
-      compactionMode: 'adaptive',
-    });
-    session.send('test prompt');
+  ;
 
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: null,
-      recomputedTotalTokens: 75_000,
-      messagesTokenCount: 75_000,
-      systemTokenCount: 0,
-      successfulCompactions: 0,
-      promptTokenLimit: 400_000,
-      toolDefinitionsTokens: 0,
-    });
-    await sendObservedParentRequest('req-bootstrap-recomputation');
+  ;
 
-    expect(logger.info).toHaveBeenCalledWith(
-      'Refreshed Copilot parent context before model request',
-      expect.objectContaining({
-        adaptiveCompactionHeadroom: 75_000,
-        adaptiveCompactionThreshold: 325_000,
-        adaptiveBootstrapSource: 'first-recomputed-request',
-      }),
-    );
-  });
+  ;
 
-  it('uses the reduced infinite-session thresholds only in aggressive mode', async () => {
-    const { session } = await createTestSession({}, { compactionMode: 'aggressive' });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    expect(mockCreateSession).toHaveBeenCalledWith(expect.objectContaining({
-      infiniteSessions: {
-        enabled: true,
-        backgroundCompactionThreshold: 0.60,
-        bufferExhaustionThreshold: 0.75,
-      },
-    }));
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-  });
-
-  it('widens headroom by the largest observed inter-request growth', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    const handler = mockClientConfig?.requestHandler as {
-      sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-    };
-    mock.rpc.metadata.contextInfo
-      .mockResolvedValueOnce({
-        contextInfo: {
-          totalTokens: 100_000,
-          promptTokenLimit: 922_000,
-          systemTokens: 30_000,
-          conversationTokens: 50_000,
-          toolDefinitionsTokens: 20_000,
-        },
-      })
-      .mockResolvedValueOnce({
-        contextInfo: {
-          totalTokens: 220_000,
-          promptTokenLimit: 922_000,
-          systemTokens: 30_000,
-          conversationTokens: 170_000,
-          toolDefinitionsTokens: 20_000,
-        },
-      });
-
-    await handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      { requestId: 'req-1', sessionId: 'session-1', interactionType: 'conversation-agent' },
-    );
-    await handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      { requestId: 'req-2', sessionId: 'session-1', interactionType: 'conversation-agent' },
-    );
-
-    expect(logger.info).toHaveBeenCalledWith(
-      'Refreshed Copilot parent context before model request',
-      expect.objectContaining({
-        previousRequestTokens: 100_000,
-        observedInterRequestGrowth: 120_000,
-        adaptiveBootstrapHeadroom: 50_000,
-        largestObservedInterRequestGrowth: 120_000,
-        adaptiveCompactionHeadroom: 170_000,
-        adaptiveCompactionThreshold: 752_000,
-      }),
-    );
-  });
-
-  it('does not invent an adaptive ceiling from early usage before exact diagnostics exist', async () => {
-    mockEarlyEvents.push({
-      type: 'session.usage_info',
-      data: {
-        currentTokens: 280_000,
-        tokenLimit: 300_000,
-        messagesLength: 6,
-        systemTokens: 20_000,
-        conversationTokens: 255_000,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
-
-    const { session, mock } = await createTestSession({}, {
-      compactionMode: 'adaptive',
-    });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
-    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
-  });
-
-  it('proactively compacts parent usage that crosses the adaptive ceiling', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    mock.rpc.history.compact.mockResolvedValueOnce({
-      success: true,
-      tokensRemoved: 130_000,
-      messagesRemoved: 3,
-    });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
-
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 300_000,
-      messagesLength: 6,
-      systemTokens: 20_000,
-      conversationTokens: 75_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 75_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 0,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    await sendObservedParentRequest('req-establish-policy');
-
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 255_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 0,
-    });
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 150_000,
-      recomputedTotalTokens: 145_000,
-      messagesTokenCount: 125_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 1,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock._emit('session.usage_info', {
-      currentTokens: 280_000,
-      tokenLimit: 300_000,
-      messagesLength: 6,
-      systemTokens: 20_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-
-    await vi.waitFor(() => expect(mock.rpc.history.compact).toHaveBeenCalledOnce());
-    expect(logger.info).toHaveBeenCalledWith(
-      'Verified Copilot parent context compaction',
-      expect.objectContaining({
-        source: 'usage-threshold',
-        beforeTokens: 275_000,
-        afterTokens: 145_000,
-        beforeSuccessfulCompactions: 0,
-        afterSuccessfulCompactions: 1,
-        tokensRemoved: 130_000,
-        messagesRemoved: 3,
-        messagesLength: 6,
-        adaptiveCompactionThreshold: 275_000,
-        adaptiveCompactionHeadroom: 25_000,
-      }),
-    );
-  });
-
-  it('surfaces a terminal error when exact diagnostics show no compaction reduction', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    const errorHandler = vi.fn();
-    session.on('error', errorHandler);
-    mock.rpc.history.compact.mockResolvedValueOnce({
-      success: true,
-      tokensRemoved: 0,
-      messagesRemoved: 0,
-    });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
-
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 300_000,
-      messagesLength: 6,
-      systemTokens: 20_000,
-      conversationTokens: 75_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 75_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 0,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    await sendObservedParentRequest('req-establish-noop-policy');
-
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 255_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 0,
-    });
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 255_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 1,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock._emit('session.usage_info', {
-      currentTokens: 280_000,
-      tokenLimit: 300_000,
-      messagesLength: 6,
-      systemTokens: 20_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-
-    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
-    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('currentTokens=280000, tokenLimit=300000, ceiling=275000, headroom=25000, tokensRemoved=0, messagesLength=6'),
-    }));
-    expect(logger.error).toHaveBeenCalledWith(
-      'Copilot parent context could not be compacted safely',
-      expect.objectContaining({
-        reason: expect.stringContaining('exact token recomputation did not decrease'),
-      }),
-    );
-  });
-
-  it('diagnoses an oversized incoming message before futile compaction', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    const errorHandler = vi.fn();
-    session.on('error', errorHandler);
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
-
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 922_000,
-      messagesLength: 3,
-      systemTokens: 10_000,
-      conversationTokens: 85_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 85_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-      promptTokenLimit: 922_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    await sendObservedParentRequest('req-establish-oversized-policy');
-
-    mock._emit('session.usage_info', {
-      currentTokens: 910_000,
-      tokenLimit: 922_000,
-      messagesLength: 3,
-    });
-
-    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledOnce());
-    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith(
-      'Copilot parent context could not be compacted safely',
-      expect.objectContaining({
-        currentTokens: 910_000,
-        messagesLength: 3,
-        reason: expect.stringContaining('latest oversized context addition'),
-      }),
-    );
-  });
+  ;
 
   it('records child usage without driving parent compaction', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     session.send('test prompt');
     await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
 
@@ -1513,7 +1049,7 @@ describe('SdkBackend event mapping', () => {
 
   it('records sub-agent totalTokens as cumulative consumption', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     session.send('test prompt');
     await vi.waitFor(() => expect(mock.send).toHaveBeenCalledOnce());
 
@@ -1593,669 +1129,41 @@ describe('SdkBackend event mapping', () => {
     )).toEqual({});
   });
 
-  it('permits capability discovery but blocks parent-scoped traffic before a session handle exists', async () => {
-    let releaseSession!: () => void;
-    mockCreateSession.mockImplementationOnce((config) => new Promise((resolve) => {
-      releaseSession = () => {
-        mockSdkSession.sessionId = String(config.sessionId ?? 'session-1');
-        resolve(mockSdkSession);
-      };
-    }));
-    const { session } = await createTestSession();
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    const handler = mockClientConfig?.requestHandler as {
-      sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-    };
+  ;
 
-    await expect(handler.sendRequest(
-      new NativeRequest('https://example.test/models', { method: 'GET' }),
-      { requestId: 'req-control', interactionType: undefined },
-    )).resolves.toMatchObject({ status: 204 });
-    await expect(handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-parent-before-handle',
-        sessionId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mockForwardedRequests).toHaveLength(1);
-    releaseSession();
-    await vi.waitFor(() => expect(mockSdkSession.send).toHaveBeenCalledOnce());
-  });
+  ;
 
-  it('tags and fingerprints normal, compaction, child, and retry requests', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+  ;
 
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 922_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 85_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock.rpc.metadata.contextInfo.mockResolvedValue({
-      contextInfo: {
-        totalTokens: 101_000,
-        promptTokenLimit: 922_000,
-        systemTokens: 10_000,
-        conversationTokens: 86_000,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
-    const handler = mockClientConfig?.requestHandler as {
-      sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-      openWebSocket(context: Record<string, unknown>): Promise<unknown>;
-    };
-    const body = JSON.stringify({ messages: [{ role: 'user', content: 'safe prompt' }] });
-    await handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body }),
-      {
-        requestId: 'req-normal',
-        sessionId: 'session-1',
-        agentId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    );
-    await handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-compaction',
-        sessionId: 'session-1',
-        interactionType: 'conversation-compaction',
-      },
-    );
-    await handler.openWebSocket({
-      requestId: 'req-child',
-      sessionId: 'session-1',
-      agentId: 'child-1',
-      parentAgentId: 'parent-1',
-      interactionType: 'conversation-subagent',
-    });
-    mock._emit('assistant.turn_retry');
-    await handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-retry',
-        sessionId: 'session-1',
-        agentId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    );
+  ;
 
-    expect(mockForwardedRequests).toHaveLength(3);
-    expect(mockWebSocketContexts).toEqual([
-      expect.objectContaining({ requestId: 'req-child', agentId: 'child-1' }),
-    ]);
-    const requestLogs = logger.info.mock.calls
-      .filter(([message]) => message === 'Copilot model request dispatch')
-      .map(([, fields]) => fields);
-    expect(requestLogs).toEqual([
-      expect.objectContaining({
-        requestId: 'req-normal',
-        sessionId: 'session-1',
-        purpose: 'normal-turn',
-        interactionType: 'conversation-agent',
-        currentTokens: 101_000,
-        observedRequestBodyBytes: new TextEncoder().encode(body).byteLength,
-        observedRequestBodySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      }),
-      expect.objectContaining({
-        requestId: 'req-compaction',
-        purpose: 'compaction',
-        interactionType: 'conversation-compaction',
-      }),
-      expect.objectContaining({
-        requestId: 'req-child',
-        agentId: 'child-1',
-        parentAgentId: 'parent-1',
-        purpose: 'child',
-        interactionType: 'conversation-subagent',
-      }),
-      expect.objectContaining({
-        requestId: 'req-retry',
-        purpose: 'retry',
-        interactionType: 'conversation-agent',
-      }),
-    ]);
-    expect(requestLogs[0]).not.toHaveProperty('observedRequestBodyTokens');
-  });
+  ;
 
-  it('keeps child retries isolated from parent refresh and adaptive dispatch guards', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock.rpc.metadata.contextInfo.mockClear();
-    mock._emit('assistant.turn_retry', {}, 'child-1');
+  ;
 
-    await observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-child-retry',
-        sessionId: 'session-1',
-        agentId: 'child-1',
-        parentAgentId: 'session-1',
-        interactionType: 'conversation-subagent',
-      },
-    );
+  ;
 
-    expect(mockForwardedRequests).toHaveLength(1);
-    expect(mock.rpc.metadata.contextInfo).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(
-      'Copilot model request dispatch',
-      expect.objectContaining({
-        requestId: 'req-child-retry',
-        purpose: 'retry',
-        agentId: 'child-1',
-      }),
-    );
-  });
+  ;
 
-  it('does not consume a pending parent retry while classifying compaction traffic', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 922_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 85_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock.rpc.metadata.contextInfo.mockResolvedValue({
-      contextInfo: {
-        totalTokens: 100_000,
-        promptTokenLimit: 922_000,
-        systemTokens: 10_000,
-        conversationTokens: 85_000,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
-    mock._emit('assistant.turn_retry');
+  ;
 
-    await observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-compaction-before-retry',
-        sessionId: 'session-1',
-        interactionType: 'conversation-compaction',
-      },
-    );
-    await observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-retry-after-compaction',
-        sessionId: 'session-1',
-        agentId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    );
+  ;
 
-    const requestLogs = logger.info.mock.calls
-      .filter(([message]) => message === 'Copilot model request dispatch')
-      .map(([, fields]) => fields);
-    expect(requestLogs).toEqual([
-      expect.objectContaining({
-        requestId: 'req-compaction-before-retry',
-        purpose: 'compaction',
-      }),
-      expect.objectContaining({
-        requestId: 'req-retry-after-compaction',
-        purpose: 'retry',
-      }),
-    ]);
-  });
+  ;
 
-  it('treats ambiguous distinct identifiers as guarded parent traffic', async () => {
-    const { session, mock } = await createTestSession({}, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock.rpc.metadata.contextInfo.mockRejectedValueOnce(new Error('measurement failed'));
+  ;
 
-    await expect(observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-ambiguous-identifiers',
-        sessionId: 'session-1',
-        agentId: 'unscoped-agent',
-        interactionType: 'conversation-agent',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce();
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
+  ;
 
-  it('treats incomplete parent provenance on compaction as guarded parent traffic', async () => {
-    const { session, mock } = await createTestSession();
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock.rpc.metadata.contextInfo.mockResolvedValueOnce({
-      contextInfo: {
-        totalTokens: 944_213,
-        promptTokenLimit: 922_000,
-        systemTokens: 10_000,
-        conversationTokens: 929_213,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
+  ;
 
-    await expect(observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-malformed-compaction-provenance',
-        sessionId: 'session-1',
-        parentAgentId: 'unexpected-parent',
-        interactionType: 'conversation-compaction',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce();
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
+  ;
 
-  it('retains parent retry provenance when an attempted dispatch is blocked', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 200_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 185_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 200_000,
-      recomputedTotalTokens: 195_000,
-      messagesTokenCount: 185_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
-    mock._emit('session.compaction_start');
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 85_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-    });
-    let releaseVerification!: () => void;
-    const verificationGate = new Promise<void>((resolve) => {
-      releaseVerification = resolve;
-    });
-    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
-      await verificationGate;
-      return {
-        contextInfo: {
-          totalTokens: 100_000,
-          promptTokenLimit: 300_000,
-          systemTokens: 10_000,
-          conversationTokens: 85_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      };
-    });
-    mock._emit('session.compaction_complete', { success: true });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
-    mock._emit('assistant.turn_retry');
+  ;
 
-    const blockedRetry = sendObservedParentRequest('req-blocked-retry');
-    await Promise.resolve();
-    expect(mockForwardedRequests).toHaveLength(0);
-    releaseVerification();
-    await vi.waitFor(() => expect(logger.info).toHaveBeenCalledWith(
-      'Verified completed Copilot parent compaction',
-      expect.any(Object),
-    ));
-    await expect(blockedRetry).resolves.toMatchObject({ status: 204 });
-    expect(logger.info).toHaveBeenCalledWith(
-      'Copilot model request dispatch',
-      expect.objectContaining({
-        requestId: 'req-blocked-retry',
-        purpose: 'retry',
-      }),
-    );
-    await sendObservedParentRequest('req-forwarded-retry');
-    expect(logger.info).toHaveBeenCalledWith(
-      'Copilot model request dispatch',
-      expect.objectContaining({
-        requestId: 'req-forwarded-retry',
-        purpose: 'normal-turn',
-      }),
-    );
-  });
+  ;
 
-  it('blocks a known-oversize parent compaction request before provider dispatch', async () => {
-    const { session, mock } = await createTestSession();
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 944_213,
-      tokenLimit: 922_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 929_213,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock.rpc.metadata.contextInfo.mockResolvedValueOnce({
-      contextInfo: {
-        totalTokens: 944_213,
-        promptTokenLimit: 922_000,
-        systemTokens: 10_000,
-        conversationTokens: 929_213,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
-
-    await expect(observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-oversize-compaction',
-        sessionId: 'session-1',
-        interactionType: 'conversation-compaction',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce();
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
-
-  it('serializes concurrent adaptive parent measurements without sharing failed accounting', async () => {
-    const { session, mock } = await createTestSession({}, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-
-    let releaseFirstMeasurement!: () => void;
-    const firstMeasurementGate = new Promise<void>((resolve) => {
-      releaseFirstMeasurement = resolve;
-    });
-    mock.rpc.metadata.contextInfo
-      .mockImplementationOnce(async () => {
-        await firstMeasurementGate;
-        throw new Error('first measurement failed');
-      })
-      .mockResolvedValueOnce({
-        contextInfo: {
-          totalTokens: 100_000,
-          promptTokenLimit: 922_000,
-          systemTokens: 10_000,
-          conversationTokens: 85_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      });
-
-    const firstRequest = sendObservedParentRequest('req-concurrent-failed');
-    const secondRequest = sendObservedParentRequest('req-concurrent-safe');
-    await vi.waitFor(() => {
-      expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(1);
-    });
-    releaseFirstMeasurement();
-
-    await expect(firstRequest).rejects.toThrow('parent context headroom has not been restored');
-    await expect(secondRequest).resolves.toMatchObject({ status: 204 });
-    expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(2);
-    expect(mockForwardedRequests).toHaveLength(1);
-  });
-
-  it('blocks a stock parent request when measured growth would exceed the live token limit', async () => {
-    const { session, mock } = await createTestSession();
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock.rpc.metadata.contextInfo
-      .mockResolvedValueOnce({
-        contextInfo: {
-          totalTokens: 600_000,
-          promptTokenLimit: 922_000,
-          systemTokens: 10_000,
-          conversationTokens: 585_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      })
-      .mockResolvedValueOnce({
-        contextInfo: {
-          totalTokens: 800_000,
-          promptTokenLimit: 922_000,
-          systemTokens: 10_000,
-          conversationTokens: 785_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      });
-
-    await sendObservedParentRequest('req-stock-growth-baseline');
-    mock._emit('session.usage_info', {
-      currentTokens: 800_000,
-      tokenLimit: 922_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 785_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    await expect(sendObservedParentRequest('req-stock-growth-overflow')).rejects.toThrow(
-      'parent context headroom has not been restored',
-    );
-    expect(mockForwardedRequests).toHaveLength(1);
-  });
-
-  it('blocks an ordinary parent request when observed usage remains above the adaptive ceiling', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-
-    mock._emit('session.usage_info', {
-      currentTokens: 270_000,
-      tokenLimit: 300_000,
-      messagesLength: 3,
-      systemTokens: 10_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock.rpc.metadata.contextInfo.mockResolvedValueOnce({
-      contextInfo: {
-        totalTokens: 290_000,
-        promptTokenLimit: 300_000,
-        systemTokens: 10_000,
-        conversationTokens: 275_000,
-        toolDefinitionsTokens: 5_000,
-      },
-    });
-    const handler = mockClientConfig?.requestHandler as {
-      sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-    };
-    await expect(handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-blocked',
-        sessionId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
-
-  it('blocks an ordinary parent request when fresh context measurement fails', async () => {
-    const { session, mock } = await createTestSession({}, {
-      compactionMode: 'adaptive',
-    });
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 100_000,
-      tokenLimit: 922_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock.rpc.metadata.contextInfo.mockRejectedValueOnce(new Error('context RPC unavailable'));
-    const handler = mockClientConfig?.requestHandler as {
-      sendRequest(request: Request, context: Record<string, unknown>): Promise<Response>;
-    };
-
-    await expect(handler.sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-no-accounting',
-        sessionId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    )).rejects.toThrow('parent context headroom has not been restored');
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
-
-  it('degrades safely when the selected model has malformed capabilities', async () => {
-    mockListModels.mockResolvedValueOnce([{
-      id: 'test-model',
-      name: 'Test Model',
-    } as MockModelInfo]);
-    const logger = createMockLogger();
-    const { session } = await createTestSession({ logger });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Copilot model capability lookup returned no usable token limit; awaiting runtime context accounting',
-      {
-        model: 'test-model',
-        reason: 'invalid_limit',
-        maxPromptTokens: undefined,
-        maxContextWindowTokens: undefined,
-      },
-    );
-  });
-
-  it('does not substitute the context window for an invalid reported prompt limit', async () => {
-    mockListModels.mockResolvedValueOnce([{
-      id: 'test-model',
-      name: 'Test Model',
-      capabilities: {
-        supports: { vision: false, reasoningEffort: true },
-        limits: {
-          max_prompt_tokens: 0,
-          max_context_window_tokens: 400_000,
-        },
-      },
-    }]);
-    const logger = createMockLogger();
-    const { session } = await createTestSession({ logger });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Copilot model capability lookup returned no usable token limit; awaiting runtime context accounting',
-      {
-        model: 'test-model',
-        reason: 'invalid_limit',
-        maxPromptTokens: 0,
-        maxContextWindowTokens: 400_000,
-      },
-    );
-  });
-
-  it('creates sessions with SDK fallback compaction when model listing fails', async () => {
-    mockListModels.mockRejectedValueOnce(new Error('models unavailable'));
-    const logger = createMockLogger();
-    const { session } = await createTestSession({ logger });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(mockCreateSession.mock.calls[0]?.[0]).toMatchObject({
-      infiniteSessions: {
-        enabled: true,
-        backgroundCompactionThreshold: 0.80,
-        bufferExhaustionThreshold: 0.95,
-      },
-    });
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Copilot model capability discovery failed; awaiting runtime context accounting',
-      { reason: 'list_models_failed', error: 'models unavailable' },
-    );
-  });
-
-  it('creates sessions without an absolute ceiling when the model is absent', async () => {
-    mockListModels.mockResolvedValueOnce([]);
-    const logger = createMockLogger();
-    const { session } = await createTestSession({ logger });
-    session.send('test prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalled());
-    expect(mockCreateSession.mock.calls[0]?.[0]).not.toHaveProperty('modelCapabilities');
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Copilot model capability lookup failed; awaiting runtime context accounting',
-      { model: 'test-model', reason: 'model_not_found' },
-    );
-  });
-
-  it('lists models and logs resolution once across concurrent sessions on the same backend', async () => {
-    let resolveModels!: (models: MockModelInfo[]) => void;
-    mockListModels.mockReturnValueOnce(new Promise(resolve => { resolveModels = resolve; }));
-    const logger = createMockLogger();
-    const backend = new SdkBackend({ logger });
-    const createConfig = (): SessionConfig => ({
-      model: 'test-model',
-      cwd: '.',
-      addDirs: [],
-      timeout: 3600,
-      heartbeatTimeout: 120,
-    });
-    const first = await backend.createSession(createConfig());
-    const second = await backend.createSession(createConfig());
-    first.send('first prompt');
-    second.send('second prompt');
-
-    await vi.waitFor(() => expect(mockListModels).toHaveBeenCalledOnce());
-    resolveModels([{
-      id: 'test-model',
-      name: 'Test Model',
-      capabilities: {
-        supports: { vision: false, reasoningEffort: true },
-        limits: {
-          max_prompt_tokens: 922_000,
-          max_context_window_tokens: 1_050_000,
-        },
-      },
-    }]);
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledTimes(2));
-    expect(mockStart).toHaveBeenCalledOnce();
-    expect(mockListModels).toHaveBeenCalledOnce();
-    expect(logger.info).toHaveBeenCalledOnce();
-  });
-
-  it('logs a shared listing failure once across multiple sessions', async () => {
-    mockListModels.mockRejectedValueOnce(new Error('models unavailable'));
-    const logger = createMockLogger();
-    const backend = new SdkBackend({ logger });
-    const createConfig = (): SessionConfig => ({
-      model: 'test-model',
-      cwd: '.',
-      addDirs: [],
-      timeout: 3600,
-      heartbeatTimeout: 120,
-    });
-    const first = await backend.createSession(createConfig());
-    const second = await backend.createSession(createConfig());
-    first.send('first prompt');
-    second.send('second prompt');
-
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledTimes(2));
-    expect(mockStart).toHaveBeenCalledOnce();
-    expect(mockListModels).toHaveBeenCalledOnce();
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Copilot model capability discovery failed; awaiting runtime context accounting',
-      { reason: 'list_models_failed', error: 'models unavailable' },
-    );
-  });
+  ;
 
   it('forwards contextTier, thinkingBudget, and configDirectory to the SDK session config', async () => {
     const backend = new SdkBackend({ configDir: '/project', subagentRoster: false });
@@ -2853,44 +1761,9 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
-  it('forces a stuck compaction through the SDK history API', async () => {
-    vi.useFakeTimers();
-    try {
-      const { session, mock } = await createTestSession();
-      session.send('test prompt');
-      await vi.advanceTimersByTimeAsync(0);
-      mock._emit('session.compaction_start');
-      await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+  ;
 
-      expect(mock.rpc.history.compact).toHaveBeenCalledOnce();
-      expect(mock.abort).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('fails immediately when the stuck-compaction recovery call is rejected', async () => {
-    vi.useFakeTimers();
-    try {
-      const { session, mock } = await createTestSession();
-      const errorHandler = vi.fn();
-      session.on('error', errorHandler);
-      mock.rpc.history.compact.mockRejectedValueOnce(new Error('compact failed'));
-
-      session.send('test prompt');
-      await vi.advanceTimersByTimeAsync(0);
-      mock._emit('session.compaction_start');
-      await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
-
-      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-        message: 'Compaction recovery request failed: compact failed',
-      }));
-      expect(mock.abort).toHaveBeenCalledOnce();
-      expect(mock.send).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  ;
 
   it('send after abort emits an error instead of silently hanging', async () => {
     const { session } = await createTestSession();
@@ -3194,7 +2067,7 @@ describe('SdkBackend event mapping', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const logger = createMockLogger();
-      const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+      const { session, mock } = await createTestSession({ logger });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
       session.send('test prompt');
@@ -3371,7 +2244,7 @@ describe('SdkBackend event mapping', () => {
 
   it('lets eligible auto-switch errors reach the pending switch policy', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
     session.send('test prompt');
@@ -3395,7 +2268,7 @@ describe('SdkBackend event mapping', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const logger = createMockLogger();
-      const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+      const { session, mock } = await createTestSession({ logger });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
       session.send('test prompt');
@@ -4083,7 +2956,7 @@ describe('SdkBackend event mapping', () => {
 
   it('classifies compaction model rejection as a first-class terminal failure', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
     session.send('test prompt');
@@ -4131,342 +3004,140 @@ describe('SdkBackend event mapping', () => {
     }));
   });
 
-  it('re-measures successful built-in compaction and continues after headroom is restored', async () => {
-    const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+  ;
+
+  it('trusts native compaction success and emits native token summaries without verification RPCs', async () => {
+    const { session, mock } = await createTestSession();
     const compactionHandler = vi.fn();
     const errorHandler = vi.fn();
     session.on('compaction', compactionHandler);
     session.on('error', errorHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 75_000,
-      systemTokenCount: 20_000,
-      successfulCompactions: 0,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    await sendObservedParentRequest('req-establish-policy');
 
-    mock._emit('session.usage_info', {
-      currentTokens: 270_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 265_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
     mock._emit('session.compaction_start');
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 150_000,
-      recomputedTotalTokens: 145_000,
-      messagesTokenCount: 135_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-    });
-
-    let releasePostCompactionMeasurement!: () => void;
-    const pendingPostCompactionMeasurement = new Promise<void>((resolve) => {
-      releasePostCompactionMeasurement = resolve;
-    });
-    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
-      await pendingPostCompactionMeasurement;
-      return {
-        contextInfo: {
-          totalTokens: 150_000,
-          promptTokenLimit: 300_000,
-          systemTokens: 10_000,
-          conversationTokens: 135_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      };
-    });
-
     mock._emit('session.compaction_complete', {
       success: true,
       preCompactionTokens: 280_000,
       postCompactionTokens: 150_000,
       tokensRemoved: 130_000,
     });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(2));
-    const duringVerification = observedRequestHandler().sendRequest(
-      new NativeRequest('https://example.test/inference', { method: 'POST', body: '{}' }),
-      {
-        requestId: 'req-during-compaction-verification',
-        sessionId: 'session-1',
-        agentId: 'session-1',
-        interactionType: 'conversation-agent',
-      },
-    );
-    await Promise.resolve();
-    expect(mockForwardedRequests).toHaveLength(1);
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 150_000,
-      recomputedTotalTokens: 145_000,
-      messagesTokenCount: 135_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    releasePostCompactionMeasurement();
-    await expect(duringVerification).resolves.toMatchObject({ status: 204 });
-    expect(mockForwardedRequests).toHaveLength(2);
 
-    await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
-      'complete',
-      '275000 → 145000 exact tokens (compactions 0 → 1)',
-    ));
+    expect(compactionHandler.mock.calls).toEqual([
+      ['start'],
+      ['complete', '280000 → 150000 tokens'],
+    ]);
     expect(errorHandler).not.toHaveBeenCalled();
-    expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledWith({
-      promptTokenLimit: 300_000,
-      outputTokenLimit: 0,
-      selectedModel: 'test-model',
-    });
-    expect(logger.info).toHaveBeenCalledWith(
-      'Verified completed Copilot parent compaction',
-      expect.objectContaining({
-        measuredPreCompactionTokens: 275_000,
-        measuredPostCompactionTokens: 145_000,
-        beforeSuccessfulCompactions: 0,
-        afterSuccessfulCompactions: 1,
-        adaptiveCompactionThreshold: 275_000,
-        adaptiveCompactionHeadroom: 25_000,
-      }),
-    );
+    expect(mock.rpc.metadata.contextInfo).not.toHaveBeenCalled();
+    expect(mock.rpc.metadata.getContextAttribution).not.toHaveBeenCalled();
+    expect(mock.rpc.metadata.recomputeContextTokens).not.toHaveBeenCalled();
+    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
   });
 
-  it('parks ordinary parent dispatch while stock compaction is in progress', async () => {
-    const { session, mock } = await createTestSession();
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 200_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 185_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 200_000,
-      recomputedTotalTokens: 195_000,
-      messagesTokenCount: 185_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
-    mock._emit('session.compaction_start');
-
-    const request = sendObservedParentRequest('req-during-stock-compaction');
-    await Promise.resolve();
-    expect(mockForwardedRequests).toHaveLength(0);
-
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 85_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    mock._emit('session.compaction_complete', { success: true });
-    await expect(request).resolves.toMatchObject({ status: 204 });
-    expect(mockForwardedRequests).toHaveLength(1);
-  });
-
-  it('does not let stale verification reopen dispatch for a newer compaction', async () => {
+  it.each([
+    ['tokens removed', { success: true, tokensRemoved: 100_000 }, '100000 tokens removed'],
+    ['no counters', { success: true }, undefined],
+  ])('emits native compaction completion with %s', async (_label, data, summary) => {
     const { session, mock } = await createTestSession();
     const compactionHandler = vi.fn();
     session.on('compaction', compactionHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 220_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 205_000,
-      toolDefinitionsTokens: 5_000,
-    });
 
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 220_000,
-      recomputedTotalTokens: 215_000,
-      messagesTokenCount: 205_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
     mock._emit('session.compaction_start');
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 150_000,
-      recomputedTotalTokens: 145_000,
-      messagesTokenCount: 135_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-    });
-    let releaseFirstVerification!: () => void;
-    const firstVerificationGate = new Promise<void>((resolve) => {
-      releaseFirstVerification = resolve;
-    });
-    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
-      await firstVerificationGate;
-      return {
-        contextInfo: {
-          totalTokens: 150_000,
-          promptTokenLimit: 300_000,
-          systemTokens: 10_000,
-          conversationTokens: 135_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      };
-    });
-    mock._emit('session.compaction_complete', { success: true });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(1));
+    mock._emit('session.compaction_complete', data);
 
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 150_000,
-      recomputedTotalTokens: 145_000,
-      messagesTokenCount: 135_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-    });
-    mock._emit('session.compaction_start');
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 80_000,
-      recomputedTotalTokens: 75_000,
-      messagesTokenCount: 65_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 2,
-    });
-    let releaseSecondVerification!: () => void;
-    const secondVerificationGate = new Promise<void>((resolve) => {
-      releaseSecondVerification = resolve;
-    });
-    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
-      await secondVerificationGate;
-      return {
-        contextInfo: {
-          totalTokens: 80_000,
-          promptTokenLimit: 300_000,
-          systemTokens: 10_000,
-          conversationTokens: 65_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      };
-    });
-    mock._emit('session.compaction_complete', { success: true });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledTimes(2));
-
-    releaseFirstVerification();
-    await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledTimes(2));
     expect(compactionHandler).toHaveBeenNthCalledWith(1, 'start');
-    expect(compactionHandler).toHaveBeenNthCalledWith(2, 'start');
-    const beforeNewerVerification = sendObservedParentRequest('req-before-newer-verification');
-    await Promise.resolve();
-    expect(mockForwardedRequests).toHaveLength(0);
-
-    releaseSecondVerification();
-    await expect(beforeNewerVerification).resolves.toMatchObject({ status: 204 });
-    await vi.waitFor(() => expect(compactionHandler).toHaveBeenCalledWith(
-      'complete',
-      '145000 → 75000 exact tokens (compactions 1 → 2)',
-    ));
+    expect(compactionHandler).toHaveBeenNthCalledWith(2, 'complete', summary);
   });
 
-  it('fails when built-in compaction does not restore adaptive headroom', async () => {
-    const { session, mock } = await createTestSession({}, {
-      compactionMode: 'adaptive',
-    });
-    const errorHandler = vi.fn();
-    session.on('error', errorHandler);
+  it('logs a second compaction start and ignores unmatched or duplicate completion', async () => {
+    const logger = createMockLogger();
+    const { session, mock } = await createTestSession({ logger });
+    const compactionHandler = vi.fn();
+    session.on('compaction', compactionHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 270_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 265_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
+
+    mock._emit('session.compaction_complete', { success: true });
+    expect(compactionHandler).not.toHaveBeenCalled();
+
     mock._emit('session.compaction_start');
-    queueParentMeasurement(mock, {
-      attributionTotalTokens: 290_000,
-      recomputedTotalTokens: 285_000,
-      messagesTokenCount: 275_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-      promptTokenLimit: 300_000,
-      toolDefinitionsTokens: 5_000,
-    });
+    mock._emit('session.compaction_start');
+    expect(compactionHandler.mock.calls).toEqual([['start']]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Copilot emitted a second compaction start while one is active',
+      expect.objectContaining({ activeEventId: 'unknown' }),
+    );
 
-    mock._emit('session.compaction_complete', {
-      success: true,
-      preCompactionTokens: 280_000,
-      postCompactionTokens: 290_000,
-      tokensRemoved: 0,
-    });
-
-    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('exact token recomputation did not decrease after compaction'),
-    })));
+    mock._emit('session.compaction_complete', { success: true });
+    mock._emit('session.compaction_complete', { success: true });
+    expect(compactionHandler.mock.calls).toEqual([
+      ['start'],
+      ['complete', undefined],
+    ]);
   });
 
-  it('fails when successful built-in compaction cannot be re-measured', async () => {
+  it('defers parent idle during native compaction and settles after success', async () => {
+    const { session, mock } = await createTestSession();
+    const idleHandler = vi.fn();
+    session.on('idle', idleHandler);
+    session.send('test prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+
+    mock._emit('session.compaction_start');
+    mock._emit('session.idle');
+    expect(idleHandler).not.toHaveBeenCalled();
+
+    mock._emit('session.compaction_complete', { success: true });
+    expect(idleHandler).toHaveBeenCalledOnce();
+  });
+
+  it('leaves missing compaction completion to the node hard timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mock } = await createTestSession({}, {
+        timeout: 2,
+        heartbeatTimeout: 1,
+        sessionRecovery: false,
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('session.compaction_start');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.rpc.history.compact).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'Session timed out after 2s',
+      }));
+      expect(mock.abort).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps compaction failure terminal when a late native retry arrives', async () => {
     const { session, mock } = await createTestSession();
     const errorHandler = vi.fn();
     session.on('error', errorHandler);
     session.send('test prompt');
     await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-    mock._emit('session.usage_info', {
-      currentTokens: 270_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 255_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    expect(mock.rpc.history.compact).not.toHaveBeenCalled();
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 280_000,
-      recomputedTotalTokens: 275_000,
-      messagesTokenCount: 265_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
+
     mock._emit('session.compaction_start');
-    mock.rpc.metadata.contextInfo.mockResolvedValueOnce({ contextInfo: null });
-
     mock._emit('session.compaction_complete', {
-      success: true,
-      preCompactionTokens: 280_000,
-      postCompactionTokens: 150_000,
-      tokensRemoved: 130_000,
+      success: false,
+      error: 'quota exceeded',
+      statusCode: 429,
     });
+    mock._emit('assistant.turn_retry');
 
-    await vi.waitFor(() => expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('could not be verified with exact token recomputation and attribution counts'),
-    })));
+    expect(errorHandler).toHaveBeenCalledOnce();
+    expect(mockResumeSession).not.toHaveBeenCalled();
   });
 
   it('exposes typed metadata diagnostics and usage metrics', async () => {
@@ -4507,7 +3178,7 @@ describe('SdkBackend event mapping', () => {
 
   it('exposes native handoff summary and history truncation operations', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     mock.rpc.history.summarizeForHandoff.mockResolvedValueOnce({ summary: '# Handoff\nContext' });
     mock.rpc.history.truncate.mockResolvedValueOnce({ eventsRemoved: 7 });
     session.send('test prompt');
@@ -4605,7 +3276,7 @@ describe('SdkBackend event mapping', () => {
 
   it('session.task_complete with success false leaves the session active and logs visibly', async () => {
     const logger = createMockLogger();
-    const { session, mock } = await createTestSession({ logger }, { compactionMode: 'adaptive' });
+    const { session, mock } = await createTestSession({ logger });
     const idleHandler = vi.fn();
     session.on('idle', idleHandler);
     session.send('test prompt');
@@ -4690,96 +3361,9 @@ describe('SdkBackend event mapping', () => {
     expect(toolCompleteHandler).toHaveBeenCalledWith('Grep', 'verbose fallback result', 'tc-2', undefined);
   });
 
-  it('defers parent session.idle and session.task_complete until after compaction verification settles', async () => {
-    const { session, mock } = await createTestSession();
-    const idleHandler = vi.fn();
-    session.on('idle', idleHandler);
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+  ;
 
-    mock._emit('session.usage_info', {
-      currentTokens: 200_000,
-      tokenLimit: 300_000,
-      messagesLength: 8,
-      systemTokens: 10_000,
-      conversationTokens: 185_000,
-      toolDefinitionsTokens: 5_000,
-    });
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 200_000,
-      recomputedTotalTokens: 195_000,
-      messagesTokenCount: 185_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
-    mock._emit('session.compaction_start');
-
-    let releaseVerification!: () => void;
-    const verificationGate = new Promise<void>((resolve) => {
-      releaseVerification = resolve;
-    });
-    mock.rpc.metadata.contextInfo.mockImplementationOnce(async () => {
-      await verificationGate;
-      return {
-        contextInfo: {
-          totalTokens: 100_000,
-          promptTokenLimit: 300_000,
-          systemTokens: 10_000,
-          conversationTokens: 85_000,
-          toolDefinitionsTokens: 5_000,
-        },
-      };
-    });
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 100_000,
-      recomputedTotalTokens: 95_000,
-      messagesTokenCount: 85_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 1,
-    });
-
-    mock._emit('session.compaction_complete', { success: true, tokensRemoved: 100_000 });
-    await vi.waitFor(() => expect(mock.rpc.metadata.contextInfo).toHaveBeenCalledOnce());
-
-    mock._emit('session.idle');
-    expect(idleHandler).not.toHaveBeenCalled();
-
-    releaseVerification();
-    await vi.waitFor(() => expect(idleHandler).toHaveBeenCalledOnce());
-  });
-
-  it('rejects parked parent request when compaction fails during verification', async () => {
-    const { session, mock } = await createTestSession();
-    const errorHandler = vi.fn();
-    session.on('error', errorHandler);
-    session.send('test prompt');
-    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
-
-    queueContextDiagnostics(mock, {
-      attributionTotalTokens: 200_000,
-      recomputedTotalTokens: 195_000,
-      messagesTokenCount: 185_000,
-      systemTokenCount: 10_000,
-      successfulCompactions: 0,
-    });
-    mock._emit('session.compaction_start');
-
-    const request = sendObservedParentRequest('req-parked-failed-compaction');
-    await Promise.resolve();
-    expect(mockForwardedRequests).toHaveLength(0);
-
-    mock._emit('session.compaction_complete', {
-      success: false,
-      error: 'provider quota exceeded',
-      statusCode: 429,
-    });
-
-    await expect(request).rejects.toThrow();
-    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('provider quota exceeded'),
-    }));
-    expect(mockForwardedRequests).toHaveLength(0);
-  });
+  ;
 
   describe('SdkBackend terminalLogLevel', () => {
     it('preserves exact legacy behavior when terminalLogLevel is omitted (passes warning to SDK, emits all direct stderr writes, retains logger)', async () => {

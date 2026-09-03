@@ -491,7 +491,6 @@ export interface DefaultAgentConfig {
   readonly excludedTools?: readonly string[];
 }
 
-export type CompactionMode = 'stock' | 'aggressive' | 'adaptive';
 export type SessionMode = 'autopilot' | 'plan';
 export type PermissionPolicy = 'default' | 'read-only';
 
@@ -529,8 +528,6 @@ export interface SessionConfig extends SubagentLimits {
   readonly heartbeatTimeout: number; // seconds without meaningful model/tool progress
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
-  /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
-  readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
   /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */
@@ -716,8 +713,6 @@ export interface AgentConfig extends SubagentLimits {
   readonly thinkingBudget?: ThinkingBudget;
   /** Context-window tier to request (SdkBackend only). */
   readonly contextTier?: ContextTier;
-  /** Stock documented compaction is default; aggressive and adaptive are opt-in. */
-  readonly compactionMode?: CompactionMode;
   /** Session behavior mode. Defaults to autopilot. */
   readonly mode?: SessionMode;
   /** Permission policy for SDK sessions. Defaults to the backend's normal behavior. */

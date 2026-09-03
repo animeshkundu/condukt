@@ -26,7 +26,6 @@ import {
   writeOutput,
 } from './agent-node';
 import type {
-  CompactionMode,
   ContextTier,
   CustomAgentConfig,
   DefaultAgentConfig,
@@ -47,7 +46,6 @@ export interface QuorumMember {
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
-  readonly compactionMode?: CompactionMode;
   /** Replaces the quorum MCP set for this member; false disables MCP. */
   readonly mcpServers?: MCPServersOption;
   /**
@@ -84,7 +82,6 @@ export interface QuorumConfig<T, V = unknown> extends SubagentLimits {
   readonly fallback?: (error: Error) => T;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
-  readonly compactionMode?: CompactionMode;
   /** Replaces DEFAULT_MCP_SERVERS; members may override or disable it. */
   readonly mcpServers?: MCPServersOption;
   /**
@@ -124,7 +121,6 @@ async function runMember<T, V>(
     model: member.model ?? DEFAULT_REVIEWER_MODEL,
     thinkingBudget: member.thinkingBudget ?? config.thinkingBudget,
     contextTier: member.contextTier ?? config.contextTier ?? DEFAULT_CONTEXT_TIER,
-    compactionMode: member.compactionMode ?? config.compactionMode,
     mcpServers: member.mcpServers ?? config.mcpServers,
     tools: member.tools ?? config.tools,
     system: member.system,

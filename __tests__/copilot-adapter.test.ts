@@ -129,7 +129,6 @@ describe('adaptCopilotBackend', () => {
       timeout: 3600,
       heartbeatTimeout: 120,
       contextTier: 'long_context',
-      compactionMode: 'aggressive',
       mode: 'plan',
       permissionPolicy: 'read-only',
       requireMode: true,
@@ -164,7 +163,6 @@ describe('adaptCopilotBackend', () => {
     expect(createSession).toHaveBeenCalledWith(
       expect.objectContaining({
         contextTier: 'long_context',
-        compactionMode: 'aggressive',
         mode: 'plan',
         permissionPolicy: 'read-only',
         requireMode: true,

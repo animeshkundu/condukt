@@ -62,9 +62,6 @@ export function adaptCopilotBackend(backend: CopilotBackend): AgentRuntime {
         ...(config.contextTier !== undefined
           ? { contextTier: config.contextTier }
           : {}),
-        ...(config.compactionMode !== undefined
-          ? { compactionMode: config.compactionMode }
-          : {}),
         ...(config.mode !== undefined
           ? { mode: config.mode }
           : {}),

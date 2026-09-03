@@ -23,7 +23,7 @@ For an eligible transient root model-call failure, or a local session-progress t
 2. Audits persisted history and rejects ambiguous turns, pending tools, or pending external work.
 3. Disconnects the failed handle without aborting.
 4. Creates a fresh client and resumes the exact same session ID with the complete original configuration and `continuePendingWork: false`.
-5. Reapplies mode and subagent settings, audits history again, and rebaselines context/compaction accounting. If the turn completed during handoff, it settles without a continuation.
+5. Reapplies mode and subagent settings and audits history again. Native context and compaction policy remain owned by the resumed Copilot runtime. If the turn completed during handoff, it settles without a continuation.
 6. Calls `sendMessages({ messages: [], wait: false })` only while the turn remains unmatched.
 
 The progress heartbeat is based on a closed set of meaningful events. Informational, unknown, empty, duplicate, and non-increasing streaming events do not extend it. Active tools and headless external requests remain bounded by that progress deadline: novel progress refreshes it, but silence fails closed without a model continuation because replay safety is ambiguous. A progress timeout remains distinct from an authoritative provider failure in diagnostics, while safe root-turn recovery shares the same continuation count, recovery budget, and original hard deadline.
