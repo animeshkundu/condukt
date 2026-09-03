@@ -1226,6 +1226,112 @@ describe('bridge — retry node', () => {
     };
   }
 
+  it('retryNode seeds a loop validator after its downstream reset clears the inbound edge', async () => {
+    const counts: Record<string, number> = {};
+    const graph: FlowGraph = {
+      nodes: {
+        producer: countedEntry(counts, 'producer'),
+        decision: countedEntry(counts, 'decision', 'agree'),
+        validator: countedEntry(counts, 'validator', 'fail'),
+        poster: countedEntry(counts, 'poster'),
+      },
+      edges: {
+        producer: { default: 'decision' },
+        decision: { disagree: 'producer', agree: 'validator' },
+        validator: { pass: 'poster', retry: 'decision', fail: 'end' },
+        poster: { default: 'end' },
+      },
+      start: ['producer'],
+      loops: [{
+        id: 'content-loop',
+        nodes: ['producer', 'decision', 'validator'],
+        entry: 'producer',
+        decision: 'decision',
+        continueOn: 'disagree',
+        exitOn: 'agree',
+        maxRounds: 4,
+        onExhausted: 'validator',
+      }],
+      loopFallback: {
+        'validator:retry': {
+          source: 'validator',
+          action: 'retry',
+          fallbackTarget: 'end',
+          maxIterations: 1,
+        },
+      },
+    };
+    const executionId = 'retry-loop-validator';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+    expect(counts).toEqual({ producer: 1, decision: 1, validator: 1 });
+
+    await bridge.retryNode(executionId, 'validator', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({ producer: 1, decision: 1, validator: 2 });
+    const resumed = storage.readEvents(executionId)
+      .filter(event => event.type === 'run:resumed')
+      .at(-1);
+    expect(resumed).toMatchObject({ resumingFrom: ['validator'] });
+  });
+
+  it('retryNode recovers a node stranded in retrying status', async () => {
+    const counts: Record<string, number> = {};
+    const graph: FlowGraph = {
+      nodes: {
+        producer: countedEntry(counts, 'producer'),
+        validator: countedEntry(counts, 'validator'),
+      },
+      edges: {
+        producer: { default: 'validator' },
+        validator: { default: 'end' },
+      },
+      start: ['producer'],
+    };
+    const executionId = 'retry-stranded-retrying';
+
+    await bridge.launch({
+      executionId,
+      graph,
+      dir: path.join(tmpDir, executionId),
+      params: {},
+    });
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    const validator = stateRuntime.getProjection(executionId)!.graph.nodes
+      .find(node => node.id === 'validator')!;
+    await stateRuntime.handleEvent({
+      type: 'node:retrying',
+      executionId,
+      nodeId: 'validator',
+      attempt: validator.attempt + 1,
+      ts: Date.now(),
+    });
+    expect(stateRuntime.getProjection(executionId)!.graph.nodes
+      .find(node => node.id === 'validator')!.status).toBe('retrying');
+
+    await bridge.retryNode(executionId, 'validator', graph);
+    await vi.waitFor(() => expect(bridge.isRunning(executionId)).toBe(false));
+
+    expect(counts).toEqual({ producer: 1, validator: 2 });
+    const projection = stateRuntime.getProjection(executionId)!;
+    expect(projection.graph.nodes.find(node => node.id === 'validator')).toMatchObject({
+      status: 'completed',
+      attempt: 4,
+    });
+    const resumed = storage.readEvents(executionId)
+      .filter(event => event.type === 'run:resumed')
+      .at(-1);
+    expect(resumed).toMatchObject({ resumingFrom: ['validator'] });
+  });
+
   it('retryNode inside a loop does not re-run its upstream producer', async () => {
     const counts: Record<string, number> = {};
     const graph = reviewLoopGraph(counts);
