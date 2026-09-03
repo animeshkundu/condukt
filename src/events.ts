@@ -61,6 +61,8 @@ export interface NodeStartedEvent {
   readonly type: 'node:started';
   readonly executionId: string;
   readonly nodeId: string;
+  /** True when node:retrying already reserved this attempt number. */
+  readonly retry?: true;
   readonly ts: number;
 }
 

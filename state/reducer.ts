@@ -187,7 +187,7 @@ export function reduce(
         ...n,
         status: 'running',
         startedAt: event.ts,
-        attempt: n.attempt + 1,
+        attempt: event.retry ? n.attempt : n.attempt + 1,
       }));
 
     case 'node:completed': {

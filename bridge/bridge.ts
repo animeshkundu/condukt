@@ -289,12 +289,16 @@ export function createBridge(
       throw new Error(`Cannot retry node in '${node.status}' status`);
     }
 
-    // Emit retry event
+    // Reserve the next attempt before scheduling. If this is recovery from a
+    // stranded retry intent, preserve the already-reserved attempt number.
+    const retryAttempt = node.status === 'retrying'
+      ? node.attempt
+      : (node.attempt ?? 0) + 1;
     await stateRuntime.handleEvent({
       type: 'node:retrying',
       executionId,
       nodeId,
-      attempt: (node.attempt ?? 0) + 1,
+      attempt: retryAttempt,
       override,
       ts: Date.now(),
     });
@@ -329,12 +333,21 @@ export function createBridge(
 
     const controller = new AbortController();
 
+    let retriedNodeStarted = false;
+    const handleRetryState = async (event: ExecutionEvent): Promise<void> => {
+      if (event.type === 'node:started' && event.nodeId === nodeId && !retriedNodeStarted) {
+        retriedNodeStarted = true;
+        return handleState({ ...event, retry: true });
+      }
+      return handleState(event);
+    };
+
     const runOptions: RunOptions = {
       executionId,
       dir: (projection.params.__flow as { dir: string } | undefined)?.dir ?? '.',
       params: projection.params,
       runtime,
-      emitState: handleState,
+      emitState: handleRetryState,
       emitOutput: handleOutput,
       signal: controller.signal,
       resumeFrom: resumeState,
