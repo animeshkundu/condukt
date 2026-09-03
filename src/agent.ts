@@ -301,7 +301,6 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     // ?? rather than a presence check: an explicit 'default' must survive, so a consumer
     // can opt out of long context and not merely into it.
     contextTier: config.contextTier ?? DEFAULT_CONTEXT_TIER,
-    compactionMode: config.compactionMode,
     mode: config.mode ?? 'autopilot',
     ...(config.permissionPolicy !== undefined
       ? { permissionPolicy: config.permissionPolicy }

@@ -123,6 +123,7 @@
     }
   },
   "devDependencies": {
+    "@github/copilot": "1.0.82",
     "@github/copilot-sdk": "1.0.11",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",

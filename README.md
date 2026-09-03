@@ -133,7 +133,7 @@ condukt is split into sub-path exports so you only pull in what you need.
 - `'none'`: suppresses all backend diagnostic stderr writes.
 - `'error'`: emits only fatal errors and critical failures.
 - `'warning'`: emits errors and warnings (e.g. MCP parse errors, task completion failures).
-- `'info'`, `'debug'`, `'all'`: emits errors, warnings, and diagnostic info (model requests, context accounting, unknown events).
+- `'info'`, `'debug'`, `'all'`: emits errors, warnings, and diagnostic info (native context-usage events and unknown events).
 
 Structured `Logger` routing and emitted session events remain untouched across all log levels.
 

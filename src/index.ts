@@ -43,7 +43,7 @@ export type {
   NodeFn, NodeInput, NodeOutput, RetryContext, ExecutionContext,
   FlowGraph, NodeEntry, EdgeTarget, LoopFallbackEntry, LoopRegion,
   RunOptions, RunResult, ResumeState, Logger,
-  AgentRuntime, RuntimeCapabilities, AgentSession, AgentSessionHistory, AgentSessionMetadata, AgentSessionUsage, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, CompactionMode, SessionMode, PermissionPolicy, AdvisorConfig, StandInConfig, ToolRef, AgentConfig, PromptOutput,
+  AgentRuntime, RuntimeCapabilities, AgentSession, AgentSessionHistory, AgentSessionMetadata, AgentSessionUsage, SessionConfig, SessionCreationOptions, ThinkingBudget, ContextTier, SessionMode, PermissionPolicy, AdvisorConfig, StandInConfig, ToolRef, AgentConfig, PromptOutput,
   ContextAttributionEntry, SessionContextAttribution, ContextHeaviestMessage, ContextHeaviestMessages, RecomputedContextTokens,
   SessionUsageTokenDetail, SessionUsageCodeChanges, SessionUsageModelMetric, SessionUsageMetrics,
   RetryPolicy, RetryMeta, SessionRecoveryPolicy, SessionRecoveryEvent, SessionRecoveryPhase, MCPServerConfig, MCPServersOption, CustomAgentConfig, DefaultAgentConfig, SubagentLimits, SubagentRosterOption,

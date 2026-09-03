@@ -4,7 +4,6 @@ export type {
   CopilotSessionHistory,
   CopilotSessionMetadata,
   CopilotSessionUsage,
-  CompactionMode,
   SessionMode,
   PermissionPolicy,
   SessionConfig as CopilotSessionConfig,

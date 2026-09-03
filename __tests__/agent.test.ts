@@ -211,7 +211,6 @@ describe('agent factory', () => {
         model: 'gpt-5.3',
         thinkingBudget: 'high',
         contextTier: 'long_context',
-        compactionMode: undefined,
         mode: 'autopilot',
         advisor: undefined,
         standIn: undefined,
@@ -282,22 +281,6 @@ describe('agent factory', () => {
 
     expect(mockRuntime.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ advisor, standIn }),
-      expect.objectContaining({ signal: expect.anything() }),
-    );
-  });
-
-  it('forwards the selected compaction mode', async () => {
-    mockSession.send.mockImplementation(() => {
-      queueMicrotask(() => mockSession._emit('idle'));
-    });
-
-    await agent({
-      promptBuilder: () => 'test prompt',
-      compactionMode: 'aggressive',
-    })(createMockInput(), createMockContext(mockRuntime));
-
-    expect(mockRuntime.createSession).toHaveBeenCalledWith(
-      expect.objectContaining({ compactionMode: 'aggressive' }),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

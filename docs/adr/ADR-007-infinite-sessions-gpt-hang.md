@@ -31,37 +31,34 @@ Reproduced on copilot 1.0.0, 1.0.2, and 1.0.4 — not a version regression.
 
 ## Decision
 
-### 1. Enable `infiniteSessions` in SdkBackend session config
+### 1. Delegate infinite-session policy to the Copilot runtime
 
-The `@github/copilot-sdk` supports `InfiniteSessionConfig` which enables automatic context compaction:
+The original implementation supplied explicit stock/aggressive thresholds and later added an adaptive pre-dispatch controller through the experimental SDK request-handler seam. That made Condukt responsible for provider request forwarding, context admission, proactive compaction, and post-compaction verification.
 
-```typescript
-sessionConfig.infiniteSessions = {
-  enabled: true,
-  backgroundCompactionThreshold: 0.80,
-  bufferExhaustionThreshold: 0.95,
-};
-```
+The revised decision is to use the SDK's stock behavior:
 
-- Background compaction starts at 80% context utilization
-- The live settings RPC rejects over-limit dispatches at 95% until compaction completes
-- These documented stock values are the default. Callers can opt into the legacy aggressive 60%/75% thresholds or the exact-diagnostics adaptive pre-dispatch controller through `compactionMode`.
-- This allows sessions with unlimited tool calls
+- `CopilotClient` is constructed without `requestHandler`, so the native runtime owns provider HTTP/SSE/WebSocket behavior.
+- `infiniteSessions` is omitted from the session config. The pinned-runtime probe demonstrates that omission enables automatic compaction with runtime-selected thresholds in SDK 1.0.11 on runtimes 1.0.81 and 1.0.82.
+- `CompactionMode`, custom thresholds, proactive `history.compact()`, exact-token admission, and post-compaction verification are removed.
+- Native `session.compaction_start` / `session.compaction_complete` events remain observable. Condukt suspends its semantic heartbeat while compaction is active, trusts native success, and fails immediately on native `success: false`.
+- A missing completion is bounded only by the existing node hard timeout. This deliberately accepts slower detection rather than adding a second compaction controller.
 
-The runtime assigns an explicit `sessionId` and can reconnect an interrupted model turn through the same persisted conversation. See [ADR-008](./ADR-008-sdk-session-recovery.md). This is separate from compaction: recovery cannot replay an in-flight provider stream, and instead resumes the same ID and runs an empty turn over audited history.
+The runtime assigns an explicit `sessionId` and can reconnect an interrupted model turn through the same persisted conversation. See [ADR-008](./ADR-008-sdk-session-recovery.md). Recovery remains separate from compaction and cannot replay an in-flight provider stream.
 
-### Validation
+### Historical validation and replacement contract
 
-A production `SdkBackend` accumulation probe retained 300 tool results totaling 2,400,900 payload bytes in each mode. Both runs completed with `COMPACTION_COMPARISON_COMPLETE` after exact-verified compaction:
+The earlier accumulation probe retained 300 tool results totaling 2,400,900 payload bytes. Explicit stock 80%/95% and aggressive 60%/75% runs both compacted and completed. Those results remain historical evidence that native compaction supports long sessions, but no longer define Condukt-owned policy.
 
-| Mode | Peak `usage_info` tokens | Peak exact recomputation | Exact compaction reductions | Result |
-|------|--------------------------|--------------------------|-----------------------------|--------|
-| Stock 80%/95% | 748,587 | 742,094 | 742,094 → 13,575 (count 0 → 1) | 300/300 calls completed |
-| Aggressive 60%/75% | 667,602 | 661,709 | 580,355 → 13,636 and 661,709 → 13,093 (count 0 → 1 → 2) | 300/300 calls completed |
+Before removing the custom path, a native no-handler synthetic loopback probe exercised runtime 1.0.81 and current stable 1.0.82 with a 16,384-token test limit and all tools disabled. In each runtime, omitted, enabled-only, and explicit-stock variants:
 
-Each run captured token trajectories, attribution, heaviest messages, exact recomputation, usage metrics, and the successful-compaction count. Stock compacted before the historical 944,213-token failure point, so this controlled workload could not safely reproduce a context above that point. The result demonstrates compaction plus continued execution, not that a 944,213-token request was dispatched successfully.
+- emitted one automatic compaction start and completion;
+- removed about 43,000 synthetic tokens;
+- accepted an ordinary parent send submitted while the held compaction response was unresolved;
+- accepted a queued parent send during the original short hold, and safely overlapped provider requests during the strengthened two-second hold (maximum concurrency two);
+- persisted one parent message and produced one terminal assistant message;
+- completed without context failure or duplicate terminal state.
 
-Request telemetry records only the serialized body byte count and SHA-256 visible at the SDK handler seam. Serialized bytes are not token counts and may differ from the provider's final transformed request.
+This validates automatic compaction and an ordinary queued parent send for the pinned runtimes. It does not validate tool-call/result pairing across compaction, a tool-pending interleaving, or production reliability. Omission remains the production configuration contract, and future SDK/runtime upgrades must rerun the probe.
 
 ### 2. Include failed nodes in loop-back re-dispatch
 

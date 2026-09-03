@@ -4,7 +4,6 @@ import { agent } from './agent';
 import type {
   AdvisorConfig,
   StandInConfig,
-  CompactionMode,
   ContextTier,
   ExecutionContext,
   NodeEntry,
@@ -77,7 +76,6 @@ export interface AgentNodeConfig<T> extends SubagentLimits {
   readonly displayName?: string;
   readonly thinkingBudget?: ThinkingBudget;
   readonly contextTier?: ContextTier;
-  readonly compactionMode?: CompactionMode;
   readonly mode?: SessionMode;
   readonly permissionPolicy?: PermissionPolicy;
   readonly requireMode?: boolean;
@@ -460,7 +458,6 @@ export async function produce<T>(
     model: config.model,
     thinkingBudget: config.thinkingBudget,
     contextTier: config.contextTier,
-    compactionMode: config.compactionMode,
     mode: config.mode,
     permissionPolicy: config.permissionPolicy,
     requireMode: config.requireMode,
