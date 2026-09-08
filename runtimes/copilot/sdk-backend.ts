@@ -2041,9 +2041,6 @@ class SdkSession implements CopilotSession {
     onSdkEvent(sdkSession, 'model.call_failure', (e: SdkEvent) => {
       this.handleModelCallFailure(sdkSession, e);
     });
-    onSdkEvent(sdkSession, 'model.model_call_failure', (e: SdkEvent) => {
-      this.handleModelCallFailure(sdkSession, e);
-    });
 
     onSdkEvent(sdkSession, 'session.usage_info', (e: SdkEvent) => {
       if (!isActive()) return;
