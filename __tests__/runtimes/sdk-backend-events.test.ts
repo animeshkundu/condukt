@@ -2712,6 +2712,65 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
+  it('recovers a transient model call when emitted as model.model_call_failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      const recoveryHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('recovery', recoveryHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('model.model_call_failure', {
+        errorMessage: 'transient websocket drop',
+        failureKind: 'transport',
+        transport: 'websocket',
+        model: 'test-model',
+        source: 'top_level',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.abort).not.toHaveBeenCalled();
+      expect(mock.disconnect).toHaveBeenCalledOnce();
+      expect(mockResumeSession).toHaveBeenCalledWith(
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryHandler).toHaveBeenCalledWith(expect.objectContaining({
+        phase: 'continuation-sent',
+        continuation: 1,
+        sessionId: mock.sessionId,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not resume after the shared recovery budget expires', async () => {
     vi.useFakeTimers();
     try {

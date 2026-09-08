@@ -2039,53 +2039,10 @@ class SdkSession implements CopilotSession {
     // The provider request itself cannot be resumed. Eligible root failures
     // reconnect the persisted SDK session and run an empty turn over its history.
     onSdkEvent(sdkSession, 'model.call_failure', (e: SdkEvent) => {
-      if (!isActive()) return;
-      if (this.logAgentScopedFailure(e)) return;
-      const data = e.data;
-      const detail = typeof data?.errorMessage === 'string'
-        ? data.errorMessage
-        : typeof data?.errorCode === 'string'
-          ? data.errorCode
-          : 'Unknown model call failure';
-      const statusCode = numericStatusCode(data?.statusCode);
-      const errorCode = typeof data?.errorCode === 'string' ? data.errorCode : undefined;
-      const status = statusCode !== undefined ? ` (HTTP ${statusCode})` : '';
-      const error = new Error(`Model call failed${status}: ${detail}`);
-      if (statusCode !== undefined) Object.assign(error, { statusCode });
-      if (errorCode !== undefined) Object.assign(error, { errorCode });
-      Object.assign(error, {
-        transport: data?.transport,
-        failureKind: data?.failureKind,
-        durationMs: data?.durationMs,
-        errorType: data?.errorType,
-        badRequestKind: data?.badRequestKind,
-        apiEndpoint: data?.apiEndpoint,
-        providerCallId: data?.providerCallId,
-        serviceRequestId: data?.serviceRequestId,
-        requestFingerprint: data?.requestFingerprint,
-      });
-      const compactionFailed = data?.initiator === 'compaction'
-        || data?.source === 'compaction'
-        || this.activeCompactionEventId !== undefined;
-      if (!compactionFailed && isRecoverableModelCallFailure(data)) {
-        this.scheduleRecovery(sdkSession, error, data, e.id);
-        return;
-      }
-      this.fail(
-        error,
-        compactionFailed ? 'compaction.model.call_failure' : 'model.call_failure',
-        {
-          ...data,
-          ...(compactionFailed ? { requestPurpose: 'compaction' } : {}),
-          ...(this.parentUsage !== undefined
-            ? {
-                currentTokens: this.parentUsage.currentTokens,
-                tokenLimit: this.parentUsage.tokenLimit,
-                messagesLength: this.parentUsage.messagesLength,
-              }
-            : {}),
-        },
-      );
+      this.handleModelCallFailure(sdkSession, e);
+    });
+    onSdkEvent(sdkSession, 'model.model_call_failure', (e: SdkEvent) => {
+      this.handleModelCallFailure(sdkSession, e);
     });
 
     onSdkEvent(sdkSession, 'session.usage_info', (e: SdkEvent) => {
@@ -2712,6 +2669,56 @@ class SdkSession implements CopilotSession {
     void this._cleanup();
   }
 
+  private handleModelCallFailure(sdkSession: SdkSessionHandle, e: SdkEvent): void {
+    if (this._sdkSession !== sdkSession || this.aborted) return;
+    if (this.logAgentScopedFailure(e)) return;
+    const data = e.data;
+    const detail = typeof data?.errorMessage === 'string'
+      ? data.errorMessage
+      : typeof data?.errorCode === 'string'
+        ? data.errorCode
+        : 'Unknown model call failure';
+    const statusCode = numericStatusCode(data?.statusCode);
+    const errorCode = typeof data?.errorCode === 'string' ? data.errorCode : undefined;
+    const status = statusCode !== undefined ? ` (HTTP ${statusCode})` : '';
+    const error = new Error(`Model call failed${status}: ${detail}`);
+    if (statusCode !== undefined) Object.assign(error, { statusCode });
+    if (errorCode !== undefined) Object.assign(error, { errorCode });
+    Object.assign(error, {
+      transport: data?.transport,
+      failureKind: data?.failureKind,
+      durationMs: data?.durationMs,
+      errorType: data?.errorType,
+      badRequestKind: data?.badRequestKind,
+      apiEndpoint: data?.apiEndpoint,
+      providerCallId: data?.providerCallId,
+      serviceRequestId: data?.serviceRequestId,
+      requestFingerprint: data?.requestFingerprint,
+    });
+    const compactionFailed = data?.initiator === 'compaction'
+      || data?.source === 'compaction'
+      || this.activeCompactionEventId !== undefined;
+    if (!compactionFailed && isRecoverableModelCallFailure(data)) {
+      this.scheduleRecovery(sdkSession, error, data, e.id);
+      return;
+    }
+    this.fail(
+      error,
+      compactionFailed ? 'compaction.model.call_failure' : 'model.call_failure',
+      {
+        ...data,
+        ...(compactionFailed ? { requestPurpose: 'compaction' } : {}),
+        ...(this.parentUsage !== undefined
+          ? {
+              currentTokens: this.parentUsage.currentTokens,
+              tokenLimit: this.parentUsage.tokenLimit,
+              messagesLength: this.parentUsage.messagesLength,
+            }
+          : {}),
+      },
+    );
+  }
+
   private fail(err: Error, eventType: string, data?: Record<string, unknown>): void {
     if (this.aborted || this.turnSettled) return;
     this.activeCompactionEventId = undefined;
@@ -2839,6 +2846,10 @@ class SdkSession implements CopilotSession {
     try { this.writeStderr('info', `[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
     if (this.isFailureShapedEvent(e)) {
       if (this.logAgentScopedFailure(e)) return;
+      if (e.type.includes('model') && (e.type.includes('failure') || e.type.includes('call_failure'))) {
+        this.handleModelCallFailure(sdkSession, e);
+        return;
+      }
       this.fail(new Error(`Unknown SDK failure event: ${e.type}`), e.type, e.data);
     }
   }
