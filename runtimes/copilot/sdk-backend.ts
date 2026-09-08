@@ -2843,7 +2843,7 @@ class SdkSession implements CopilotSession {
     try { this.writeStderr('info', `[SdkBackend] Unknown event: ${e.type} data=${payload}\n`); } catch { /* */ }
     if (this.isFailureShapedEvent(e)) {
       if (this.logAgentScopedFailure(e)) return;
-      if (e.type.includes('model') && (e.type.includes('failure') || e.type.includes('call_failure'))) {
+      if (e.type.includes('model') && e.type.includes('failure')) {
         this.handleModelCallFailure(sdkSession, e);
         return;
       }

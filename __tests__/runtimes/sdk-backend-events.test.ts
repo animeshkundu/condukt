@@ -2771,6 +2771,25 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
+  it('fails non-recoverable errors routed via model.model_call_failure without recovery', async () => {
+    const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+    await new Promise(r => setTimeout(r, 50));
+
+    mock._emit('model.model_call_failure', {
+      errorMessage: 'authentication failed',
+      statusCode: 401,
+      source: 'top_level',
+    });
+
+    expect(mockResumeSession).not.toHaveBeenCalled();
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('Model call failed (HTTP 401): authentication failed'),
+    }));
+  });
+
   it('does not resume after the shared recovery budget expires', async () => {
     vi.useFakeTimers();
     try {
