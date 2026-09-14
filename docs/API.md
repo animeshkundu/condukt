@@ -213,6 +213,10 @@ interface RunOptions {
   readonly emitState: (event: ExecutionEvent) => Promise<void>;
   readonly emitOutput: (event: OutputEvent) => void;
   readonly signal: AbortSignal;
+  readonly costResolver?: (
+    usage: Readonly<Record<string, unknown>>,
+    model: string | undefined,
+  ) => number;  // Billing hook, defaults to nano-AIU → AIC (see docs/COST_ACCOUNTING.md)
   readonly resumeFrom?: ResumeState;
   readonly retryContexts?: Readonly<Record<string, RetryContext>>;
 }
@@ -290,7 +294,7 @@ interface ExecutionProjection {
     readonly activeNodes: readonly string[];
     readonly completedPath: readonly string[];
   };
-  readonly totalCost: number;
+  readonly totalCost: number;  // AIC consumed, incl. redos/retries (see docs/COST_ACCOUNTING.md)
   readonly startedAt?: number;
   readonly finishedAt?: number;
   readonly metadata: Record<string, unknown>;
