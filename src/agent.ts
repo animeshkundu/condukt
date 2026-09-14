@@ -478,6 +478,8 @@ async function runSessionAttempt(
         outputTokens: typeof data.outputTokens === 'number' ? data.outputTokens : undefined,
         totalTokens: typeof data.totalTokens === 'number' ? data.totalTokens : undefined,
         model: typeof data.model === 'string' ? data.model : undefined,
+        totalNanoAiu: typeof data.totalNanoAiu === 'number' ? data.totalNanoAiu : undefined,
+        duration: typeof data.duration === 'number' ? data.duration : undefined,
         ts: Date.now(),
       });
     });
@@ -502,8 +504,15 @@ async function runSessionAttempt(
     session.on('subagent_end', (name: string, data: Record<string, unknown>) => {
       const totalTokens = typeof data.totalTokens === 'number' ? data.totalTokens : undefined;
       const model = typeof data.model === 'string' ? data.model : undefined;
-      if (totalTokens !== undefined) {
-        subagentUsage.push({ totalTokens, ...(model !== undefined ? { model } : {}) });
+      const totalNanoAiu = typeof data.totalNanoAiu === 'number' ? data.totalNanoAiu : undefined;
+      const duration = typeof data.duration === 'number' ? data.duration : undefined;
+      if (totalTokens !== undefined || totalNanoAiu !== undefined) {
+        subagentUsage.push({
+          ...(totalTokens !== undefined ? { totalTokens } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(totalNanoAiu !== undefined ? { totalNanoAiu } : {}),
+          ...(duration !== undefined ? { duration } : {}),
+        });
       }
       ctx.emitOutput({
         type: 'node:subagent', executionId: ctx.executionId, nodeId: ctx.nodeId,

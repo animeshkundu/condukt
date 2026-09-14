@@ -22,6 +22,7 @@ import type {
 } from '../src/types';
 import { FlowAbortedError } from '../src/types';
 import { run, computeFrontier } from '../src/scheduler';
+import { defaultCostResolver } from '../src/cost';
 import { resolveGate } from '../src/nodes';
 import {
   createConsoleOutputRenderer,
@@ -78,6 +79,12 @@ export interface BridgeOptions {
   readonly toolOutputMode?: ToolOutputMode;
   /** Maximum redacted tool-call or tool-output preview length. Defaults to 200. */
   readonly toolPreviewMaxChars?: number;
+  /**
+   * Billing hook: maps a usage record + model to AI credits (AIC).
+   * Defaults to the SDK-reported nano-AIU charge (1 AIC = 1e9 nano-AIU).
+   * A consumer-supplied resolver replaces the default (e.g. tokens × rates).
+   */
+  readonly costResolver?: RunOptions['costResolver'];
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +109,7 @@ export function createBridge(
   const outputSink = options?.emitOutput === undefined
     ? consoleRenderer?.emitOutput
     : options.emitOutput || undefined;
+  const costResolver = options?.costResolver ?? defaultCostResolver;
 
   function handleOutput(event: OutputEvent): void {
     stateRuntime.handleOutput(event);
@@ -162,6 +170,7 @@ export function createBridge(
       emitState: handleState,
       emitOutput: handleOutput,
       signal: controller.signal,
+      costResolver,
     };
 
     // Start flow execution (non-blocking — runs in background)
@@ -241,6 +250,7 @@ export function createBridge(
       emitOutput: handleOutput,
       signal: controller.signal,
       resumeFrom: resumeState,
+      costResolver,
     };
 
     const promise = (async () => {
@@ -352,6 +362,7 @@ export function createBridge(
       signal: controller.signal,
       resumeFrom: resumeState,
       retryContexts: { [nodeId]: retryContext },
+      costResolver,
     };
 
     const promise = (async () => {

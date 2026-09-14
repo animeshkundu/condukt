@@ -308,6 +308,10 @@ export interface NodeUsageEvent {
   readonly outputTokens?: number;
   readonly totalTokens?: number;
   readonly model?: string;
+  /** Billed cost for this request in nano AI units (1 AIC = 1e9 nano-AIU). */
+  readonly totalNanoAiu?: number;
+  /** Duration of the API call in milliseconds. */
+  readonly duration?: number;
   readonly ts: number;
 }
 
