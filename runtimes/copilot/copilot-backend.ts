@@ -104,6 +104,13 @@ export interface UsageData {
   readonly outputTokens?: number;
   readonly totalTokens?: number;
   readonly model?: string;
+  /**
+   * Billed cost for this request in nano AI units (1 AIC = 1e9 nano-AIU),
+   * from the SDK `copilotUsage.totalNanoAiu` field when reported.
+   */
+  readonly totalNanoAiu?: number;
+  /** Duration of the API call in milliseconds, when reported. */
+  readonly duration?: number;
   readonly [key: string]: unknown;
 }
 

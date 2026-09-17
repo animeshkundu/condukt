@@ -29,6 +29,7 @@ export { createHmrSingleton } from './hmr-singleton';
 export { setupOnce, clearSetupCache } from './setup-once';
 export { dryRun } from './dry-run';
 export type { DryRunOptions, DryRunResult } from './dry-run';
+export { NANO_AIU_PER_AIC, nanoAiuToAic, defaultCostResolver } from './cost';
 export { createConsoleOutputRenderer, redactConsoleOutput } from './console-output';
 export type {
   ConsoleOutputOptions,
