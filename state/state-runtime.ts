@@ -205,10 +205,17 @@ export class StateRuntime {
       if (events.length > 0) {
         projection = replayEvents(id, events);
       } else {
-        // Fallback to disk projection if event log is empty (legacy data)
+        // Fallback to disk projection if event log is empty (legacy data).
+        // Pre-upgrade disk projections lack costByProvenance: backfill zeros
+        // so consumers always see the breakdown field.
         const diskProjection = this.storage.readProjection(id);
         if (!diskProjection) continue;
-        projection = diskProjection;
+        projection = diskProjection.costByProvenance === undefined
+          ? {
+              ...diskProjection,
+              costByProvenance: { main: 0, subagent: 0, advisor: 0, stand_in: 0 },
+            }
+          : diskProjection;
       }
 
       if (projection.status === 'running') {

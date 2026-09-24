@@ -477,6 +477,54 @@ describe('agent factory', () => {
     expect(result.metadata).toEqual({ usage });
   });
 
+  it('attributes tool_usage events to advisor/stand_in metadata with provenance output', async () => {
+    const nodeFn = agent({ promptBuilder: () => 'go' });
+    const ctx = createMockContext(mockRuntime);
+    const advisorRecord = { totalNanoAiu: 2_500_000_000, model: 'advisor-model' };
+    const standInRecord = { totalNanoAiu: 1_000_000_000 };
+
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => {
+        mockSession._emit('tool_usage', {
+          tool: 'advisor',
+          model: 'advisor-model',
+          usages: [advisorRecord],
+        });
+        mockSession._emit('tool_usage', {
+          tool: 'stand_in',
+          usages: [standInRecord],
+        });
+        // Malformed payloads are ignored, never billed.
+        mockSession._emit('tool_usage', { tool: 'advisor', usages: 'not-an-array' });
+        mockSession._emit('idle');
+      });
+    });
+
+    const result = await nodeFn(createMockInput(), ctx);
+
+    expect(result.metadata).toEqual({
+      advisorUsage: [advisorRecord],
+      // stand_in records without a model keep no model rather than
+      // inheriting the lead model (attribution must not mislead).
+      standInUsage: [standInRecord],
+    });
+    expect(ctx.emitOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'node:usage',
+        model: 'advisor-model',
+        totalNanoAiu: 2_500_000_000,
+        provenance: 'advisor',
+      }),
+    );
+    expect(ctx.emitOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'node:usage',
+        totalNanoAiu: 1_000_000_000,
+        provenance: 'stand_in',
+      }),
+    );
+  });
+
   it('builds and sends prompt from promptBuilder', async () => {
     const config: AgentConfig = {
       objective: 'test',

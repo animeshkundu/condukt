@@ -30,6 +30,7 @@ import type {
   GraphNodeSkeleton,
   GraphEdgeSkeleton,
   ExecutionEvent,
+  CostProvenance,
   RouteExhaustion,
 } from './events';
 
@@ -707,13 +708,15 @@ export const _resetLoopRegionForTesting = resetLoopRegion;
 
 interface UsageAttribution {
   readonly usage: Readonly<Record<string, unknown>>;
-  readonly provenance: 'main' | 'subagent';
+  readonly provenance: CostProvenance;
 }
 
 interface ErrorWithNodeUsage extends Error {
   readonly nodeUsage?: {
     readonly attemptUsage?: readonly unknown[];
     readonly subagentUsage?: readonly unknown[];
+    readonly advisorUsage?: readonly unknown[];
+    readonly standInUsage?: readonly unknown[];
   };
 }
 
@@ -751,6 +754,8 @@ function usageAttributions(
     });
   }
   appendUsageRecords(usages, metadata.subagentUsage, 'subagent');
+  appendUsageRecords(usages, metadata.advisorUsage, 'advisor');
+  appendUsageRecords(usages, metadata.standInUsage, 'stand_in');
   return usages;
 }
 
@@ -761,6 +766,8 @@ function errorUsageAttributions(error: unknown): readonly UsageAttribution[] {
   const usages: UsageAttribution[] = [];
   appendUsageRecords(usages, nodeUsage.attemptUsage, 'main');
   appendUsageRecords(usages, nodeUsage.subagentUsage, 'subagent');
+  appendUsageRecords(usages, nodeUsage.advisorUsage, 'advisor');
+  appendUsageRecords(usages, nodeUsage.standInUsage, 'stand_in');
   return usages;
 }
 
@@ -780,9 +787,12 @@ async function recordUsageCosts(
     const reportedModel = typeof item.usage.model === 'string'
       ? item.usage.model
       : undefined;
-    const model = item.provenance === 'subagent'
-      ? reportedModel ?? 'unknown'
-      : reportedModel ?? entry.model ?? 'unknown';
+    // Only main-session records fall back to the node's configured model:
+    // advisor / stand_in records carry their own serving model (stamped at
+    // capture), and attributing them to the lead model would mislead.
+    const model = item.provenance === 'main'
+      ? reportedModel ?? entry.model ?? 'unknown'
+      : reportedModel ?? 'unknown';
     const usageWithProvenance: Readonly<Record<string, unknown>> = {
       ...item.usage,
       provenance: item.provenance,

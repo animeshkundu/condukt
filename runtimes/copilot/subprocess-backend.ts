@@ -13,6 +13,7 @@ import type {
   ContentBlock,
   PermissionInfo,
 } from './copilot-backend';
+import type { ToolUsageData } from '../../src/types';
 import { killProcessTree } from './process-killer';
 import { LIFECYCLE_EVENT_TYPES } from './lifecycle-events';
 
@@ -484,6 +485,7 @@ class SubprocessSession implements CopilotSession {
   // Rich events: accepted but never fired by SubprocessBackend.
   on(event: 'intent', handler: (intent: string) => void): void;
   on(event: 'usage', handler: (data: UsageData) => void): void;
+  on(event: 'tool_usage', handler: (data: ToolUsageData) => void): void;
   on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<ContentBlock>, callId?: string) => void): void;
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;

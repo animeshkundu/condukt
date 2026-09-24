@@ -34,6 +34,7 @@ import type {
   SessionRecoveryEvent,
   SessionRecoveryPolicy,
   StandInConfig,
+  ToolUsageData,
 } from '../../src/types';
 import {
   DEFAULT_SESSION_RECOVERY_POLICY,
@@ -482,8 +483,15 @@ async function runOneShotSession(
   contextTier: StandInConfig['contextTier'] | AdvisorConfig['contextTier'],
   system: string,
   prompt: string,
-): Promise<string> {
+): Promise<OneShotResult> {
   let session: SdkSessionHandle | undefined;
+  // Per-request billed charges from this side session. The parent session's
+  // `assistant.usage` listener never sees one-shot spend, so without this
+  // capture the advisor / stand_in cost would be invisible to AIC accounting.
+  // `assistant.usage` is ephemeral (absent from getEvents()), therefore it
+  // must be subscribed live — the SDK delivers events to `on` handlers
+  // registered before sendAndWait while waiting.
+  const usages: UsageData[] = [];
   try {
     const sessionConfig: CopilotSdkSessionConfig = {
       model,
@@ -501,12 +509,15 @@ async function runOneShotSession(
       coauthorEnabled: false,
     };
     session = await client.createSession(sessionConfig);
+    onSdkEvent(session, 'assistant.usage', (event) => {
+      if (event.data) usages.push({ ...event.data, model: model });
+    });
     const response = await session.sendAndWait({ prompt }, 10 * 60 * 1000);
     const content = response?.data?.content;
     if (typeof content !== 'string' || content.length === 0) {
       throw new Error('no response text');
     }
-    return content;
+    return { text: content, usages };
   } finally {
     if (session !== undefined) {
       try { await boundedCleanup(session.abort()); } catch { /* Cleanup must not mask output */ }
@@ -515,12 +526,18 @@ async function runOneShotSession(
   }
 }
 
+/** Text plus billed usage captured from one advisor / stand_in side session. */
+interface OneShotResult {
+  readonly text: string;
+  readonly usages: readonly UsageData[];
+}
+
 async function runAdvisor(
   client: SdkClient,
   callingSession: SdkSessionHandle,
   config: AdvisorConfig,
   args: AdvisorToolArgs,
-): Promise<string> {
+): Promise<OneShotResult> {
   try {
     const events = await callingSession.getEvents();
     const transcript = boundedTranscript(events, transcriptBudget(config.maxTranscriptChars));
@@ -536,7 +553,8 @@ async function runAdvisor(
       advisorPrompt(args.context, transcript),
     );
   } catch (error) {
-    return advisorError(error);
+    // Failed advisor calls bill nothing, but the caller still needs the text.
+    return { text: advisorError(error), usages: [] };
   }
 }
 
@@ -544,6 +562,7 @@ function advisorTool(
   client: SdkClient,
   config: AdvisorConfig,
   callingSession: () => SdkSessionHandle | undefined,
+  onToolUsage: (data: ToolUsageData) => void,
 ): CopilotSdkTool<AdvisorToolArgs> {
   return {
     name: 'advisor',
@@ -562,9 +581,10 @@ function advisorTool(
     defer: 'never',
     handler: async (args) => {
       const session = callingSession();
-      return session === undefined
-        ? `${ADVISOR_ERROR_PREFIX}: calling session is not ready`
-        : runAdvisor(client, session, config, args);
+      if (session === undefined) return `${ADVISOR_ERROR_PREFIX}: calling session is not ready`;
+      const result = await runAdvisor(client, session, config, args);
+      onToolUsage({ tool: 'advisor', model: config.model, usages: result.usages });
+      return result.text;
     },
   };
 }
@@ -806,9 +826,9 @@ async function standInRound(
   system: string,
   prompt: string,
   optionIds: readonly string[],
-): Promise<readonly StandInRoundResult[]> {
+): Promise<StandInRoundOutcome> {
   const settled = await Promise.allSettled(models.map(async (model, index) => {
-    const raw = await runOneShotSession(
+    const oneShot = await runOneShotSession(
       client,
       model,
       config.thinkingBudget,
@@ -817,12 +837,27 @@ async function standInRound(
       prompt,
     );
     return {
-      model,
-      member: `member-${index + 1}`,
-      ...parseStandInBallot(raw, optionIds),
+      result: {
+        model,
+        member: `member-${index + 1}`,
+        ...parseStandInBallot(oneShot.text, optionIds),
+      },
+      usages: oneShot.usages,
     };
   }));
-  return settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+  const succeeded = settled.flatMap((outcome) => outcome.status === 'fulfilled' ? [outcome.value] : []);
+  return {
+    results: succeeded.map((entry) => entry.result),
+    // Successful members bill even when sibling members fail: usage is
+    // collected per member, independent of the round verdict.
+    usages: succeeded.flatMap((entry) => entry.usages),
+  };
+}
+
+/** One stand_in round: surviving ballots plus every billed usage record. */
+interface StandInRoundOutcome {
+  readonly results: readonly StandInRoundResult[];
+  readonly usages: readonly UsageData[];
 }
 
 async function runStandIn(
@@ -830,30 +865,40 @@ async function runStandIn(
   sourceModel: string,
   config: StandInConfig,
   args: StandInToolArgs,
-): Promise<string> {
+): Promise<OneShotResult> {
+  // Successfully billed one-shot calls accumulate here so a later-round
+  // failure still reports their usage.
+  const billed: UsageData[] = [];
   try {
     const issue = standInInputIssue(args);
-    if (issue !== undefined) return `${STAND_IN_ERROR_PREFIX}: ${issue}`;
+    if (issue !== undefined) return { text: `${STAND_IN_ERROR_PREFIX}: ${issue}`, usages: [] };
     const models = standInMembers(config, sourceModel);
     const system = config.system === undefined
       ? DEFAULT_STAND_IN_SYSTEM_MESSAGE
       : `${DEFAULT_STAND_IN_SYSTEM_MESSAGE}\n\n${config.system}`;
     const optionIds = args.options.map((option) => option.id);
     const blind = await standInRound(client, models, config, system, blindStandInPrompt(args), optionIds);
-    if (blind.length < 2) throw new Error('fewer than two blind-round members succeeded');
+    // Blind-round members bill even when a later round fails: preserve their
+    // usage on every exit path below.
+    billed.push(...blind.usages);
+    if (blind.results.length < 2) throw new Error('fewer than two blind-round members succeeded');
     const informed = await standInRound(
       client,
-      blind.map((member) => member.model),
+      blind.results.map((member) => member.model),
       config,
       system,
-      informedStandInPrompt(args, blind),
+      informedStandInPrompt(args, blind.results),
       optionIds,
     );
-    if (informed.length < 2) throw new Error('fewer than two informed-round members succeeded');
-    const ballots = informed.map(({ model: _model, ...ballot }) => ballot);
-    return JSON.stringify(standInVerdict(ballots));
+    billed.push(...informed.usages);
+    if (informed.results.length < 2) throw new Error('fewer than two informed-round members succeeded');
+    const ballots = informed.results.map(({ model: _model, ...ballot }) => ballot);
+    return {
+      text: JSON.stringify(standInVerdict(ballots)),
+      usages: billed,
+    };
   } catch (error) {
-    return standInError(error);
+    return { text: standInError(error), usages: billed };
   }
 }
 
@@ -861,6 +906,7 @@ function standInTool(
   client: SdkClient,
   sourceModel: string,
   config: StandInConfig,
+  onToolUsage: (data: ToolUsageData) => void,
 ): CopilotSdkTool<StandInToolArgs> {
   return {
     name: 'stand_in',
@@ -890,7 +936,11 @@ function standInTool(
     },
     skipPermission: true,
     defer: 'never',
-    handler: async (args) => runStandIn(client, sourceModel, config, args),
+    handler: async (args) => {
+      const result = await runStandIn(client, sourceModel, config, args);
+      onToolUsage({ tool: 'stand_in', usages: result.usages });
+      return result.text;
+    },
   };
 }
 
@@ -1668,10 +1718,10 @@ class SdkSession implements CopilotSession {
       const tools = [
         ...(this.config.advisor === undefined
           ? []
-          : [advisorTool(owner, this.config.advisor, () => this._sdkSession ?? undefined)]),
+          : [advisorTool(owner, this.config.advisor, () => this._sdkSession ?? undefined, (data) => this.emit('tool_usage', data))]),
         ...(this.config.standIn === undefined
           ? []
-          : [standInTool(owner, this.config.model, this.config.standIn)]),
+          : [standInTool(owner, this.config.model, this.config.standIn, (data) => this.emit('tool_usage', data))]),
       ];
       return {
         sessionId: configuredSessionId,
@@ -2588,6 +2638,7 @@ class SdkSession implements CopilotSession {
   on(event: 'reasoning', handler: (text: string) => void): void;
   on(event: 'intent', handler: (intent: string) => void): void;
   on(event: 'usage', handler: (data: UsageData) => void): void;
+  on(event: 'tool_usage', handler: (data: ToolUsageData) => void): void;
   on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<ContentBlock>, callId?: string) => void): void;
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;

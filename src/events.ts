@@ -184,13 +184,21 @@ export interface ArtifactWrittenEvent {
   readonly ts: number;
 }
 
+/**
+ * Where billed usage originated. `main` is the node's own session turns;
+ * `subagent` is SDK sub-agent turns; `advisor` / `stand_in` are one-shot
+ * tool sessions spawned by the advisor / stand_in tools (their `assistant.usage`
+ * charges are captured and attributed here instead of being dropped).
+ */
+export type CostProvenance = 'main' | 'subagent' | 'advisor' | 'stand_in';
+
 export interface CostRecordedEvent {
   readonly type: 'cost:recorded';
   readonly executionId: string;
   readonly nodeId: string;
   readonly tokens: number;
   readonly model: string;
-  readonly provenance?: 'main' | 'subagent';
+  readonly provenance?: CostProvenance;
   readonly cost: number;
   readonly ts: number;
 }
@@ -312,6 +320,8 @@ export interface NodeUsageEvent {
   readonly totalNanoAiu?: number;
   /** Duration of the API call in milliseconds. */
   readonly duration?: number;
+  /** Origin of this usage record (advisor/stand_in tool sessions included). */
+  readonly provenance?: CostProvenance;
   readonly ts: number;
 }
 

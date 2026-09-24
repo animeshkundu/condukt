@@ -28,10 +28,26 @@ The Copilot SDK reports each request's billed charge as nano AI units
 SDK assistant.usage (tokens, model, totalNanoAiu, duration)
   → agent.ts forwards totalNanoAiu/duration into node:usage output
     + metadata.usage / attemptUsage[] / subagentUsage[]
+    + metadata.advisorUsage[] / standInUsage[] (see below)
   → scheduler.recordUsageCosts emits one cost:recorded per usage record
-    (main + subagent provenance, success AND failure paths)
-  → reducer folds cost into projection.totalCost (persisted, replayable)
+    (main + subagent + advisor + stand_in provenance, success AND failure paths)
+  → reducer folds cost into projection.totalCost + projection.costByProvenance
+    (persisted, replayable)
 ```
+
+### Advisor / stand_in tool sessions
+
+The `advisor` and `stand_in` tools run as separate one-shot SDK sessions
+whose `assistant.usage` events never reach the parent session's listener.
+`runOneShotSession` therefore subscribes to the side session live (usage
+events are ephemeral and absent from `getEvents()`) and returns the captured
+records alongside the text. The tool handlers forward them to the parent
+`CopilotSession` as a `tool_usage` event; `agent.ts` attributes them to
+`metadata.advisorUsage` / `metadata.standInUsage` with their own serving
+model (never the lead model), and the scheduler bills them under the
+`advisor` / `stand_in` provenance. Failed tool calls report zero records but
+still emit, so accounting stays complete; per-member records survive sibling
+failures and later-round failures.
 
 `node:reset`, `route:resolved`, `node:retrying`, and resume never zero
 `totalCost`: the event log is append-only, so **redos, retries, loop

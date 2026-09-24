@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import type {
   NodeFn, NodeEntry, RunOptions, FlowGraph, ResumeState,
   AgentRuntime, NodeInput, ExecutionContext, AgentSession,
-  NodeOutput,
+  NodeOutput, ExecutionProjection,
 } from '../src/types';
 import { FlowAbortedError, FlowValidationError } from '../src/types';
 import type { ExecutionEvent, OutputEvent } from '../src/events';
@@ -723,12 +723,14 @@ describe('state-runtime branches', () => {
   // SR7: recoverOnStartup with empty event log + disk projection (legacy path, line ~116)
   it('recoverOnStartup uses disk projection when event log is empty', () => {
     const storage = new MemoryStorage();
-    // Only write projection, no events (legacy scenario)
+    // Only write projection, no events (legacy scenario). The stored shape
+    // predates costByProvenance, so it is cast to simulate legacy disk data;
+    // recovery must backfill a zeroed breakdown.
     storage.writeProjection('legacy', {
       id: 'legacy', flowId: 'old', status: 'completed',
       params: {}, graph: { nodes: [], edges: [], activeNodes: [], completedPath: [] },
       totalCost: 0, startedAt: 1000, finishedAt: 2000, metadata: {},
-    });
+    } as unknown as ExecutionProjection);
 
     const runtime = new StateRuntime(storage);
     runtime.recoverOnStartup();
@@ -736,6 +738,7 @@ describe('state-runtime branches', () => {
     const proj = runtime.getProjection('legacy');
     expect(proj).not.toBeNull();
     expect(proj!.status).toBe('completed');
+    expect(proj!.costByProvenance).toEqual({ main: 0, subagent: 0, advisor: 0, stand_in: 0 });
   });
 
   // SR8: concurrent handleEvent serialization

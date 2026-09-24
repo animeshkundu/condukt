@@ -23,6 +23,7 @@ function makeProjection(overrides: Partial<ExecutionProjection> = {}): Execution
       completedPath: ['n1'],
     },
     totalCost: 0,
+    costByProvenance: { main: 0, subagent: 0, advisor: 0, stand_in: 0 },
     metadata: {},
     ...overrides,
   };

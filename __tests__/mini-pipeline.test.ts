@@ -33,7 +33,9 @@ function mockProjection(nodeCount: number, statuses?: Record<string, string>): E
   return {
     id: 'test', flowId: '', status: 'running', params: {},
     graph: { nodes, edges, activeNodes: [], completedPath: [] },
-    totalCost: 0, metadata: {},
+    totalCost: 0,
+    costByProvenance: { main: 0, subagent: 0, advisor: 0, stand_in: 0 },
+    metadata: {},
   };
 }
 

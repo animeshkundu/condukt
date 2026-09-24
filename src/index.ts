@@ -48,7 +48,7 @@ export type {
   ContextAttributionEntry, SessionContextAttribution, ContextHeaviestMessage, ContextHeaviestMessages, RecomputedContextTokens,
   SessionUsageTokenDetail, SessionUsageCodeChanges, SessionUsageModelMetric, SessionUsageMetrics,
   RetryPolicy, RetryMeta, SessionRecoveryPolicy, SessionRecoveryEvent, SessionRecoveryPhase, MCPServerConfig, MCPServersOption, CustomAgentConfig, DefaultAgentConfig, SubagentLimits, SubagentRosterOption,
-  ExecutionProjection, ProjectionNode, ProjectionEdge,
+  ExecutionProjection, ProjectionNode, ProjectionEdge, CostByProvenance, ToolUsageData,
   StorageEngine, OutputPage,
   ExecutionId,
 } from './types';
@@ -78,7 +78,7 @@ export type {
   NodeStartedEvent, NodeCompletedEvent, NodeFailedEvent,
   NodeKilledEvent, NodeSkippedEvent, NodeGatedEvent,
   GateResolvedEvent, NodeRetryingEvent, EdgeTraversedEvent,
-  ArtifactWrittenEvent, CostRecordedEvent, MetadataEvent,
+  ArtifactWrittenEvent, CostRecordedEvent, CostProvenance, MetadataEvent,
   NodeResetEvent,
   NodePromptEvent, NodeOutputEvent, NodeToolEvent, NodeReasoningEvent, NodeRecoveryEvent,
   GraphNodeSkeleton, GraphEdgeSkeleton,

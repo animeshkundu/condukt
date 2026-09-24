@@ -28,6 +28,7 @@ export function createEmptyProjection(id: string, flowId?: string): ExecutionPro
       completedPath: [],
     },
     totalCost: 0,
+    costByProvenance: { main: 0, subagent: 0, advisor: 0, stand_in: 0 },
     metadata: {},
   };
 }
@@ -299,11 +300,22 @@ export function reduce(
       // Artifacts are stored separately — no projection change
       return state;
 
-    case 'cost:recorded':
+    case 'cost:recorded': {
+      // Pre-provenance event logs omit provenance: attribute them to main,
+      // matching the pre-change behavior where every record was main-session.
+      // The `??` guards tolerate pre-upgrade in-memory projections that lack
+      // the breakdown field.
+      const provenance = event.provenance ?? 'main';
+      const breakdown = state.costByProvenance ?? { main: 0, subagent: 0, advisor: 0, stand_in: 0 };
       return {
         ...state,
         totalCost: state.totalCost + event.cost,
+        costByProvenance: {
+          ...breakdown,
+          [provenance]: (breakdown[provenance] ?? 0) + event.cost,
+        },
       };
+    }
 
     case 'metadata': {
       // CR1: array merge semantics — arrays accumulate, scalars overwrite
