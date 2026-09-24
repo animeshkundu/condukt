@@ -15,6 +15,7 @@ import type {
   SessionRecoveryEvent,
   SessionRecoveryPolicy,
   StandInConfig,
+  ToolUsageData,
 } from '../../src/types';
 import type { SubagentLimits, SubagentRosterOption } from './subagents';
 
@@ -275,6 +276,8 @@ export interface CopilotSession {
   on(event: 'intent', handler: (intent: string) => void): void;
   /** Token usage / cost metrics */
   on(event: 'usage', handler: (data: UsageData) => void): void;
+  /** Billed usage from advisor / stand_in one-shot tool sessions */
+  on(event: 'tool_usage', handler: (data: ToolUsageData) => void): void;
   /** Structured tool completion with content blocks */
   on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<ContentBlock>, callId?: string) => void): void;
   /** Sub-agent started */

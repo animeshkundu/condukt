@@ -154,6 +154,10 @@ interface AttemptUsage {
   readonly usage?: Record<string, unknown>;
   readonly rootUsage?: readonly Record<string, unknown>[];
   readonly subagentUsage: readonly Record<string, unknown>[];
+  /** Billed usage from advisor one-shot tool sessions in this attempt. */
+  readonly advisorUsage: readonly Record<string, unknown>[];
+  /** Billed usage from stand_in one-shot tool sessions in this attempt. */
+  readonly standInUsage: readonly Record<string, unknown>[];
 }
 
 interface ErrorWithAttemptUsage extends Error {
@@ -163,6 +167,8 @@ interface ErrorWithAttemptUsage extends Error {
 interface NodeUsageMetadata {
   readonly attemptUsage: readonly Record<string, unknown>[];
   readonly subagentUsage: readonly Record<string, unknown>[];
+  readonly advisorUsage: readonly Record<string, unknown>[];
+  readonly standInUsage: readonly Record<string, unknown>[];
 }
 
 interface ErrorWithNodeUsage extends Error {
@@ -350,8 +356,10 @@ function attemptUsage(
   usage: Record<string, unknown> | undefined,
   rootUsage: readonly Record<string, unknown>[],
   subagentUsage: readonly Record<string, unknown>[],
+  advisorUsage: readonly Record<string, unknown>[] = [],
+  standInUsage: readonly Record<string, unknown>[] = [],
 ): AttemptUsage {
-  return { usage, rootUsage: [...rootUsage], subagentUsage: [...subagentUsage] };
+  return { usage, rootUsage: [...rootUsage], subagentUsage: [...subagentUsage], advisorUsage: [...advisorUsage], standInUsage: [...standInUsage] };
 }
 
 function withAttemptUsage(error: unknown, usage: AttemptUsage): ErrorWithAttemptUsage {
@@ -364,12 +372,16 @@ function withNodeUsage(
   error: Error,
   attemptUsage: readonly Record<string, unknown>[],
   subagentUsage: readonly Record<string, unknown>[],
+  advisorUsage: readonly Record<string, unknown>[] = [],
+  standInUsage: readonly Record<string, unknown>[] = [],
 ): ErrorWithNodeUsage {
-  if (attemptUsage.length === 0 && subagentUsage.length === 0) return error;
+  if (attemptUsage.length === 0 && subagentUsage.length === 0 && advisorUsage.length === 0 && standInUsage.length === 0) return error;
   Object.assign(error, {
     nodeUsage: {
       attemptUsage: [...attemptUsage],
       subagentUsage: [...subagentUsage],
+      advisorUsage: [...advisorUsage],
+      standInUsage: [...standInUsage],
     },
   });
   return error as ErrorWithNodeUsage;
@@ -387,6 +399,11 @@ async function runSessionAttempt(
   const rootUsage: Record<string, unknown>[] = [];
   const rootUsageKeys = new Set<string>();
   const subagentUsage: Record<string, unknown>[] = [];
+  // Billed spend from advisor / stand_in one-shot tool sessions, forwarded by
+  // the backend via the 'tool_usage' event (kept separate from rootUsage so
+  // cost accounting can attribute provenance instead of billing them as main).
+  const advisorUsage: Record<string, unknown>[] = [];
+  const standInUsage: Record<string, unknown>[] = [];
 
   try {
     if (
@@ -483,6 +500,30 @@ async function runSessionAttempt(
         ts: Date.now(),
       });
     });
+    session.on('tool_usage', (data) => {
+      const records = Array.isArray(data.usages) ? data.usages : [];
+      const provenance = data.tool === 'stand_in' ? 'stand_in' : 'advisor';
+      const target = provenance === 'stand_in' ? standInUsage : advisorUsage;
+      for (const record of records) {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+        const stamped: Record<string, unknown> = { ...(record as Record<string, unknown>) };
+        if (typeof stamped.model !== 'string' && typeof data.model === 'string') {
+          stamped.model = data.model;
+        }
+        target.push(stamped);
+        ctx.emitOutput({
+          type: 'node:usage', executionId: ctx.executionId, nodeId: ctx.nodeId,
+          inputTokens: typeof stamped.inputTokens === 'number' ? stamped.inputTokens : undefined,
+          outputTokens: typeof stamped.outputTokens === 'number' ? stamped.outputTokens : undefined,
+          totalTokens: typeof stamped.totalTokens === 'number' ? stamped.totalTokens : undefined,
+          model: typeof stamped.model === 'string' ? stamped.model : undefined,
+          totalNanoAiu: typeof stamped.totalNanoAiu === 'number' ? stamped.totalNanoAiu : undefined,
+          duration: typeof stamped.duration === 'number' ? stamped.duration : undefined,
+          provenance,
+          ts: Date.now(),
+        });
+      }
+    });
     session.on('tool_complete_rich', (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => {
       const toolData = contentBlocksToToolData(contents as ReadonlyArray<ContentBlock>);
       if (toolData) {
@@ -578,14 +619,14 @@ async function runSessionAttempt(
       });
     });
 
-    return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
+    return { outputLines, usage: lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage };
   } catch (error) {
     if (!ctx.signal.aborted && config.output && wasCompletedBeforeCrash(
       input.dir, config.output, outputLines, config.completionIndicators,
     )) {
-      return { outputLines, usage: lastUsage, rootUsage, subagentUsage };
+      return { outputLines, usage: lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage };
     }
-    throw withAttemptUsage(error, attemptUsage(lastUsage, rootUsage, subagentUsage));
+    throw withAttemptUsage(error, attemptUsage(lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage));
   } finally {
     if (session) {
       try {
@@ -646,6 +687,8 @@ export function agent(config: AgentConfig): NodeFn {
       let lastFailure: Error | undefined;
       const failedUsage: Record<string, unknown>[] = [];
       const failedSubagentUsage: Record<string, unknown>[] = [];
+      const failedAdvisorUsage: Record<string, unknown>[] = [];
+      const failedStandInUsage: Record<string, unknown>[] = [];
 
       while (attempt <= maxAttempts) {
         if (ctx.signal.aborted) {
@@ -653,6 +696,8 @@ export function agent(config: AgentConfig): NodeFn {
             new FlowAbortedError('Aborted before session attempt'),
             failedUsage,
             failedSubagentUsage,
+            failedAdvisorUsage,
+            failedStandInUsage,
           );
         }
         const remainingMs = retryDeadlineMs === undefined
@@ -663,6 +708,8 @@ export function agent(config: AgentConfig): NodeFn {
             lastFailure ?? new Error('Retry deadline exhausted'),
             failedUsage,
             failedSubagentUsage,
+            failedAdvisorUsage,
+            failedStandInUsage,
           );
         }
 
@@ -701,11 +748,15 @@ export function agent(config: AgentConfig): NodeFn {
             failedUsage.push(consumed.usage);
           }
           if (consumed) failedSubagentUsage.push(...consumed.subagentUsage);
+          if (consumed?.advisorUsage) failedAdvisorUsage.push(...consumed.advisorUsage);
+          if (consumed?.standInUsage) failedStandInUsage.push(...consumed.standInUsage);
           if (ctx.signal.aborted) {
             throw withNodeUsage(
               new FlowAbortedError('Aborted during session attempt'),
               failedUsage,
               failedSubagentUsage,
+              failedAdvisorUsage,
+              failedStandInUsage,
             );
           }
           if (budgetController.signal.aborted) {
@@ -717,16 +768,18 @@ export function agent(config: AgentConfig): NodeFn {
               ),
               failedUsage,
               failedSubagentUsage,
+              failedAdvisorUsage,
+              failedStandInUsage,
             );
           }
           if (currentError instanceof FlowAbortedError) {
-            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage, failedAdvisorUsage, failedStandInUsage);
           }
           if (
             'suppressFreshSessionRetry' in currentError
             && currentError.suppressFreshSessionRetry === true
           ) {
-            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage, failedAdvisorUsage, failedStandInUsage);
           }
           lastFailure = currentError;
 
@@ -737,18 +790,18 @@ export function agent(config: AgentConfig): NodeFn {
             try {
               retriable = policy.isRetriable(currentError, meta);
             } catch {
-              throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+              throw withNodeUsage(currentError, failedUsage, failedSubagentUsage, failedAdvisorUsage, failedStandInUsage);
             }
           } else {
             retriable = isRetriableModelError(currentError, meta);
           }
           if (!retriable || attempt >= maxAttempts) {
-            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage, failedAdvisorUsage, failedStandInUsage);
           }
 
           const delayMs = retryDelayMs(policy, attempt);
           if (retryDeadlineMs !== undefined && Date.now() + delayMs >= retryDeadlineMs) {
-            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage);
+            throw withNodeUsage(currentError, failedUsage, failedSubagentUsage, failedAdvisorUsage, failedStandInUsage);
           }
 
           attempt += 1;
@@ -771,6 +824,8 @@ export function agent(config: AgentConfig): NodeFn {
               normalizedRetryError,
               failedUsage,
               failedSubagentUsage,
+              failedAdvisorUsage,
+              failedStandInUsage,
             );
           }
         } finally {
@@ -800,6 +855,8 @@ export function agent(config: AgentConfig): NodeFn {
             ),
             failedUsage,
             failedSubagentUsage,
+            failedAdvisorUsage,
+            failedStandInUsage,
           );
         }
       }
@@ -813,9 +870,13 @@ export function agent(config: AgentConfig): NodeFn {
         : result.usage ? [result.usage] : [];
       const usage = [...failedUsage, ...currentUsage];
       const subagentUsage = [...failedSubagentUsage, ...result.subagentUsage];
+      const advisorUsage = [...failedAdvisorUsage, ...result.advisorUsage];
+      const standInUsage = [...failedStandInUsage, ...result.standInUsage];
       if (usage.length > 0) metadata.usage = usage.at(-1);
       if (usage.length > 1) metadata.attemptUsage = usage;
       if (subagentUsage.length > 0) metadata.subagentUsage = subagentUsage;
+      if (advisorUsage.length > 0) metadata.advisorUsage = advisorUsage;
+      if (standInUsage.length > 0) metadata.standInUsage = standInUsage;
 
       return {
         action,

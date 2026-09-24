@@ -11,6 +11,7 @@ import type {
   AgentSession,
   SessionConfig,
   SessionCreationOptions,
+  ToolUsageData,
 } from '../../src/types';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -245,6 +246,7 @@ class MockAgentSession implements AgentSession {
   // Rich events: accepted but never fired by MockAgentSession.
   on(event: 'intent', handler: (intent: string) => void): void;
   on(event: 'usage', handler: (data: Record<string, unknown>) => void): void;
+  on(event: 'tool_usage', handler: (data: ToolUsageData) => void): void;
   on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => void): void;
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;

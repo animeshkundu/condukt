@@ -7,7 +7,7 @@
  */
 
 import type { SubagentLimits, SubagentRosterOption } from '../runtimes/copilot/subagents';
-import type { ExecutionEvent, OutputEvent } from './events';
+import type { CostProvenance, ExecutionEvent, OutputEvent } from './events';
 
 export type { SubagentLimits, SubagentRosterOption } from '../runtimes/copilot/subagents';
 
@@ -649,6 +649,21 @@ export interface AgentSessionUsage {
   getMetrics(): Promise<SessionUsageMetrics>;
 }
 
+/**
+ * Billed usage captured from advisor / stand_in one-shot tool sessions.
+ * Backends that run these tools as separate sessions (SdkBackend) forward
+ * their `assistant.usage` charges through this event so cost accounting can
+ * attribute them instead of dropping them. Backends without tool sessions
+ * (SubprocessBackend) never fire it.
+ */
+export interface ToolUsageData {
+  readonly tool: 'advisor' | 'stand_in';
+  /** Model that served the one-shot call(s), when known. */
+  readonly model?: string;
+  /** Raw per-request usage records captured from the one-shot session(s). */
+  readonly usages: readonly Record<string, unknown>[];
+}
+
 export interface AgentSessionHistory {
   summarizeForHandoff(): Promise<string>;
   truncate(eventId: string): Promise<number>;
@@ -671,6 +686,8 @@ export interface AgentSession {
   // Rich events (SdkBackend fires these; SubprocessBackend silently stores handlers)
   on(event: 'intent', handler: (intent: string) => void): void;
   on(event: 'usage', handler: (data: Record<string, unknown>) => void): void;
+  /** Billed usage from advisor / stand_in one-shot tool sessions. */
+  on(event: 'tool_usage', handler: (data: ToolUsageData) => void): void;
   on(event: 'tool_complete_rich', handler: (tool: string, contents: ReadonlyArray<Record<string, unknown>>, callId?: string) => void): void;
   on(event: 'subagent_start', handler: (name: string, data: Record<string, unknown>) => void): void;
   on(event: 'subagent_end', handler: (name: string, data: Record<string, unknown>) => void): void;
@@ -778,10 +795,15 @@ export interface ExecutionProjection {
     readonly completedPath: readonly string[];
   };
   readonly totalCost: number;
+  /** Billed-cost split by origin (`totalCost` is the sum across provenances). */
+  readonly costByProvenance: CostByProvenance;
   readonly startedAt?: number;
   readonly finishedAt?: number;
   readonly metadata: Record<string, unknown>;
 }
+
+/** Per-provenance billed-cost split. Keys mirror {@link CostProvenance}. */
+export type CostByProvenance = Record<CostProvenance, number>;
 
 export interface ProjectionNode {
   readonly id: string;

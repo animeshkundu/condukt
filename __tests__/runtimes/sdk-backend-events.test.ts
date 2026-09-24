@@ -31,7 +31,7 @@ import {
   KNOWN_SDK_EVENT_TYPES,
 } from '../../runtimes/copilot/lifecycle-events';
 import type { CopilotSession } from '../../runtimes/copilot/copilot-backend';
-import type { SessionConfig } from '../../src/types';
+import type { SessionConfig, ToolUsageData } from '../../src/types';
 
 // ---------------------------------------------------------------------------
 // Mock SDK types that mirror the real SDK's shape
@@ -441,6 +441,87 @@ describe('SdkBackend event mapping', () => {
     expect(caller.abort).not.toHaveBeenCalled();
   });
 
+  it('forwards one-shot advisor usage to the parent session for cost accounting', async () => {
+    const caller = createMockSdkSession();
+    const advised = createMockSdkSession();
+    caller.getEvents.mockResolvedValue([
+      { type: 'user.message', data: { content: 'Review this approach' } },
+    ]);
+    advised.sendAndWait.mockImplementation(async () => {
+      // The SDK bills the side session while sendAndWait is pending; the
+      // one-shot subscribes live so the charge is captured, not dropped.
+      advised._emit('assistant.usage', {
+        inputTokens: 1000,
+        outputTokens: 200,
+        totalTokens: 1200,
+        totalNanoAiu: 2_500_000_000,
+        duration: 1500,
+      });
+      return {
+        type: 'assistant.message',
+        data: { content: 'Change the approach' },
+      };
+    });
+    mockSdkSessions = [caller, advised];
+
+    const { session } = await createTestSession({}, {
+      advisor: { model: 'advisor-model' },
+    });
+    const toolUsages: ToolUsageData[] = [];
+    session.on('tool_usage', (data) => {
+      toolUsages.push(data);
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly handler: (args: { readonly context?: string }) => Promise<unknown>;
+    }>)[0];
+
+    await expect(tool.handler({ context: 'Focus on correctness.' }))
+      .resolves.toBe('Change the approach');
+    expect(toolUsages).toHaveLength(1);
+    expect(toolUsages[0]).toEqual(expect.objectContaining({
+      tool: 'advisor',
+      model: 'advisor-model',
+    }));
+    // The serving model is stamped at capture so cost attribution cannot
+    // fall back to the lead model.
+    expect(toolUsages[0]?.usages).toEqual([
+      expect.objectContaining({
+        totalNanoAiu: 2_500_000_000,
+        model: 'advisor-model',
+        totalTokens: 1200,
+      }),
+    ]);
+  });
+
+  it('emits empty advisor usage when the one-shot session fails', async () => {
+    const caller = createMockSdkSession();
+    caller.getEvents.mockRejectedValue(new Error('history unavailable'));
+    mockSdkSessions = [caller];
+
+    const { session } = await createTestSession({}, {
+      advisor: { model: 'advisor-model' },
+    });
+    const toolUsages: ToolUsageData[] = [];
+    session.on('tool_usage', (data) => {
+      toolUsages.push(data);
+    });
+    session.send('prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly handler: (args: {}) => Promise<unknown>;
+    }>)[0];
+
+    // The failure surfaces as guidance text (existing contract); the spend
+    // side-channel still fires with zero records so accounting stays complete.
+    await expect(tool.handler({})).resolves.toMatch(/^Advisor unavailable/);
+    expect(mockCreateSession).toHaveBeenCalledOnce();
+    expect(toolUsages).toEqual([
+      { tool: 'advisor', model: 'advisor-model', usages: [] },
+    ]);
+  });
+
   it('drops the oldest transcript entries within the configured character budget', async () => {
     const caller = createMockSdkSession();
     const advised = createMockSdkSession();
@@ -791,6 +872,63 @@ describe('SdkBackend event mapping', () => {
       expect(childConfig).not.toHaveProperty('standIn');
       expect(childConfig).not.toHaveProperty('subagentRoster');
     }
+  });
+
+  it('forwards blind- and informed-round stand-in usage with per-member models', async () => {
+    const caller = createMockSdkSession();
+    const children = Array.from({ length: 4 }, () => createMockSdkSession());
+    const memberModels = ['gpt-5.6-sol', 'claude-opus-5', 'gpt-5.6-sol', 'claude-opus-5'];
+    const responses = [
+      { ranking: ['A', 'B'], reasoning: 'blind A', needMoreInfo: false },
+      { ranking: ['B', 'A'], reasoning: 'blind B', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed A', needMoreInfo: false },
+      { ranking: ['A', 'B'], reasoning: 'informed B', needMoreInfo: false },
+    ];
+    for (const [index, child] of children.entries()) {
+      child.sendAndWait.mockImplementation(async () => {
+        child._emit('assistant.usage', {
+          totalNanoAiu: 1_000_000_000,
+          model: memberModels[index],
+        });
+        return {
+          type: 'assistant.message',
+          data: { content: JSON.stringify(responses[index]) },
+        };
+      });
+    }
+    mockSdkSessions = [caller, ...children];
+
+    const { session } = await createTestSession({}, {
+      standIn: { members: ['gpt-5.6-sol', 'claude-opus-5'] },
+    });
+    const toolUsages: ToolUsageData[] = [];
+    session.on('tool_usage', (data) => {
+      toolUsages.push(data);
+    });
+    session.send('root prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    const tool = (mockCreateSession.mock.calls[0]?.[0].tools as Array<{
+      readonly name: string;
+      readonly handler: (args: {
+        readonly decision: string;
+        readonly options: readonly { readonly id: string; readonly summary: string }[];
+        readonly context: string;
+      }) => Promise<unknown>;
+    }>).find((candidate) => candidate.name === 'stand_in');
+    if (tool === undefined) throw new Error('Stand-in tool was not registered');
+
+    await tool.handler({
+      decision: 'Choose a path',
+      options: [{ id: 'A', summary: 'Alpha' }, { id: 'B', summary: 'Beta' }],
+      context: 'Only supplied context',
+    });
+
+    // One emission per tool call carrying all four billed member sessions.
+    expect(toolUsages).toHaveLength(1);
+    expect(toolUsages[0]).toEqual(expect.objectContaining({ tool: 'stand_in' }));
+    expect(toolUsages[0]?.usages).toHaveLength(4);
+    expect(toolUsages[0]?.usages.map((usage) => usage.model)).toEqual(memberModels);
+    expect(toolUsages[0]?.usages.every((usage) => usage.totalNanoAiu === 1_000_000_000)).toBe(true);
   });
 
   it('passes only caller-supplied decision context into cold-start stand-in prompts', async () => {

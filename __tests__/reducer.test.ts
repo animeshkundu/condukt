@@ -48,6 +48,7 @@ describe('reducer', () => {
         params: {},
         graph: { nodes: [], edges: [], activeNodes: [], completedPath: [] },
         totalCost: 0,
+        costByProvenance: { main: 0, subagent: 0, advisor: 0, stand_in: 0 },
         metadata: {},
       });
     });
@@ -347,6 +348,48 @@ describe('reducer', () => {
         ts: 3000,
       });
       expect(state.totalCost).toBeCloseTo(0.07);
+    });
+
+    it('splits costByProvenance across main/subagent/advisor/stand_in', () => {
+      let state = withRunStarted();
+      const record = (provenance: 'main' | 'subagent' | 'advisor' | 'stand_in', cost: number): void => {
+        state = reduce(state, {
+          type: 'cost:recorded',
+          executionId: 'exec-1',
+          nodeId: 'A',
+          tokens: 100,
+          model: 'm',
+          provenance,
+          cost,
+          ts: 2000,
+        });
+      };
+      record('main', 1);
+      record('subagent', 0.5);
+      record('advisor', 2.5);
+      record('stand_in', 0.25);
+      expect(state.totalCost).toBeCloseTo(4.25);
+      expect(state.costByProvenance).toEqual({
+        main: 1,
+        subagent: 0.5,
+        advisor: 2.5,
+        stand_in: 0.25,
+      });
+    });
+
+    it('attributes provenance-less records to main (pre-provenance event logs)', () => {
+      let state = withRunStarted();
+      state = reduce(state, {
+        type: 'cost:recorded',
+        executionId: 'exec-1',
+        nodeId: 'A',
+        tokens: 100,
+        model: 'm',
+        cost: 1,
+        ts: 2000,
+      });
+      expect(state.totalCost).toBe(1);
+      expect(state.costByProvenance.main).toBe(1);
     });
   });
 
