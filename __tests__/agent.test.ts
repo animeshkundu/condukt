@@ -285,6 +285,39 @@ describe('agent factory', () => {
     );
   });
 
+  it('resolves per-execution advisor operator focus, preferring the resolver', async () => {
+    mockSession.send.mockImplementation(() => {
+      queueMicrotask(() => mockSession._emit('idle'));
+    });
+    const advisor = { model: 'advisor-model' };
+
+    await agent({
+      promptBuilder: () => 'test prompt',
+      advisor,
+      advisorOperatorFocusResolver: (input) => `Focus for ${(input.params as { repo?: string }).repo}`,
+    })(createMockInput(), createMockContext(mockRuntime));
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        advisor: { model: 'advisor-model', operatorFocus: 'Focus for test-repo' },
+      }),
+      expect.anything(),
+    );
+
+    vi.clearAllMocks();
+    await agent({
+      promptBuilder: () => 'test prompt',
+      advisor: { ...advisor, operatorFocus: 'Static focus' },
+      advisorOperatorFocusResolver: () => '   ',
+    })(createMockInput(), createMockContext(mockRuntime));
+    // Empty resolver output falls back to the static config untouched.
+    expect(mockRuntime.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        advisor: { model: 'advisor-model', operatorFocus: 'Static focus' },
+      }),
+      expect.anything(),
+    );
+  });
+
   it('uses default MCP servers and lets consumers replace, extend, or disable them', async () => {
     mockSession.send.mockImplementation(() => {
       queueMicrotask(() => mockSession._emit('idle'));

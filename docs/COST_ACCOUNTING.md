@@ -38,7 +38,7 @@ SDK assistant.usage (tokens, model, totalNanoAiu, duration)
 ### Advisor / stand_in tool sessions
 
 The `advisor` and `stand_in` tools run as separate one-shot SDK sessions
-whose `assistant.usage` events never reach the parent session's listener.
+whose `assistant.usage` events never reach the parent session listener.
 `runOneShotSession` therefore subscribes to the side session live (usage
 events are ephemeral and absent from `getEvents()`) and returns the captured
 records alongside the text. The tool handlers forward them to the parent
@@ -48,6 +48,32 @@ model (never the lead model), and the scheduler bills them under the
 `advisor` / `stand_in` provenance. Failed tool calls report zero records but
 still emit, so accounting stays complete; per-member records survive sibling
 failures and later-round failures.
+
+### Advisor prompt assembly (layered input)
+
+Each advisor call is assembled server-side in positional order (highest
+privilege and most decision-relevant content at the edges, where
+long-context use is strongest):
+
+```
+OPERATOR FOCUS (§0, when configured — verbatim, lead-independent)
+CALLER CONTEXT (lead-curated summary + the one specific question)
+CALLING SESSION TRANSCRIPT (recency-walked, untrusted-data labeled)
+OPERATOR FOCUS (RESTATED, when configured — query-at-both-ends)
+```
+
+- `AdvisorConfig.operatorFocus` injects §0 verbatim; per-execution
+  `AgentConfig.advisorOperatorFocusResolver` (mirrors `cwdResolver`) wins
+  over the static value. Empty focus omits §0 and the restatement, leaving
+  the pre-focus layout byte-identical.
+- `AdvisorConfig.maxRecentTranscriptChars` caps the auto-forwarded
+  transcript independently (default 8_000; `0` sends headers with an empty
+  transcript). An explicit legacy `maxTranscriptChars` is honored when the
+  new field is absent, for migration.
+- Every advisor `tool_usage` emission carries `sectionSizes`
+  (`focusChars`, `contextChars`, `transcriptChars`, `promptChars`) so
+  consumers can measure the curated-vs-transcript mix per call, node, and
+  execution.
 
 `node:reset`, `route:resolved`, `node:retrying`, and resume never zero
 `totalCost`: the event log is append-only, so **redos, retries, loop

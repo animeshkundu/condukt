@@ -502,8 +502,24 @@ export interface AdvisorConfig {
   readonly system?: string;
   /** Overrides the tool description shown to the calling model. */
   readonly description?: string;
-  /** Transcript budget in characters; oldest turns are dropped first. Default 200_000. */
+  /** Transcript budget in characters; oldest turns are dropped first. Legacy knob: honored only when `maxRecentTranscriptChars` is absent. */
   readonly maxTranscriptChars?: number;
+  /**
+   * Recent-transcript budget in characters for the auto-forwarded session
+   * transcript (recency-walked, oldest evicted first). Wins over
+   * `maxTranscriptChars` when set; `0` sends headers with an empty
+   * transcript (curated-context-only). Default 8_000: the lead's curated
+   * context is the primary channel, the transcript is grounding.
+   */
+  readonly maxRecentTranscriptChars?: number;
+  /**
+   * Operator focus injected verbatim at the top of CALLER CONTEXT on every
+   * call (e.g. the launch-time `ask` hint). Server-side and lead-independent:
+   * it survives transcript eviction and thin lead summaries. Prefer the
+   * per-execution `advisorOperatorFocusResolver` over this static value when
+   * the focus varies per run.
+   */
+  readonly operatorFocus?: string;
 }
 
 export interface StandInConfig {
@@ -662,6 +678,13 @@ export interface ToolUsageData {
   readonly model?: string;
   /** Raw per-request usage records captured from the one-shot session(s). */
   readonly usages: readonly Record<string, unknown>[];
+  /** Per-layer prompt sizes in characters (measurement for context tuning). */
+  readonly sectionSizes?: {
+    readonly focusChars: number;
+    readonly contextChars: number;
+    readonly transcriptChars: number;
+    readonly promptChars: number;
+  };
 }
 
 export interface AgentSessionHistory {
@@ -752,6 +775,12 @@ export interface AgentConfig extends SubagentLimits {
   readonly heartbeatTimeout?: number;
   /** Override session cwd. Default: input.dir. Use for running in repo dir while artifacts go to input.dir. */
   readonly cwdResolver?: (input: NodeInput) => string;
+  /**
+   * Resolve per-execution operator focus for advisor calls (e.g. the
+   * launch-time `ask` hint). Wins over the static `advisor.operatorFocus`
+   * when it returns a non-empty string. Mirrors the `cwdResolver` pattern.
+   */
+  readonly advisorOperatorFocusResolver?: (input: NodeInput) => string | undefined;
   readonly setup?: (input: NodeInput) => void | Promise<void>;
   readonly teardown?: (input: NodeInput) => void | Promise<void>;
   readonly promptBuilder: (input: NodeInput) => PromptOutput; // REQUIRED — no generic fallback

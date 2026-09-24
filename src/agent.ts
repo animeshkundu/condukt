@@ -12,6 +12,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
+  AdvisorConfig,
   AgentConfig,
   AgentSession,
   ExecutionContext,
@@ -298,6 +299,18 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void>
   });
 }
 
+/**
+ * Bake the per-execution operator focus into the advisor config, if any.
+ * Resolver wins over the static value; empty/whitespace resolves to "absent"
+ * so the static config passes through untouched.
+ */
+function resolveAdvisorConfig(config: AgentConfig, input: NodeInput): AdvisorConfig | undefined {
+  if (config.advisor === undefined) return undefined;
+  const focus = config.advisorOperatorFocusResolver?.(input);
+  if (focus === undefined || focus.trim().length === 0) return config.advisor;
+  return { ...config.advisor, operatorFocus: focus };
+}
+
 function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionContext): SessionConfig {
   const sessionCwd = config.cwdResolver ? config.cwdResolver(input) : input.dir;
   const mcpServers = config.mcpServers ?? DEFAULT_MCP_SERVERS;
@@ -317,7 +330,7 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
     ...(config.mcpServerWorkingDirectory !== undefined
       ? { mcpServerWorkingDirectory: config.mcpServerWorkingDirectory }
       : {}),
-    advisor: config.advisor,
+    advisor: resolveAdvisorConfig(config, input),
     standIn: config.standIn,
     ...(mcpServers !== undefined ? { mcpServers } : {}),
     cwd: sessionCwd,
