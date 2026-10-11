@@ -140,6 +140,12 @@ interface CopilotSdkModule {
 type SdkClient = CopilotSdkClient;
 type SdkSessionHandle = CopilotSdkSession;
 
+/**
+ * A `continueSession` caller parked until the turn it started settles.
+ * `settleIdle` resolves it, `fail`/`abort`/`send` reject it.
+ */
+type ContinuationWaiter = { resolve: () => void; reject: (error: Error) => void };
+
 const MAX_SESSION_RECOVERY_CONTINUATIONS = 23;
 
 interface EffectiveSessionRecoveryPolicy {
@@ -205,6 +211,49 @@ function numericStatusCode(value: unknown): number | undefined {
   if (typeof value !== 'string' || value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * The CLI and the SDK describe a failed model call differently.
+ *
+ * The SDK surfaces `model.call_failure` in its typed shape: `source`,
+ * `failureKind`, `transport`, `errorMessage` and friends, flat and camelCase,
+ * with `source` always set. The CLI emits `model.model_call_failure` (routed
+ * here by the type-substring branch in `dispatchClassEvent`) in its own
+ * envelope: the details nested under `modelCall` in snake_case, and no `source`
+ * anywhere.
+ *
+ * Both land in `handleModelCallFailure`, so classification reads one view of
+ * either. Without this the recovery predicate, which tests `source ===
+ * 'top_level'` first, rejected every transport failure that arrived in the CLI
+ * shape, and the run restarted the node from a cold session instead of
+ * resuming it.
+ *
+ * The original envelope is kept alongside the unwrapped fields: the failure log
+ * still shows exactly what arrived, and the added keys are the ones the
+ * classifier reads.
+ */
+function normalizeModelCallFailure(
+  data: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (!data) return data;
+  const nested = isRecord(data.modelCall) ? data.modelCall : undefined;
+  // Already the flat SDK shape, or nothing to unwrap: leave it alone.
+  if (!nested) return data;
+  return {
+    ...data,
+    failureKind: data.failureKind ?? nested.failure_kind ?? nested.failureKind,
+    transport: data.transport ?? nested.transport,
+    errorMessage: data.errorMessage ?? nested.error ?? nested.errorMessage,
+    errorCode: data.errorCode ?? nested.error_code ?? nested.errorCode,
+    apiEndpoint: data.apiEndpoint ?? nested.api_endpoint,
+    model: data.model ?? nested.model,
+    durationMs: data.durationMs ?? data.modelCallDurationMs ?? nested.durationMs,
+    // The CLI envelope carries no `source`, and an agent-scoped failure never
+    // reaches here: `handleModelCallFailure` returns on `logAgentScopedFailure`
+    // first. An absent source on this shape is the root session's own call.
+    source: typeof data.source === 'string' ? data.source : 'top_level',
+  };
 }
 
 function isRecoverableModelCallFailure(data: Record<string, unknown> | undefined): boolean {
@@ -1433,6 +1482,13 @@ class SdkSession implements CopilotSession {
   private deferredIdle = false;
   private parentUsage: ContextUsage | undefined;
   private turnSettled = false;
+  /**
+   * Resolvers parked by `continueSession`, settled by the *next* idle/error.
+   * `continueSession` owns the wait for its own turn so `agent()` does not have
+   * to re-register idle/error handlers it cannot remove (the session interface
+   * has no `off`).
+   */
+  private settleWaiters: ContinuationWaiter[] = [];
   private aborted = false;
   private sessionId: string | undefined;
   private originalPrompt: string | undefined;
@@ -1571,6 +1627,9 @@ class SdkSession implements CopilotSession {
       this.emitError(new Error('Session is aborted'));
       return;
     }
+    // A parked `continueSession` belongs to the previous turn. This is a fresh
+    // lifecycle; leaving it parked would hang its caller forever.
+    this.rejectContinuation(new Error('Session was restarted before the continuation settled'));
     this.originalPrompt = prompt;
     this.sessionId = undefined;
     this.sdkSessionConfigFactory = undefined;
@@ -1605,6 +1664,66 @@ class SdkSession implements CopilotSession {
     this._run(prompt).catch((err: unknown) => {
       this.fail(err instanceof Error ? err : new Error(String(err)), 'session.run');
     });
+  }
+
+  /**
+   * Append one more user turn to the live session and resolve when it settles.
+   *
+   * This is the warm counterpart to `send()`: it never creates or resumes a
+   * session, so whatever the first turn built stays intact. `agent()` uses it to
+   * ask for a declared output the first turn forgot.
+   *
+   * Rejects when the session is aborted, the handle is gone, a compaction owns
+   * the session, the transport refuses the turn, or the turn itself fails. Every
+   * rejection means "no continuation happened"; callers report the miss rather
+   * than falling back to a cold restart.
+   */
+  async continueSession(prompt: string): Promise<void> {
+    if (this.aborted) throw new Error('Session is aborted');
+    // A recovery in flight is already resuming this session; let it finish so we
+    // send the continuation over whatever handle it installs.
+    if (this.recoveryInProgress) await this.recoveryInProgress;
+    if (this.aborted) throw new Error('Session is aborted');
+    if (this.activeCompactionEventId !== undefined) {
+      throw new Error('Session is compacting; cannot continue the turn');
+    }
+    const handle = this._sdkSession;
+    if (!handle) throw new Error('Session handle is gone; cannot continue the turn');
+
+    // Reopen the turn so idle, the heartbeat and `fail()` treat the
+    // continuation as live rather than as an already-settled turn.
+    this.turnSettled = false;
+    this.deferredIdle = false;
+    this._turnText.clear();
+    this.lastForwardProgressAt = Date.now();
+    this.lastForwardProgressType = 'continuation-prompt';
+
+    const waiter: ContinuationWaiter = { resolve: () => undefined, reject: () => undefined };
+    const settled = new Promise<void>((resolve, reject) => {
+      waiter.resolve = resolve;
+      waiter.reject = reject;
+    });
+    this.settleWaiters.push(waiter);
+
+    // The attempt deadline is absolute, so this re-arms the remainder of it
+    // rather than granting the continuation a fresh budget.
+    this.rearmHardTimeout(handle);
+    this.resetHeartbeat();
+    try {
+      await handle.rpc.sendMessages({
+        messages: [{ prompt, displayPrompt: prompt }],
+        wait: false,
+      });
+    } catch (error) {
+      this.removeContinuationWaiter(waiter);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+    await settled;
+  }
+
+  private removeContinuationWaiter(waiter: ContinuationWaiter): void {
+    const index = this.settleWaiters.indexOf(waiter);
+    if (index >= 0) this.settleWaiters.splice(index, 1);
   }
 
   /**
@@ -2696,6 +2815,7 @@ class SdkSession implements CopilotSession {
     if (this.aborted) return;
     const error = new Error('Session aborted');
     this.clearTimers();
+    this.rejectContinuation(error);
     this.emitError(error);
     this.aborted = true;
     await this._cleanup();
@@ -2742,21 +2862,45 @@ class SdkSession implements CopilotSession {
 
   private settleIdle(): void {
     if (this.aborted || this.turnSettled) return;
+    // A parked waiter means this idle closes a declared-output continuation
+    // rather than the attempt's first turn, so the recovery bookkeeping (and
+    // its `recovered` event) does not apply to it.
+    const isContinuation = this.settleWaiters.length > 0;
     const policy = effectiveSessionRecoveryPolicy(this.config.sessionRecovery);
-    if (policy && this.recoveryContinuation > 0 && this.sessionId) {
+    if (!isContinuation && policy && this.recoveryContinuation > 0 && this.sessionId) {
       this.emitRecovery('recovered', policy, this.recoveryContinuation, this.sessionId);
     }
     this.turnSettled = true;
     this._turnText.clear();
     this.clearTimers();
     this.emit('idle');
-    void this._cleanup();
+    this.settleContinuation();
+    // The handle is deliberately left alive: `agent()`'s declared-output guard
+    // continues the same session when the turn ended without the artifact, and
+    // it cannot do that against a torn-down client. Teardown is owned by
+    // `abort()`, which the agent node always calls in its `finally`.
+  }
+
+  private settleContinuation(): void {
+    const waiters = this.settleWaiters;
+    if (waiters.length === 0) return;
+    this.settleWaiters = [];
+    for (const waiter of waiters) waiter.resolve();
+  }
+
+  private rejectContinuation(error: Error): void {
+    const waiters = this.settleWaiters;
+    if (waiters.length === 0) return;
+    this.settleWaiters = [];
+    for (const waiter of waiters) waiter.reject(error);
   }
 
   private handleModelCallFailure(sdkSession: SdkSessionHandle, e: SdkEvent): void {
     if (this._sdkSession !== sdkSession || this.aborted) return;
     if (this.logAgentScopedFailure(e)) return;
-    const data = e.data;
+    // The payload may be the flat SDK shape or the CLI's nested envelope; see
+    // `normalizeModelCallFailure`. Everything below reads the normalized view.
+    const data = normalizeModelCallFailure(e.data);
     const detail = typeof data?.errorMessage === 'string'
       ? data.errorMessage
       : typeof data?.errorCode === 'string'
@@ -2808,6 +2952,7 @@ class SdkSession implements CopilotSession {
     this.activeCompactionEventId = undefined;
     this.turnSettled = true;
     this.clearTimers();
+    this.rejectContinuation(err);
     try {
       this.writeStderr('error', `[SdkBackend] ${eventType}: ${this.serializeEventDataCompact(eventType, data)}\n`);
     } catch { /* closed stream */ }

@@ -3087,6 +3087,106 @@ describe('SdkBackend event mapping', () => {
     }));
   });
 
+  it('recovers the CLI envelope a transport failure actually arrives in', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      mockSdkSession.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.getEvents.mockResolvedValue([{ type: 'user.message', data: { content: 'test prompt' } }]);
+      resumed.rpc.metadata.contextInfo.mockResolvedValue({
+        contextInfo: {
+          totalTokens: 1_000,
+          promptTokenLimit: 100_000,
+          systemTokens: 100,
+          conversationTokens: 900,
+          toolDefinitionsTokens: 0,
+        },
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      const recoveryHandler = vi.fn();
+      session.on('error', errorHandler);
+      session.on('recovery', recoveryHandler);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Verbatim from a live run (2026-10-09). The CLI emits its own envelope
+      // for a transport failure: the details are nested under `modelCall` in
+      // snake_case, and there is no `source` anywhere. The flat SDK shape is
+      // not what arrives here, and a predicate written for the flat shape
+      // rejects this on its first line and restarts the node cold.
+      mock._emit('model.model_call_failure', {
+        kind: 'model_call_failure',
+        turn: 27,
+        modelCallDurationMs: 600,
+        modelCall: {
+          model: 'gpt-6-luna',
+          error: '"Failed native model HTTP request: error sending request for url (https://api.enterprise.githubcopilot.com/responses): client error (SendRequest): connection error: An established connection was aborted by the software in your host machine. (os error 10053)"',
+          request_id: '',
+          api_endpoint: 'ws:/responses',
+          transport: 'websocket',
+          failure_kind: 'transport',
+          rte: false,
+        },
+        rte: false,
+        reasoningEffort: 'high',
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mock.abort).not.toHaveBeenCalled();
+      expect(mockResumeSession).toHaveBeenCalledWith(
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      expect(resumed.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryHandler).toHaveBeenCalledWith(expect.objectContaining({
+        phase: 'continuation-sent',
+        continuation: 1,
+        sessionId: mock.sessionId,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not recover a credential failure delivered in the CLI envelope', async () => {
+    const { session, mock } = await createTestSession();
+    const errorHandler = vi.fn();
+    session.on('error', errorHandler);
+    session.send('test prompt');
+    await new Promise(r => setTimeout(r, 50));
+
+    mock._emit('model.model_call_failure', {
+      kind: 'model_call_failure',
+      turn: 3,
+      modelCallDurationMs: 90,
+      modelCall: {
+        model: 'gpt-6-luna',
+        error: 'Unauthorized: authentication failed',
+        api_endpoint: 'ws:/responses',
+        transport: 'websocket',
+        failure_kind: 'api',
+        rte: false,
+      },
+      rte: false,
+    });
+
+    expect(mockResumeSession).not.toHaveBeenCalled();
+    expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('Unauthorized: authentication failed'),
+    }));
+  });
+
   it('does not resume after the shared recovery budget expires', async () => {
     vi.useFakeTimers();
     try {
@@ -3889,5 +3989,97 @@ describe('SdkBackend event mapping', () => {
         stderr.mockRestore();
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Declared-output continuation (`continueSession`)
+// ---------------------------------------------------------------------------
+
+describe('SdkSession declared-output continuation', () => {
+  it('continues the live session over sendMessages and never re-creates it', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.idle');
+
+    const continuation = session.continueSession?.('write artifacts/00-evidence.md');
+    expect(continuation).toBeDefined();
+    await vi.waitFor(() => expect(mock.rpc.sendMessages).toHaveBeenCalledOnce());
+
+    expect(mock.rpc.sendMessages).toHaveBeenCalledWith({
+      messages: [{
+        prompt: 'write artifacts/00-evidence.md',
+        displayPrompt: 'write artifacts/00-evidence.md',
+      }],
+      wait: false,
+    });
+    // The whole point of the guard: a warm turn, never a second session.
+    expect(mockCreateSession).toHaveBeenCalledOnce();
+    expect(mockResumeSession).not.toHaveBeenCalled();
+
+    mock._emit('session.idle');
+    await continuation;
+  });
+
+  it('keeps the handle alive after idle and tears it down on abort', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.idle');
+
+    // Any deferred teardown would have run by the next macrotask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mock.disconnect).not.toHaveBeenCalled();
+    expect(mockStop).not.toHaveBeenCalled();
+
+    await session.abort();
+    expect(mock.abort).toHaveBeenCalled();
+    expect(mock.disconnect).toHaveBeenCalled();
+    expect(mockStop).toHaveBeenCalled();
+  });
+
+  it('refuses to continue a session that was aborted', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.idle');
+    await session.abort();
+
+    await expect(session.continueSession?.('again')).rejects.toThrow(/aborted/i);
+    expect(mock.rpc.sendMessages).not.toHaveBeenCalled();
+  });
+
+  it('refuses to continue while a compaction owns the session', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.compaction_start', {}, undefined);
+
+    await expect(session.continueSession?.('again')).rejects.toThrow(/compacting/i);
+    expect(mock.rpc.sendMessages).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the transport refuses the continuation', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.idle');
+    mock.rpc.sendMessages.mockRejectedValueOnce(new Error('turn refused'));
+
+    await expect(session.continueSession?.('again')).rejects.toThrow('turn refused');
+  });
+
+  it('rejects a parked continuation when the session fails', async () => {
+    const { session, mock } = await createTestSession();
+    session.send('first prompt');
+    await vi.waitFor(() => expect(mockCreateSession).toHaveBeenCalledOnce());
+    mock._emit('session.idle');
+
+    const continuation = session.continueSession?.('write it');
+    await vi.waitFor(() => expect(mock.rpc.sendMessages).toHaveBeenCalledOnce());
+    mock._emit('session.error', { message: 'model call failed' });
+
+    await expect(continuation).rejects.toThrow(/model call failed/);
   });
 });

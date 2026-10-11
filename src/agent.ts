@@ -19,6 +19,7 @@ import type {
   NodeFn,
   NodeInput,
   NodeOutput,
+  OutputNudgePolicy,
   PromptOutput,
   RetryMeta,
   RetryPolicy,
@@ -28,6 +29,7 @@ import {
   DEFAULT_AGENT_TIMEOUT_SECS,
   DEFAULT_CONTEXT_TIER,
   DEFAULT_MCP_SERVERS,
+  DEFAULT_OUTPUT_NUDGE_POLICY,
   DEFAULT_PRODUCER_MODEL,
   DEFAULT_THINKING_BUDGET,
   FlowAbortedError,
@@ -363,6 +365,10 @@ function sessionConfig(config: AgentConfig, input: NodeInput, ctx: ExecutionCont
 interface SessionAttemptResult extends AttemptUsage {
   readonly outputLines: readonly string[];
   readonly rootUsage: readonly Record<string, unknown>[];
+  /** Nudges sent by the declared-output guard during this attempt. */
+  readonly outputNudges: number;
+  /** Whether a nudge (rather than the first turn) produced the artifact. */
+  readonly outputNudgeWritten: boolean;
 }
 
 function attemptUsage(
@@ -398,6 +404,171 @@ function withNodeUsage(
     },
   });
   return error as ErrorWithNodeUsage;
+}
+
+/** Reads the declared artifact and reports whether it carries real content. */
+function artifactIsNonBlank(artifactPath: string): boolean {
+  try {
+    return fs.readFileSync(artifactPath, 'utf-8').trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function nudgeDelayMs(
+  policy: Readonly<Required<Omit<OutputNudgePolicy, 'prompt'>>>,
+  attempt: number,
+): number {
+  const raw = Math.min(
+    policy.backoffBaseMs * 2 ** Math.max(0, attempt - 1),
+    policy.backoffMaxMs,
+  );
+  if (!policy.jitter) return raw;
+  // +/-25%, so concurrent nodes do not resynchronize on the same retry tick.
+  return Math.round(raw * (0.75 + Math.random() * 0.5));
+}
+
+function defaultNudgePrompt(
+  artifactPath: string,
+  outputPath: string,
+  attempt: number,
+  maxNudges: number,
+): string {
+  return [
+    `You have not written the required output file yet. Nothing else in this`,
+    `session counts as the deliverable.`,
+    ``,
+    `Write '${artifactPath}' now, using your file-writing tool, with the`,
+    `complete contents of '${outputPath}' as the prompt asked for it. Do not`,
+    `summarise it into the chat, do not describe what you would write, and do`,
+    `not reply that it is already done unless the file is on disk.`,
+    ``,
+    `This is reminder ${attempt} of ${maxNudges}. If the file is not written,`,
+    `this session is recorded as a failure.`,
+  ].join('\n');
+}
+
+/**
+ * Resolve with `promise`, or reject with a `FlowAbortedError` as soon as the
+ * signal fires. The session interface has no cancel, so racing is how a nudge
+ * stays responsive to the run being stopped.
+ */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new FlowAbortedError('Aborted during output nudge'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new FlowAbortedError('Aborted during output nudge'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * Declared-output guard.
+ *
+ * A node declares `output`, and in practice the file lands only if the model
+ * chooses to call its file-writing tool. When it does not, the previous
+ * behaviour was either a silent success (`requireOutput: false`) or a node
+ * failure that the outer loop retried with a *fresh* session, throwing away
+ * every read the first session had already done. This continues the same
+ * session instead: the handle is still live, the transcript is intact.
+ *
+ * Bounded to `policy.maxNudges` inside this one attempt, so the attempt
+ * deadline, heartbeat and the caller's retry policy still cover the whole
+ * thing and the session is never continued past its own timeout.
+ */
+async function runOutputGuard(
+  config: AgentConfig,
+  input: NodeInput,
+  ctx: ExecutionContext,
+  session: AgentSession,
+): Promise<{ outputNudges: number; outputNudgeWritten: boolean }> {
+  if (!config.requireOutput || !config.output) {
+    return { outputNudges: 0, outputNudgeWritten: false };
+  }
+  if (config.outputNudge === false) {
+    return { outputNudges: 0, outputNudgeWritten: false };
+  }
+
+  const artifactPath = path.join(input.dir, config.output);
+  if (artifactIsNonBlank(artifactPath)) {
+    return { outputNudges: 0, outputNudgeWritten: false };
+  }
+
+  const overrides = typeof config.outputNudge === 'object' ? config.outputNudge : undefined;
+  const policy = { ...DEFAULT_OUTPUT_NUDGE_POLICY, ...(overrides ?? {}) };
+
+  if (typeof session.continueSession !== 'function') {
+    // Loud, not silent: a runtime that cannot continue a session must not look
+    // like a runtime whose guard ran and found nothing to do.
+    ctx.emitOutput({
+      type: 'node:output',
+      executionId: ctx.executionId,
+      nodeId: ctx.nodeId,
+      content:
+        `\n--- Declared output '${config.output}' is missing and runtime `
+        + `'${ctx.runtime.name}' cannot continue the session `
+        + `(no continueSession); the node will report the miss. ---\n`,
+      ts: Date.now(),
+    });
+    return { outputNudges: 0, outputNudgeWritten: false };
+  }
+
+  let outputNudges = 0;
+  while (outputNudges < policy.maxNudges && !artifactIsNonBlank(artifactPath)) {
+    outputNudges += 1;
+    try {
+      await waitForRetry(nudgeDelayMs(policy, outputNudges), ctx.signal);
+    } catch (error) {
+      // An abort is the run's decision, not a guard failure; report it as one so
+      // stopping a run never looks like the model failing to write a file.
+      if (error instanceof FlowAbortedError) throw error;
+      break;
+    }
+    if (ctx.signal.aborted) throw new FlowAbortedError('Aborted during output nudge');
+
+    ctx.emitOutput({
+      type: 'node:output',
+      executionId: ctx.executionId,
+      nodeId: ctx.nodeId,
+      content:
+        `\n--- Declared output '${config.output}' is missing; continuing the same `
+        + `session (nudge ${outputNudges}/${policy.maxNudges}) ---\n`,
+      ts: Date.now(),
+    });
+
+    const message = overrides?.prompt
+      ? overrides.prompt({
+        outputPath: config.output,
+        attempt: outputNudges,
+        maxNudges: policy.maxNudges,
+      })
+      : defaultNudgePrompt(artifactPath, config.output, outputNudges, policy.maxNudges);
+
+    try {
+      await raceAbort(session.continueSession(message), ctx.signal);
+    } catch (error) {
+      // An abort is the run's decision, not a nudge failure; surface it so the
+      // caller does not report the miss as if the guard had simply given up.
+      if (error instanceof FlowAbortedError) throw error;
+      // The session or the nudge turn failed. The miss is reported by the
+      // caller, which is the truthful outcome; do not mask it as a success.
+      break;
+    }
+  }
+
+  return {
+    outputNudges,
+    outputNudgeWritten: outputNudges > 0 && artifactIsNonBlank(artifactPath),
+  };
 }
 
 async function runSessionAttempt(
@@ -632,12 +803,34 @@ async function runSessionAttempt(
       });
     });
 
-    return { outputLines, usage: lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage };
+    const { outputNudges, outputNudgeWritten } = await runOutputGuard(
+      config, input, ctx, activeSession,
+    );
+
+    return {
+      outputLines,
+      usage: lastUsage,
+      rootUsage,
+      subagentUsage,
+      advisorUsage,
+      standInUsage,
+      outputNudges,
+      outputNudgeWritten,
+    };
   } catch (error) {
     if (!ctx.signal.aborted && config.output && wasCompletedBeforeCrash(
       input.dir, config.output, outputLines, config.completionIndicators,
     )) {
-      return { outputLines, usage: lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage };
+      return {
+        outputLines,
+        usage: lastUsage,
+        rootUsage,
+        subagentUsage,
+        advisorUsage,
+        standInUsage,
+        outputNudges: 0,
+        outputNudgeWritten: false,
+      };
     }
     throw withAttemptUsage(error, attemptUsage(lastUsage, rootUsage, subagentUsage, advisorUsage, standInUsage));
   } finally {
@@ -861,10 +1054,13 @@ export function agent(config: AgentConfig): NodeFn {
       if (config.requireOutput && config.output) {
         if (content === undefined || content.trim().length === 0) {
           const outputPath = config.output;
+          const nudged = result.outputNudges > 0
+            ? ` after ${result.outputNudges} in-session nudge(s)`
+            : '';
           throw withNodeUsage(
             new MissingRequiredOutputError(
               outputPath,
-              `Required output artifact '${outputPath}' was missing or empty after successful agent session`,
+              `Required output artifact '${outputPath}' was missing or empty after successful agent session${nudged}`,
             ),
             failedUsage,
             failedSubagentUsage,
@@ -878,6 +1074,10 @@ export function agent(config: AgentConfig): NodeFn {
         ? config.actionParser(content)
         : 'default';
       const metadata: Record<string, unknown> = {};
+      // Forwarded by the scheduler as a metadata event, so an operator can see
+      // that the artifact was recovered by a nudge rather than written first try.
+      if (result.outputNudges > 0) metadata.outputNudges = result.outputNudges;
+      if (result.outputNudgeWritten) metadata.outputNudgeWritten = true;
       const currentUsage = result.rootUsage.length > 0
         ? result.rootUsage
         : result.usage ? [result.usage] : [];

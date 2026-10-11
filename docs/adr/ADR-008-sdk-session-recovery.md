@@ -26,6 +26,15 @@ For an eligible transient root model-call failure, or a local session-progress t
 5. Reapplies mode and subagent settings and audits history again. Native context and compaction policy remain owned by the resumed Copilot runtime. If the turn completed during handoff, it settles without a continuation.
 6. Calls `sendMessages({ messages: [], wait: false })` only while the turn remains unmatched.
 
+### What counts as an eligible failure
+
+Eligibility is decided from the event payload, and that payload arrives in one of two shapes:
+
+- **The SDK's typed shape** (`model.call_failure`): flat and camelCase, with `source` always present (`top_level`, `subagent`, or `mcp_sampling`) alongside `failureKind`, `transport`, `statusCode`, `errorMessage`, and `badRequestKind`.
+- **The CLI's envelope** (`model.model_call_failure`): `kind: 'model_call_failure'`, `turn`, `modelCallDurationMs`, and the details **nested** under `modelCall` in snake_case (`failure_kind`, `api_endpoint`, `error`, `request_id`). It carries no `source`.
+
+The CLI envelope reaches the same handler through the type-substring branch in `dispatchClassEvent`. The backend unwraps it onto the flat shape before deciding eligibility, because a predicate written for the flat shape rejected every transport failure that arrived in the envelope and the run restarted the node from a cold session instead of resuming it. An absent `source` on the envelope means the root session: an agent-scoped failure returns on `logAgentScopedFailure` before classification is reached.
+
 The progress heartbeat is based on a closed set of meaningful events. Informational, unknown, empty, duplicate, and non-increasing streaming events do not extend it. Active tools and headless external requests remain bounded by that progress deadline: novel progress refreshes it, but silence fails closed without a model continuation because replay safety is ambiguous. A progress timeout remains distinct from an authoritative provider failure in diagnostics, while safe root-turn recovery shares the same continuation count, recovery budget, and original hard deadline.
 
 Recovery is bounded by an absolute time budget, the original session timeout, capped backoff, and a maximum continuation count capped at 23. Exhaustion is terminal and cannot trigger whole-session prompt replay. History is never truncated, and no textual continuation prompt is injected.
