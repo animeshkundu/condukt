@@ -548,6 +548,7 @@ async function runOutputGuard(
     const message = overrides?.prompt
       ? overrides.prompt({
         outputPath: config.output,
+        artifactPath,
         attempt: outputNudges,
         maxNudges: policy.maxNudges,
       })

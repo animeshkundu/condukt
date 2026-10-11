@@ -299,7 +299,12 @@ export interface RetryPolicy {
  * support and fails before session creation when that capability is absent.
  */
 export interface SessionRecoveryPolicy {
-  /** Maximum empty-turn continuations after the initial turn. */
+  /**
+   * Maximum empty-turn continuations after the initial turn, and equally the
+   * ceiling on reconnect handshakes: a resume that fails part way through
+   * reconnects and nudges again rather than ending the turn, so one attempt is
+   * spent per continuation until this count or `budgetMs` runs out.
+   */
   readonly maxContinuations?: number;
   /** Total recovery time within the enclosing session deadline. */
   readonly budgetMs?: number;
@@ -340,6 +345,11 @@ export interface SessionRecoveryEvent {
   readonly failureKind?: string;
   readonly durationMs?: number;
   readonly reason?: string;
+  /**
+   * On an `exhausted` event, the reconnect step that kept failing:
+   * `fence` | `client` | `resume` | `configuration` | `audit` | `continuation`.
+   */
+  readonly stage?: string;
 }
 
 /** Terminal recovery failure that must never trigger whole-session prompt replay. */
@@ -746,6 +756,12 @@ export interface ToolRef {
 export interface OutputNudgeContext {
   /** Path of the declared artifact that is missing or blank, as configured. */
   readonly outputPath: string;
+  /**
+   * Absolute path of the missing artifact (execution directory joined with
+   * `outputPath`). A consumer that supplies `prompt` needs this to name the
+   * file the way the model's file tool will see it.
+   */
+  readonly artifactPath: string;
   /** 1-based index of the nudge about to be sent. */
   readonly attempt: number;
   /** Total nudges permitted for this session attempt. */

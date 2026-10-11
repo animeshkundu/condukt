@@ -206,6 +206,42 @@ function recoveryDelayMs(policy: EffectiveSessionRecoveryPolicy, failedContinuat
   return Math.max(100, Number.isFinite(delayed) ? delayed : 100);
 }
 
+/** What the pre- and post-resume history audits report. */
+interface RecoveryHistoryAudit {
+  readonly unmatchedRootTurns: number;
+  readonly completedTaskEvents: number;
+  readonly latestRootTurnHasTerminalResponse: boolean;
+}
+
+/**
+ * A failed reconnect step, tagged with the stage that threw so an `exhausted`
+ * event can name it.
+ *
+ * `fatal` marks the two steps whose failure cannot change its answer on a
+ * retry: a missing client factory, and a resumed session whose id is not the one
+ * we asked for. Every other step is retried until the continuation count or the
+ * recovery budget runs out.
+ */
+class SessionResumeAttemptError extends Error {
+  constructor(
+    readonly stage: string,
+    message: string,
+    readonly fatal: boolean,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'SessionResumeAttemptError';
+  }
+}
+
+function toResumeAttemptError(value: unknown, stage: string): SessionResumeAttemptError {
+  if (value instanceof SessionResumeAttemptError) return value;
+  const message = value instanceof Error ? value.message : String(value);
+  return new SessionResumeAttemptError(stage, message, false, {
+    cause: value instanceof Error ? value : undefined,
+  });
+}
+
 function numericStatusCode(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'string' || value.trim() === '') return undefined;
@@ -2468,17 +2504,105 @@ class SdkSession implements CopilotSession {
         return;
       }
 
-      this.recoveryContinuation += 1;
-      this.emitRecovery('resuming', policy, this.recoveryContinuation, sessionId, {
-        ...this.recoveryMetadata(data),
-      });
+      // A handshake that fails reconnects and nudges again rather than ending
+      // the turn. Every resume passes `continuePendingWork: false` and every
+      // continuation sends an empty message list, so no attempt replays a turn
+      // or re-issues a tool call: the session is left exactly where the failed
+      // turn stopped, and the next attempt resumes that same state. The
+      // continuation count and the recovery budget are what bound the loop.
+      for (;;) {
+        this.recoveryContinuation += 1;
+        this.emitRecovery('resuming', policy, this.recoveryContinuation, sessionId, {
+          ...this.recoveryMetadata(data),
+        });
+        try {
+          await this.attemptSameSessionResume(failedHandle, policy, before, data);
+          return;
+        } catch (attemptError) {
+          if (this.aborted || this.turnSettled) return;
+          const failed = toResumeAttemptError(attemptError, 'fence');
+          if (
+            failed.fatal
+            || this.recoveryContinuation >= policy.maxContinuations
+            || (this.recoveryDeadlineMs !== undefined && Date.now() >= this.recoveryDeadlineMs)
+          ) {
+            this.exhaustRecovery(
+              policy,
+              sessionId,
+              originalError,
+              failed.message,
+              data,
+              failed.stage,
+            );
+            return;
+          }
+          const retryDelayMs = recoveryDelayMs(policy, this.recoveryContinuation);
+          this.emitRecovery('scheduled', policy, this.recoveryContinuation + 1, sessionId, {
+            delayMs: retryDelayMs,
+            ...this.recoveryMetadata(data),
+          });
+          try {
+            await this.waitWithinRecoveryDeadline(retryDelayMs);
+          } catch {
+            // The budget, not the handshake, is what ended recovery, so the
+            // reason worth reporting is the handshake's own failure.
+            this.exhaustRecovery(
+              policy,
+              sessionId,
+              originalError,
+              failed.message,
+              data,
+              failed.stage,
+            );
+            return;
+          }
+        }
+      }
+    } catch (recoveryError) {
+      if (this.aborted || this.turnSettled) return;
+      // Only the pre-flight reaches here: the initial recovery wait and the
+      // history audit that precedes the first handshake. A failing handshake is
+      // handled inside the loop, which retries it within the same bounds.
+      const normalized = recoveryError instanceof Error
+        ? recoveryError
+        : new Error(String(recoveryError));
+      this.exhaustRecovery(policy, sessionId, originalError, normalized.message, data);
+    }
+  }
 
-      // Fence the old handle synchronously before any asynchronous cleanup.
+  /**
+   * One reconnect handshake: fence the failed handle, stand up a fresh client,
+   * resume the same session without replaying any turn, restore the resumed
+   * session's configuration, and nudge it with an empty message.
+   *
+   * Repeating this is safe by construction. `continuePendingWork: false` plus an
+   * empty-message send appends nothing to the transcript, so a handshake that
+   * fails at any step leaves the session where the failed turn stopped and the
+   * next attempt resumes that same state.
+   *
+   * Returns once the continuation was sent, or once the abandoned turn turns out
+   * to have completed. Throws otherwise, after tearing down whatever it built,
+   * so the caller can retry from a clean fence.
+   */
+  private async attemptSameSessionResume(
+    failedHandle: SdkSessionHandle,
+    policy: EffectiveSessionRecoveryPolicy,
+    before: RecoveryHistoryAudit,
+    data: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    let stage = 'fence';
+    try {
+      // Fence synchronously before any asynchronous cleanup. Target whatever
+      // handle is live: after a resume that succeeded through the handshake and
+      // then failed on the nudge, that is the resumed handle, not the original.
+      const handleToFence = this._sdkSession ?? failedHandle;
       this._sdkSession = null;
       this.handleGeneration += 1;
       this.activeCompactionEventId = undefined;
       this.suspendHeartbeat();
-      await failedHandle.disconnect().catch(() => undefined);
+      await handleToFence.disconnect().catch(() => undefined);
       const oldClient = this._client;
       this._client = null;
       if (oldClient) {
@@ -2486,23 +2610,32 @@ class SdkSession implements CopilotSession {
         await oldClient.forceStop().catch(() => undefined);
       }
 
+      stage = 'client';
       const clientFactory = this.clientFactory;
       const configFactory = this.sdkSessionConfigFactory;
       if (!clientFactory || !configFactory) {
-        throw new Error('SDK recovery configuration is unavailable');
+        throw new SessionResumeAttemptError(
+          stage,
+          'SDK recovery configuration is unavailable',
+          true,
+        );
       }
       const client = clientFactory();
       this._client = client;
       await client.start();
       const { sessionId: _createSessionId, ...resumeConfig } = configFactory(client);
+
+      stage = 'resume';
       const resumed = await client.resumeSession(sessionId, {
         ...resumeConfig,
         continuePendingWork: false,
       });
       if (resumed.sessionId !== sessionId) {
         await resumed.disconnect().catch(() => undefined);
-        throw new Error(
+        throw new SessionResumeAttemptError(
+          stage,
           `SDK resumed unexpected session '${resumed.sessionId}' instead of '${sessionId}'`,
+          true,
         );
       }
       if (this.aborted || this.turnSettled) {
@@ -2510,12 +2643,15 @@ class SdkSession implements CopilotSession {
         return;
       }
 
+      stage = 'configuration';
       this._sdkSession = resumed;
       this.handleGeneration += 1;
       this.resetStateAfterResume();
       this.rearmHardTimeout(resumed);
       await this.applyResumedSessionConfiguration(resumed);
       this._wireEvents(resumed);
+
+      stage = 'audit';
       const afterResume = await this.auditRecoveryHistory(resumed, sessionId);
       if (afterResume.unmatchedRootTurns === 0) {
         const taskCompletedDuringHandoff =
@@ -2531,6 +2667,8 @@ class SdkSession implements CopilotSession {
         // Disconnect can close the abandoned turn without completing the task.
         // Keep the continuation path active rather than synthesizing false success.
       }
+
+      stage = 'continuation';
       this.lastForwardProgressAt = Date.now();
       this.lastForwardProgressType = 'continuation-sent';
       await resumed.rpc.sendMessages({ messages: [], wait: false });
@@ -2538,30 +2676,36 @@ class SdkSession implements CopilotSession {
       this.emitRecovery('continuation-sent', policy, this.recoveryContinuation, sessionId, {
         ...this.recoveryMetadata(data),
       });
-    } catch (recoveryError) {
-      if (this.aborted || this.turnSettled) return;
-      const normalized = recoveryError instanceof Error
-        ? recoveryError
-        : new Error(String(recoveryError));
-      if (this.recoveryContinuation >= policy.maxContinuations
-        || (this.recoveryDeadlineMs !== undefined && Date.now() >= this.recoveryDeadlineMs)) {
-        this.exhaustRecovery(policy, sessionId, originalError, normalized.message, data);
-        return;
-      }
-      // Resume failures are unsafe to replay blindly. They exhaust this logical
-      // turn even when numerical continuations remain.
-      this.exhaustRecovery(policy, sessionId, originalError, normalized.message, data);
+    } catch (error) {
+      await this.tearDownFailedResume();
+      throw toResumeAttemptError(error, stage);
+    }
+  }
+
+  /**
+   * Undo a failed handshake so the next attempt fences from the state it would
+   * have started from. The attempt may already have reached the server, so both
+   * the resumed handle and the client holding it come down: a lingering client
+   * could make the SDK refuse the next resume as already active.
+   */
+  private async tearDownFailedResume(): Promise<void> {
+    const handle = this._sdkSession;
+    this._sdkSession = null;
+    this.handleGeneration += 1;
+    this.suspendHeartbeat();
+    if (handle) await handle.disconnect().catch(() => undefined);
+    const client = this._client;
+    this._client = null;
+    if (client) {
+      await boundedCleanup(client.stop()).catch(() => undefined);
+      await client.forceStop().catch(() => undefined);
     }
   }
 
   private async auditRecoveryHistory(
     handle: SdkSessionHandle,
     sessionId: string,
-  ): Promise<{
-    readonly unmatchedRootTurns: number;
-    readonly completedTaskEvents: number;
-    readonly latestRootTurnHasTerminalResponse: boolean;
-  }> {
+  ): Promise<RecoveryHistoryAudit> {
     const events = await handle.getEvents();
     const expectedPrompt = this.originalPrompt;
     const rootUserMessages = events.filter(event => (
@@ -2760,15 +2904,22 @@ class SdkSession implements CopilotSession {
     });
   }
 
+  /**
+   * `stage` names the reconnect step whose failure ended recovery, when the
+   * end came from a handshake rather than from the budget alone. The `reason`
+   * alone ("Connection is disposed.") does not say which RPC produced it.
+   */
   private exhaustRecovery(
     policy: EffectiveSessionRecoveryPolicy,
     sessionId: string,
     cause: Error,
     reason: string,
     data: Record<string, unknown> | undefined,
+    stage?: string,
   ): void {
     this.emitRecovery('exhausted', policy, this.recoveryContinuation, sessionId, {
       reason,
+      ...(stage !== undefined ? { stage } : {}),
       ...this.recoveryMetadata(data),
     });
     this.fail(
@@ -3258,16 +3409,24 @@ class SdkSession implements CopilotSession {
         inactivityMs,
         lastProgressType: this.lastForwardProgressType,
       };
-      if (this.activeToolCalls.size > 0 || this.pendingExternalRequests.size > 0) {
-        this.fail(error, 'session.progress_timeout.pending_work', {
-          ...data,
-          activeToolCalls: this.activeToolCalls.size,
-          pendingExternalRequests: this.pendingExternalRequests.size,
-        });
-        return;
-      }
+      // Resolve the policy before the in-flight test: a node that opted into
+      // recovery prefers the warm continuation over failing outright, even with
+      // a tool call outstanding. The resume does not replay that call, so a
+      // genuinely running subagent read is abandoned and re-issued by the model.
+      // For the read-only work recovery is opted into for, that is the right
+      // trade against failing the node; a mutating node opts out of recovery.
       const policy = effectiveSessionRecoveryPolicy(this.config.sessionRecovery);
+      const hasPendingWork =
+        this.activeToolCalls.size > 0 || this.pendingExternalRequests.size > 0;
       if (!policy) {
+        if (hasPendingWork) {
+          this.fail(error, 'session.progress_timeout.pending_work', {
+            ...data,
+            activeToolCalls: this.activeToolCalls.size,
+            pendingExternalRequests: this.pendingExternalRequests.size,
+          });
+          return;
+        }
         this.fail(error, 'session.progress_timeout', data);
         return;
       }
