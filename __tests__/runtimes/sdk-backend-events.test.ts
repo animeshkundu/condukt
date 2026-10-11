@@ -2231,11 +2231,12 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
-  it('fails closed when a tool stays silent for the progress deadline', async () => {
+  it('fails closed when a tool stays silent for the progress deadline and recovery is off', async () => {
     vi.useFakeTimers();
     try {
       const { session, mock } = await createTestSession({}, {
         heartbeatTimeout: 2,
+        sessionRecovery: false,
       });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
@@ -2296,11 +2297,12 @@ describe('SdkBackend event mapping', () => {
     }
   });
 
-  it('fails closed when a pending external request loses its completion event', async () => {
+  it('fails closed when a pending external request loses its completion event and recovery is off', async () => {
     vi.useFakeTimers();
     try {
       const { session, mock } = await createTestSession({}, {
         heartbeatTimeout: 2,
+        sessionRecovery: false,
       });
       const errorHandler = vi.fn();
       session.on('error', errorHandler);
@@ -3344,6 +3346,429 @@ describe('SdkBackend event mapping', () => {
         name: 'SessionRecoveryExhaustedError',
         suppressFreshSessionRetry: true,
       }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Same-session resume retries ──────────────────────────────────────────
+  //
+  // A handshake that fails reconnects and nudges again. Every resume passes
+  // `continuePendingWork: false` and the continuation sends no messages, so no
+  // attempt replays a turn: the session stays where the failed turn stopped.
+
+  /** History whose single root turn is still open, so recovery continues it. */
+  const openRootTurn = [
+    { type: 'user.message', data: { content: 'test prompt' } },
+    { type: 'assistant.turn_start', data: { turnId: '1' } },
+  ];
+
+  /** A handle a resume can land on: open root turn, and context info to apply. */
+  function makeResumable(handle: MockSdkSession): MockSdkSession {
+    handle.getEvents.mockResolvedValue(openRootTurn);
+    handle.rpc.metadata.contextInfo.mockResolvedValue({
+      contextInfo: {
+        totalTokens: 1_000,
+        promptTokenLimit: 100_000,
+        systemTokens: 100,
+        conversationTokens: 900,
+        toolDefinitionsTokens: 0,
+      },
+    });
+    return handle;
+  }
+
+  interface CapturedRecovery {
+    readonly phase: string;
+    readonly continuation: number;
+    readonly stage?: string;
+    readonly reason?: string;
+  }
+
+  function captureRecovery(session: CopilotSession): CapturedRecovery[] {
+    const events: CapturedRecovery[] = [];
+    session.on('recovery', (event) => {
+      events.push({
+        phase: event.phase,
+        continuation: event.continuation,
+        ...(event.stage !== undefined ? { stage: event.stage } : {}),
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      });
+    });
+    return events;
+  }
+
+  function failCall(
+    handle: MockSdkSession,
+    apiCallId: string,
+    errorMessage = 'Connection is disposed.',
+  ): void {
+    handle._emit('model.call_failure', {
+      errorMessage,
+      apiCallId,
+      failureKind: 'transport',
+      transport: 'websocket',
+      source: 'top_level',
+    });
+  }
+
+  it('retries a failed resume handshake and continues the same session', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumedA = createMockSdkSession();
+      const resumedB = createMockSdkSession();
+      mockSdkSessions.push(resumedA, resumedB);
+      for (const handle of [mockSdkSession, resumedA, resumedB]) makeResumable(handle);
+      mockResumeSession.mockImplementationOnce(async () => {
+        throw new Error('Connection is disposed.');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 3,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 200,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'flaky-call-1');
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledTimes(2));
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(mockResumeSession).toHaveBeenNthCalledWith(
+        2,
+        mock.sessionId,
+        expect.objectContaining({ continuePendingWork: false }),
+      );
+      // A rejected resume consumes no handle from the pool, so the second
+      // attempt resumes the one that was queued first.
+      expect(resumedA.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(resumedB.rpc.sendMessages).not.toHaveBeenCalled();
+      expect(recoveryEvents.map(event => [event.phase, event.continuation])).toEqual([
+        ['scheduled', 1],
+        ['resuming', 1],
+        ['scheduled', 2],
+        ['resuming', 2],
+        ['continuation-sent', 2],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exhausts after every handshake fails, naming the failing stage', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = Array.from({ length: 3 }, () => createMockSdkSession());
+      mockSdkSessions.push(...resumed);
+      for (const handle of [mockSdkSession, ...resumed]) makeResumable(handle);
+      mockResumeSession.mockImplementation(async () => {
+        throw new Error('Connection is disposed.');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 3,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'dead-call-1');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(mockResumeSession).toHaveBeenCalledTimes(3);
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+      }));
+      const exhausted = recoveryEvents.at(-1);
+      expect(exhausted).toEqual({
+        phase: 'exhausted',
+        continuation: 3,
+        stage: 'resume',
+        reason: 'Connection is disposed.',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps failed handshakes at 23 resumes, like any other continuation', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = Array.from({ length: 23 }, () => createMockSdkSession());
+      mockSdkSessions.push(...resumed);
+      for (const handle of [mockSdkSession, ...resumed]) makeResumable(handle);
+      mockResumeSession.mockImplementation(async () => {
+        throw new Error('Connection is disposed.');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 99,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'capped-dead-call-1');
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(mockResumeSession).toHaveBeenCalledTimes(23);
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        suppressFreshSessionRetry: true,
+      }));
+      expect(recoveryEvents.at(-1)).toEqual({
+        phase: 'exhausted',
+        continuation: 23,
+        stage: 'resume',
+        reason: 'Connection is disposed.',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the handshake failure, not the deadline, when the retry wait crosses the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      for (const handle of [mockSdkSession, resumed]) makeResumable(handle);
+      mockResumeSession.mockImplementation(async () => {
+        throw new Error('Connection is disposed.');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 23,
+          budgetMs: 150,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'budgeted-call-1');
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(mockResumeSession).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+        message: expect.stringContaining('Connection is disposed.'),
+      }));
+      const exhausted = recoveryEvents.at(-1);
+      expect(exhausted?.phase).toBe('exhausted');
+      expect(exhausted?.reason).toBe('Connection is disposed.');
+      expect(exhausted?.reason).not.toBe('Session recovery deadline exhausted');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats a resumed session id mismatch as fatal instead of retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      makeResumable(mockSdkSession);
+      mockResumeSession.mockImplementationOnce(async () => {
+        const handle = createMockSdkSession();
+        handle.sessionId = 'other-session';
+        return handle;
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 5,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'mismatch-call-1');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(mockResumeSession).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'SessionRecoveryExhaustedError',
+      }));
+      const requestedSessionId = mockResumeSession.mock.calls[0]![0];
+      expect(recoveryEvents.at(-1)).toEqual({
+        phase: 'exhausted',
+        continuation: 1,
+        stage: 'resume',
+        reason: `SDK resumed unexpected session 'other-session' instead of '${requestedSessionId}'`,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tears down the resumed handle and client before the retry resumes again', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumedA = createMockSdkSession();
+      const resumedB = createMockSdkSession();
+      mockSdkSessions.push(resumedA, resumedB);
+      for (const handle of [mockSdkSession, resumedA, resumedB]) makeResumable(handle);
+      resumedA.rpc.sendMessages.mockImplementationOnce(async () => {
+        throw new Error('nudge failed');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 3,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'late-failure-call-1');
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledTimes(2));
+
+      // The second resume is only legal because the first attempt brought both
+      // its handle and its client down before it: a lingering client could make
+      // the SDK refuse the resume as already active.
+      expect(resumedA.disconnect).toHaveBeenCalledOnce();
+      expect(resumedA.disconnect.mock.invocationCallOrder[0]!)
+        .toBeLessThan(mockResumeSession.mock.invocationCallOrder[1]!);
+      expect(mockStop.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(Math.max(...mockStop.mock.invocationCallOrder))
+        .toBeLessThan(mockResumeSession.mock.invocationCallOrder[1]!);
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(resumedB.rpc.sendMessages).toHaveBeenCalledWith({ messages: [], wait: false });
+      expect(recoveryEvents.map(event => [event.phase, event.continuation])).toEqual([
+        ['scheduled', 1],
+        ['resuming', 1],
+        ['scheduled', 2],
+        ['resuming', 2],
+        ['continuation-sent', 2],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names the continuation stage when the nudge is what fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      for (const handle of [mockSdkSession, resumed]) makeResumable(handle);
+      resumed.rpc.sendMessages.mockImplementationOnce(async () => {
+        throw new Error('nudge failed');
+      });
+      const { session, mock } = await createTestSession({}, {
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      failCall(mock, 'nudge-failure-call-1');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(mockResumeSession).toHaveBeenCalledOnce();
+      expect(recoveryEvents.at(-1)).toEqual({
+        phase: 'exhausted',
+        continuation: 1,
+        stage: 'continuation',
+        reason: 'nudge failed',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes a stalled tool turn instead of failing it when recovery is enabled', async () => {
+    vi.useFakeTimers();
+    try {
+      const resumed = createMockSdkSession();
+      mockSdkSessions.push(resumed);
+      for (const handle of [mockSdkSession, resumed]) makeResumable(handle);
+      const { session, mock } = await createTestSession({}, {
+        heartbeatTimeout: 2,
+        sessionRecovery: {
+          maxContinuations: 1,
+          nativeRetryGraceMs: 0,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+        },
+      });
+      const errorHandler = vi.fn();
+      session.on('error', errorHandler);
+      const recoveryEvents = captureRecovery(session);
+      session.send('test prompt');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mock._emit('tool.execution_start', {
+        toolName: 'Read',
+        toolCallId: 'tool-1',
+        arguments: {},
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(mockResumeSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(mockResumeSession).toHaveBeenCalledOnce());
+
+      expect(errorHandler).not.toHaveBeenCalled();
+      expect(recoveryEvents.map(event => [event.phase, event.continuation])).toEqual([
+        ['scheduled', 1],
+        ['resuming', 1],
+        ['continuation-sent', 1],
+      ]);
     } finally {
       vi.useRealTimers();
     }

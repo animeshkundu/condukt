@@ -312,4 +312,36 @@ describe('declared-output guard', () => {
 
     expect(continuations).toEqual([`apply_patch ${OUTPUT} (1/1)`]);
   });
+
+  it('hands the prompt the absolute path, so a consumer can name the file its tool will see', async () => {
+    // The consumer supplies the prompt because it knows which tool performs the
+    // write, and a tool needs the absolute path: the node's cwd can be a
+    // checkout while the artifact lives in the execution directory.
+    const dir = createTmpDir();
+    dirs.push(dir);
+    const { runtime, continuations } = recordingRuntime({});
+    let seen: { outputPath: string; artifactPath: string } | null = null;
+    const nodeFn = agent({
+      output: OUTPUT,
+      requireOutput: true,
+      promptBuilder: () => 'go',
+      outputNudge: {
+        maxNudges: 1,
+        backoffBaseMs: 1,
+        backoffMaxMs: 1,
+        prompt: ({ outputPath, artifactPath }) => {
+          seen = { outputPath, artifactPath };
+          return `write ${artifactPath}`;
+        },
+      },
+    });
+
+    await expect(nodeFn(nodeInput(dir), context(runtime))).rejects.toThrow(
+      MissingRequiredOutputError,
+    );
+
+    expect(seen!.outputPath).toBe(OUTPUT);
+    expect(path.isAbsolute(seen!.artifactPath)).toBe(true);
+    expect(continuations).toEqual([`write ${path.join(dir, OUTPUT)}`]);
+  });
 });

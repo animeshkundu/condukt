@@ -48,6 +48,7 @@ export type {
   ContextAttributionEntry, SessionContextAttribution, ContextHeaviestMessage, ContextHeaviestMessages, RecomputedContextTokens,
   SessionUsageTokenDetail, SessionUsageCodeChanges, SessionUsageModelMetric, SessionUsageMetrics,
   RetryPolicy, RetryMeta, SessionRecoveryPolicy, SessionRecoveryEvent, SessionRecoveryPhase, MCPServerConfig, MCPServersOption, CustomAgentConfig, DefaultAgentConfig, SubagentLimits, SubagentRosterOption,
+  OutputNudgePolicy, OutputNudgeContext,
   ExecutionProjection, ProjectionNode, ProjectionEdge, CostByProvenance, ToolUsageData,
   StorageEngine, OutputPage,
   ExecutionId,
