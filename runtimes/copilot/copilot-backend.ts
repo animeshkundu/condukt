@@ -255,6 +255,15 @@ export interface CopilotSession {
   /** Send a prompt to the agent. Agent begins working. */
   send(prompt: string): void;
 
+  /**
+   * Append one more user turn to the live session and resolve when it settles.
+   *
+   * Backends that can keep the session handle alive implement this; the
+   * declared-output guard uses it to recover a missing artifact without a cold
+   * restart. Backends that cannot simply leave it undefined.
+   */
+  continueSession?(prompt: string): Promise<void>;
+
   // Core events (7 — emitted by all backends)
   /** Subscribe to streaming text output from the agent */
   on(event: 'text', handler: (text: string, parentToolCallId?: string) => void): void;

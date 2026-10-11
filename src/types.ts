@@ -698,6 +698,17 @@ export interface AgentSession {
   readonly metadata?: AgentSessionMetadata;
   readonly usage?: AgentSessionUsage;
   send(prompt: string): void;
+  /**
+   * Send a follow-up user turn over the live session handle and resolve when
+   * that turn settles.
+   *
+   * Exists for the declared-output guarantee: when a node declares `output`
+   * and the model finishes a turn without writing it, `agent()` continues the
+   * *same* conversation rather than restarting the node. Backends that cannot
+   * continue a session leave this undefined and the guard reports the miss
+   * loudly instead of silently succeeding.
+   */
+  continueSession?(prompt: string): Promise<void>;
   // Core events (all backends)
   on(event: 'text', handler: (text: string) => void): void;
   on(event: 'tool_start', handler: (tool: string, input: string, args: Record<string, unknown>, callId?: string) => void): void;
@@ -731,6 +742,53 @@ export interface ToolRef {
   readonly displayName: string;
 }
 
+/** Inputs handed to a custom `OutputNudgePolicy.prompt`. */
+export interface OutputNudgeContext {
+  /** Path of the declared artifact that is missing or blank, as configured. */
+  readonly outputPath: string;
+  /** 1-based index of the nudge about to be sent. */
+  readonly attempt: number;
+  /** Total nudges permitted for this session attempt. */
+  readonly maxNudges: number;
+}
+
+/**
+ * Controls the declared-output guard in `agent()`.
+ *
+ * When a node sets `requireOutput` and the session's first turn ends without
+ * the declared artifact, the guard continues the same conversation instead of
+ * failing the node or retrying it cold. Bounded by `maxNudges` inside a single
+ * session attempt, so the attempt deadline and heartbeat still cover the whole
+ * thing.
+ */
+export interface OutputNudgePolicy {
+  /** Nudges per session attempt. Default 2. */
+  readonly maxNudges?: number;
+  /** First backoff between the miss and the nudge, in ms. Default 2000. */
+  readonly backoffBaseMs?: number;
+  /** Ceiling for the exponential backoff, in ms. Default 30000. */
+  readonly backoffMaxMs?: number;
+  /** Add up to +/-25% jitter to each backoff. Default true. */
+  readonly jitter?: boolean;
+  /**
+   * Nudge text. Defaults to naming the absolute path and demanding a file
+   * write; supply this to name the tool the runtime actually exposes.
+   */
+  readonly prompt?: (context: OutputNudgeContext) => string;
+}
+
+/**
+ * Frozen defaults for {@link OutputNudgePolicy}. `prompt` is intentionally
+ * absent so the runtime can fall back to the path-only wording.
+ */
+export const DEFAULT_OUTPUT_NUDGE_POLICY: Readonly<Required<Omit<OutputNudgePolicy, 'prompt'>>> =
+  Object.freeze({
+    maxNudges: 2,
+    backoffBaseMs: 2_000,
+    backoffMaxMs: 30_000,
+    jitter: true,
+  });
+
 export interface AgentConfig extends SubagentLimits {
   /**
    * @deprecated Documentation only — never reaches the model. Inert; retained
@@ -748,6 +806,13 @@ export interface AgentConfig extends SubagentLimits {
    * Invalid or inert when `output` is not specified.
    */
   readonly requireOutput?: boolean;
+  /**
+   * Policy for the declared-output guard. Only consulted when `requireOutput`
+   * and `output` are both set. `false` disables the guard entirely (a miss
+   * still fails the node when `requireOutput` is true; it just is not
+   * recovered in-session).
+   */
+  readonly outputNudge?: OutputNudgePolicy | false;
   readonly reads?: readonly string[];
   readonly model?: string;
   readonly thinkingBudget?: ThinkingBudget;

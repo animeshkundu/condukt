@@ -27,8 +27,8 @@ export interface MockNodeConfig {
     readonly input: string;
     readonly output: string;
   }>;
-  /** Artifact content to write, or one artifact value per send. */
-  readonly artifact?: string | readonly string[];
+  /** Artifact content to write, or one artifact value per send (undefined writes nothing). */
+  readonly artifact?: string | readonly (string | undefined)[];
   /** Override the SessionConfig-derived artifact filename. */
   readonly artifactFilename?: string;
   /** Error to emit instead of idle, or one error/success value per send. */
@@ -45,6 +45,9 @@ type SessionEvent =
   | { event: 'tool_output'; handler: (tool: string, output: string) => void }
   | { event: 'idle'; handler: () => void }
   | { event: 'error'; handler: (err: Error) => void };
+
+/** Handles that let `abort()` release a `runTurn` promise that would otherwise hang. */
+type TurnSettlement = { resolve: () => void; reject: (error: Error) => void };
 
 function sequenceValue<T>(values: readonly T[], index: number): T | undefined {
   if (values.length === 0) return undefined;
@@ -156,6 +159,8 @@ class MockAgentSession implements AgentSession {
   private readonly claimResponseIndex: () => number;
   private aborted = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** Turns whose `runTurn` promise has not settled yet; rejected by `abort`. */
+  private pendingTurns: TurnSettlement[] = [];
 
   constructor(
     nodeConfig: MockNodeConfig,
@@ -170,8 +175,32 @@ class MockAgentSession implements AgentSession {
   }
 
   send(_prompt: string): void {
+    void this.runTurn().catch(() => undefined);
+  }
+
+  /**
+   * Replay the same scripted turn against the next configured response index, so
+   * a fixture like `artifact: [undefined, '# doc']` models "the model wrote the
+   * file only after being nudged".
+   */
+  async continueSession(_prompt: string): Promise<void> {
+    if (this.aborted) throw new Error('Session is aborted');
+    await this.runTurn();
+  }
+
+  private runTurn(): Promise<void> {
     const delay = this.nodeConfig.delay ?? 0;
     const responseIndex = this.claimResponseIndex();
+
+    let settle: TurnSettlement = { resolve: () => undefined, reject: () => undefined };
+    const done = new Promise<void>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    const finish = (): void => {
+      const index = this.pendingTurns.indexOf(settle);
+      if (index >= 0) this.pendingTurns.splice(index, 1);
+    };
+    this.pendingTurns.push(settle);
 
     const execute = () => {
       if (this.aborted) return;
@@ -208,10 +237,10 @@ class MockAgentSession implements AgentSession {
           fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
           fs.writeFileSync(artifactPath, artifact, 'utf-8');
         } catch (error) {
-          this.emit(
-            'error',
-            error instanceof Error ? error : new Error(String(error)),
-          );
+          const failure = error instanceof Error ? error : new Error(String(error));
+          this.emit('error', failure);
+          finish();
+          settle.reject(failure);
           return;
         }
       }
@@ -222,8 +251,12 @@ class MockAgentSession implements AgentSession {
       const error = resolveError(this.nodeConfig.error, responseIndex);
       if (error) {
         this.emit('error', error);
+        finish();
+        settle.reject(error);
       } else {
         this.emit('idle');
+        finish();
+        settle.resolve();
       }
     };
 
@@ -233,6 +266,8 @@ class MockAgentSession implements AgentSession {
       // Use microtask to keep async behavior consistent
       queueMicrotask(execute);
     }
+
+    return done;
   }
 
   // Overloads match AgentSession interface exactly.
@@ -263,6 +298,9 @@ class MockAgentSession implements AgentSession {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    const pending = this.pendingTurns;
+    this.pendingTurns = [];
+    for (const turn of pending) turn.reject(new Error('Session aborted'));
   }
 
   private emit(event: string, ...args: unknown[]): void {
