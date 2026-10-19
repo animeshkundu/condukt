@@ -1,0 +1,18 @@
+export { ClaudeAgentRuntime, createClaudeRuntime } from './claude-runtime';
+export type { ClaudeRuntimeOptions } from './claude-runtime';
+export { ClaudeAgentSession } from './claude-session';
+export { FallbackRuntime, createFallbackRuntime } from './fallback-runtime';
+export { mapSdkMessage, createMapState } from './message-mapper';
+export type { ClaudeSessionEmitter, MapOptions, MapState } from './message-mapper';
+export { mapConfig, mapPermissionMode, isSafeMode } from './config-mapper';
+export type { ClaudeConfigMapping, ClaudeConfigMapOptions } from './config-mapper';
+export { runOneShot, buildAdvisorStandInServer } from './one-shot';
+export { createBridge, buildBridgeEnv, timeoutSignal } from './protocol-bridge';
+export type { BridgeConfig, BridgeHandle, BridgeMetrics, BridgeRuntimeConfig } from './protocol-bridge';
+export * from './bridge-cache';
+export * from './session-epoch';
+export * from './epoch-store';
+export * from './protocol-router';
+export * from './translate-chat';
+export * from './translate-responses';
+export { sseFrame, createLineReader, parseDataLine } from './sse';
