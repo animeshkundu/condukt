@@ -4,7 +4,7 @@
  * the write path, atomic temp+rename writes, shared in-process stores.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -120,6 +120,36 @@ describe('epoch store writes', () => {
     expect(Object.keys(onDisk)).toEqual(['live']);
     expect(onDisk['live'].epoch).toBe(1);
     expect(fs.existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  it('gives each write its own temp file and leaves none behind', () => {
+    const now = Date.now();
+    const realRename = fs.renameSync;
+    const renamedFrom: string[] = [];
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation(((
+      from: fs.PathLike,
+      to: fs.PathLike,
+    ) => {
+      renamedFrom.push(String(from));
+      realRename(from, to);
+    }) as typeof fs.renameSync);
+    try {
+      const store = { live: { ...initialEpochState(now), epoch: 1 } };
+      writeEpochStore(file, store, now, C);
+      writeEpochStore(file, store, now, C);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(renamedFrom).toHaveLength(2);
+    // A shared fixed temp name let two processes clobber each other's
+    // half-written file; each writer now names its own.
+    expect(renamedFrom[0]).not.toBe(renamedFrom[1]);
+    for (const tmp of renamedFrom) {
+      expect(tmp.startsWith(`${file}.`)).toBe(true);
+      expect(tmp.endsWith('.tmp')).toBe(true);
+      expect(fs.existsSync(tmp)).toBe(false);
+    }
+    expect(fs.readdirSync(dir)).toEqual([path.basename(file)]);
   });
 
   it('never throws on an unwritable target', () => {

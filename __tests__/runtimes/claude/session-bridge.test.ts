@@ -70,7 +70,7 @@ describe('session bridge wiring', () => {
     const runtime = new ClaudeAgentRuntime({
       bridge: { upstreamBaseUrl: 'https://opencode.ai/inference/go', sessionId: 'sess-runtime' },
     });
-    const session = (await runtime.createSession(baseConfig())) as ClaudeAgentSession;
+    const session = (await runtime.createSession(baseConfig())) as unknown as ClaudeAgentSession;
     const handle = await session.ensureBridge();
     expect(handle!.endpoints.responses).toBe('https://opencode.ai/inference/go/openai/v1/responses');
     await session.abort();

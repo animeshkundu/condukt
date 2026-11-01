@@ -7,6 +7,7 @@ import {
   openAIToAnthropic,
   parseToolArgs,
 } from '../../../runtimes/claude/translate-chat';
+import { json } from './helpers/json';
 import { eventData, events, parseFrames } from './helpers/sse';
 
 describe('anthropicToOpenAI', () => {
@@ -20,7 +21,7 @@ describe('anthropicToOpenAI', () => {
       top_p: 0.9,
       stop_sequences: ['END'],
     };
-    const out = anthropicToOpenAI(body, 'deepseek-v4-pro');
+    const out = json(anthropicToOpenAI(body, 'deepseek-v4-pro'));
     expect(out.messages[0]).toEqual({ role: 'system', content: 'be helpful' });
     expect(out.messages[1]).toEqual({ role: 'user', content: 'hi' });
     expect(out.max_tokens).toBe(100);
@@ -62,7 +63,7 @@ describe('anthropicToOpenAI', () => {
         },
       ],
     };
-    const out = anthropicToOpenAI(body, 'm');
+    const out = json(anthropicToOpenAI(body, 'm'));
     expect(out.messages[0].content[0]).toEqual({ type: 'text', text: 'sys' });
     expect(out.messages[0].content[1]).toEqual({
       type: 'image_url',
@@ -80,12 +81,12 @@ describe('anthropicToOpenAI', () => {
         { role: 'assistant', content: [{ type: 'text', text: 'b' }] },
       ],
     };
-    const out = anthropicToOpenAI(body, 'deepseek-v4-pro');
+    const out = json(anthropicToOpenAI(body, 'deepseek-v4-pro'));
     expect(out.messages[0].reasoning_content).toBe('because');
     expect(out.messages[1].reasoning_content).toBe(' ');
   });
 
-  it('maps tool_use to tool_calls with stable ids and tool_result to tool role, results first', () => {
+  it('maps tool_use to tool_calls with stable ids, keeps preamble text, results first', () => {
     const body = {
       messages: [
         {
@@ -104,9 +105,10 @@ describe('anthropicToOpenAI', () => {
         },
       ],
     };
-    const out = anthropicToOpenAI(body, 'glm-5.3');
+    const out = json(anthropicToOpenAI(body, 'glm-5.3'));
     const asst = out.messages[0];
-    expect(asst.content).toBeNull();
+    // Preamble text survives next to the calls; only a call-only turn is null.
+    expect(asst.content).toBe('calling');
     expect(asst.tool_calls).toHaveLength(1);
     expect(asst.tool_calls[0].function.name).toBe('Read');
     expect(asst.tool_calls[0].function.arguments).toBe('{"path":"a.ts"}');
@@ -114,6 +116,14 @@ describe('anthropicToOpenAI', () => {
     // tool result emitted BEFORE the containing user message.
     expect(out.messages[1]).toEqual({ role: 'tool', tool_call_id: 'toolu_x', content: 'file body' });
     expect(out.messages[2]).toEqual({ role: 'user', content: 'next' });
+  });
+
+  it('sends null content for an assistant turn that is only tool calls', () => {
+    const out = json(anthropicToOpenAI(
+      { messages: [{ role: 'assistant', content: [{ type: 'tool_use', name: 'Read', input: {} }] }] },
+      'glm-5.3',
+    ));
+    expect(out.messages[0].content).toBeNull();
   });
 
   it('maps tools and tool_choice', () => {
@@ -193,7 +203,7 @@ describe('openAIToAnthropic', () => {
         completion_tokens_details: { reasoning_tokens: 20 },
       },
     };
-    const msg = openAIToAnthropic(resp, 'claude-x');
+    const msg = json(openAIToAnthropic(resp, 'claude-x'));
     expect(msg.stop_reason).toBe('tool_use');
     expect(msg.content[0]).toEqual({ type: 'thinking', thinking: 'thought' });
     expect(msg.content[1]).toEqual({ type: 'text', text: 'answer' });
@@ -375,7 +385,7 @@ describe('ChatStreamTranslator', () => {
     expect(eventData(frames, 'message_delta')[0].delta.stop_reason).toBe('error');
   });
 
-  it('combines cache read+creation into cache_read_input_tokens (reference parity)', () => {
+  it('reports streamed cache reads and writes under separate Anthropic fields', () => {
     const t = new ChatStreamTranslator({ requestedModel: 'm', messageId: 'msg_9' });
     pushChunks(t, [
       {
@@ -390,7 +400,10 @@ describe('ChatStreamTranslator', () => {
     );
     frames.push(...t.finish());
     const usage = eventData(frames, 'message_delta')[0].usage;
-    expect(usage.cache_read_input_tokens).toBe(50);
+    // A write is not a read: folding creation into the read field would
+    // report a cache hit the upstream never had.
+    expect(usage.cache_read_input_tokens).toBe(40);
+    expect(usage.cache_creation_input_tokens).toBe(10);
   });
 
   it('tolerates chunk boundaries splitting SSE lines', () => {

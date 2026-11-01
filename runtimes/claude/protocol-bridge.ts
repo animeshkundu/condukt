@@ -214,7 +214,49 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-function anthropicErrorPayload(type: 'invalid_request_error' | 'api_error', message: string): string {
+/** Anthropic error type names an SDK client may branch on. */
+type AnthropicErrorType =
+  | 'invalid_request_error'
+  | 'authentication_error'
+  | 'permission_error'
+  | 'not_found_error'
+  | 'request_too_large'
+  | 'rate_limit_error'
+  | 'api_error'
+  | 'overloaded_error';
+
+/**
+ * The Anthropic client branches on `error.type`, not on the HTTP status.
+ * Collapsing every 4xx into `invalid_request_error` makes a 401 look like a
+ * malformed request, and a client that would re-authenticate instead keeps
+ * resending the same rejected credential.
+ */
+export function anthropicErrorTypeForStatus(status: number): AnthropicErrorType {
+  switch (status) {
+    case 400:
+      return 'invalid_request_error';
+    case 401:
+      return 'authentication_error';
+    case 403:
+      return 'permission_error';
+    case 404:
+      return 'not_found_error';
+    case 413:
+      return 'request_too_large';
+    case 429:
+      return 'rate_limit_error';
+    // Timeout / "too early" are transport faults, not malformed requests.
+    case 408:
+    case 425:
+      return 'api_error';
+    case 529:
+      return 'overloaded_error';
+    default:
+      return status >= 500 ? 'api_error' : 'invalid_request_error';
+  }
+}
+
+function anthropicErrorPayload(type: AnthropicErrorType, message: string): string {
   return JSON.stringify({ type: 'error', error: { type, message } });
 }
 
@@ -570,8 +612,7 @@ function createBridgeUnsafe(config: BridgeConfig): Promise<BridgeHandle> {
     }
 
     function sendError(res: http.ServerResponse, status: number, message: string): void {
-      const type = status >= 400 && status < 500 ? 'invalid_request_error' : 'api_error';
-      sendJson(res, status, anthropicErrorPayload(type, message));
+      sendJson(res, status, anthropicErrorPayload(anthropicErrorTypeForStatus(status), message));
     }
 
     /**

@@ -132,6 +132,19 @@ function extractToolResultText(content: unknown): string {
   return '';
 }
 
+// ── Shape narrowing ──────────────────────────────────────────────────
+
+/**
+ * Narrow an untrusted JSON value to an indexable object. Upstream bodies and
+ * Anthropic requests are both untrusted, so every nested read goes through a
+ * check like this rather than an `any` cast.
+ */
+export function asObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 // ── Request translation ──────────────────────────────────────────────
 
 export interface AnthropicToOpenAIOptions {
@@ -144,7 +157,7 @@ export interface AnthropicToOpenAIOptions {
  * Ported 1:1 from the reference proxy (system media, thinking replay,
  * tool ordering, tool_choice, thinking budget → max_completion_tokens).
  */
-export function anthropicToOpenAI(body: Record<string, any>, model: string, opts: AnthropicToOpenAIOptions = {}): Record<string, any> {
+export function anthropicToOpenAI(body: Record<string, unknown>, model: string, opts: AnthropicToOpenAIOptions = {}): Record<string, unknown> {
   const noMulti = opts.noMultimodal ?? NO_MULTIMODAL;
   const thinking = thinkingEnabled(body);
   const messages: Record<string, unknown>[] = [];
@@ -246,7 +259,14 @@ export function anthropicToOpenAI(body: Record<string, any>, model: string, opts
     const joinedThinking = thinkingParts.join('\n');
     const forceString = noMulti.has(model);
     if (toolCalls.length > 0) {
-      const out: Record<string, unknown> = { role, content: null, tool_calls: toolCalls };
+      // Keep any assistant text that accompanied the calls: dropping it loses
+      // the model's preamble ("I'll check the file"), and OpenAI-compatible
+      // upstreams accept a string content alongside `tool_calls`.
+      const out: Record<string, unknown> = {
+        role,
+        content: textParts.length > 0 ? textParts.join('\n') : null,
+        tool_calls: toolCalls,
+      };
       if (joinedThinking) out['reasoning_content'] = joinedThinking;
       else if (thinking && isAssistant) out['reasoning_content'] = ' ';
       messages.push(out);
@@ -263,23 +283,17 @@ export function anthropicToOpenAI(body: Record<string, any>, model: string, opts
     }
   }
 
-  const oai: Record<string, any> = {
+  const oai: Record<string, unknown> = {
     model,
     messages,
     max_tokens: body['max_tokens'] ?? 16384,
     stream: body['stream'] ?? false,
   };
 
-  const thinkingCfg = body['thinking'];
+  const thinkingCfg = asObject(body['thinking']);
   // Only reasoning families (deepseek/glm) accept max_completion_tokens;
   // non-reasoning chat models reject the field when max_tokens is also set.
-  if (
-    thinking &&
-    thinkingCfg &&
-    typeof thinkingCfg === 'object' &&
-    thinkingCfg['budget_tokens'] &&
-    chatFamilyOf(model) !== null
-  ) {
+  if (thinking && thinkingCfg?.['budget_tokens'] && chatFamilyOf(model) !== null) {
     oai['max_completion_tokens'] = thinkingCfg['budget_tokens'];
   }
 
@@ -293,20 +307,22 @@ export function anthropicToOpenAI(body: Record<string, any>, model: string, opts
 
   if (Array.isArray(body['tools'])) {
     oai['tools'] = body['tools']
-      .filter((t: any) => t && typeof t === 'object' && typeof t.name === 'string' && t.name)
-      .map((t: any) => ({
+      .map((t) => asObject(t))
+      .filter((t): t is Record<string, unknown> => t !== null && typeof t['name'] === 'string' && t['name'] !== '')
+      .map((t) => ({
         type: 'function',
         function: {
-          name: t.name,
-          description: t.description ?? '',
-          parameters: t.input_schema ?? {},
+          name: t['name'],
+          description: t['description'] ?? '',
+          parameters: t['input_schema'] ?? {},
         },
       }));
     const tc = body['tool_choice'] ?? 'auto';
-    if (tc && typeof tc === 'object') {
-      const tcType = tc['type'] ?? 'auto';
+    const tcObj = asObject(tc);
+    if (tcObj !== null) {
+      const tcType = tcObj['type'] ?? 'auto';
       if (tcType === 'tool') {
-        oai['tool_choice'] = { type: 'function', function: { name: tc['name'] ?? '' } };
+        oai['tool_choice'] = { type: 'function', function: { name: tcObj['name'] ?? '' } };
       } else if (tcType === 'any') {
         oai['tool_choice'] = 'required';
       } else {
@@ -352,7 +368,7 @@ export interface ChatExtrasSent {
  * thinking on (upstream 400s). Returns the wire truth for telemetry.
  */
 export function applyChatExtras(
-  oaiBody: Record<string, any>,
+  oaiBody: Record<string, unknown>,
   modelId: string,
   session: string,
   clientEffort: string | null = null,
@@ -413,7 +429,7 @@ export function applyChatExtras(
         if (t === 'required') bad = true;
         if (t === 'function') {
           const fn = (tc as Record<string, unknown>)['function'];
-          if (fn && typeof fn === 'object' && typeof (fn as any).name === 'string') bad = true;
+          if (fn && typeof fn === 'object' && typeof (fn as Record<string, unknown>).name === 'string') bad = true;
         }
       } else if (tc === 'required') {
         bad = true;
@@ -465,7 +481,7 @@ function oaiUsageToAnthropic(usage: unknown): Record<string, unknown> {
  * Convert a non-streaming chat/completions response to an Anthropic
  * message. Loud on malformed tool-call arguments.
  */
-export function openAIToAnthropic(resp: Record<string, any>, requested: string, messageId?: string): Record<string, any> {
+export function openAIToAnthropic(resp: Record<string, unknown>, requested: string, messageId?: string): Record<string, unknown> {
   if (!resp || typeof resp !== 'object') {
     throw new Error('upstream returned a malformed response envelope');
   }
@@ -486,7 +502,7 @@ export function openAIToAnthropic(resp: Record<string, any>, requested: string, 
       typeof content === 'string'
         ? content
         : Array.isArray(content)
-          ? content.map((p: any) => (p && typeof p === 'object' && typeof p.text === 'string' ? p.text : '')).join('')
+          ? content.map((p) => String(asObject(p)?.['text'] ?? '')).join('')
           : '';
     if (text) blocks.push({ type: 'text', text });
   }
@@ -625,7 +641,7 @@ export class ChatStreamTranslator {
     for (const line of lines) {
       const data = parseDataLine(line);
       if (!data) continue;
-      let chunk: Record<string, any>;
+      let chunk: Record<string, unknown>;
       try {
         chunk = JSON.parse(data);
       } catch {
@@ -693,7 +709,7 @@ export class ChatStreamTranslator {
 
   // ── internals ──────────────────────────────────────────────────────
 
-  private handleChunk(chunk: Record<string, any>): string[] {
+  private handleChunk(chunk: Record<string, unknown>): string[] {
     const frames: string[] = [];
     const u = chunk['usage'];
     if (u && typeof u === 'object') {
@@ -714,9 +730,7 @@ export class ChatStreamTranslator {
     const c = delta['content'];
     if (typeof c === 'string') text = c;
     else if (Array.isArray(c)) {
-      text = c
-        .map((p: any) => (p && typeof p === 'object' && typeof p.text === 'string' ? p.text : ''))
-        .join('');
+      text = c.map((p) => String(asObject(p)?.['text'] ?? '')).join('');
     }
     if (text) {
       if (this.textBlockIdx === null) {
@@ -844,9 +858,16 @@ export class ChatStreamTranslator {
     const u = this.usage ?? {};
     const finalIn = Number(u['prompt_tokens'] ?? u['input_tokens'] ?? this.estimatedInput) || this.estimatedInput;
     const finalOut = this.finalOutputTokens();
-    const cache = extractCacheReadTokens(u) + extractCacheCreationTokens(u);
+    // Report reads and writes under their own Anthropic fields. Folding the
+    // write count into `cache_read_input_tokens` (as the reference does) makes
+    // an assistant client see cache hits that never happened.
     const usage = withReasoningSplit(
-      { output_tokens: finalOut, input_tokens: finalIn, cache_read_input_tokens: cache },
+      {
+        output_tokens: finalOut,
+        input_tokens: finalIn,
+        cache_read_input_tokens: extractCacheReadTokens(u),
+        cache_creation_input_tokens: extractCacheCreationTokens(u),
+      },
       u,
     );
     return [
@@ -859,7 +880,7 @@ export class ChatStreamTranslator {
 // ── Input estimation ─────────────────────────────────────────────────
 
 /** Rough pre-stream input estimate (reference `_estimate_input_tokens`). */
-export function estimateInputTokens(body: Record<string, any>): number {
+export function estimateInputTokens(body: Record<string, unknown>): number {
   const chunks: string[] = [];
   const system = body?.['system'] ?? '';
   if (typeof system === 'string') chunks.push(system);

@@ -19,10 +19,23 @@ export class FallbackRuntime implements AgentRuntime {
   }
 
   get capabilities(): RuntimeCapabilities | undefined {
-    // Intersection: Claude is more permissive; Copilot is the stricter superset claimant.
-    // We advertise Claude's capabilities only when Copilot absent.
-    if (this.copilot?.capabilities) return this.copilot.capabilities;
-    return this.claude.capabilities;
+    const claude = this.claude.capabilities;
+    if (this.copilot === null) return claude;
+    const copilot = this.copilot.capabilities;
+    // Either runtime may serve the next session, so advertise only what both
+    // guarantee. A Copilot runtime that claims nothing makes its guarantees
+    // unknown: repeating the required mode-verification flags on its behalf
+    // would let a caller require enforcement that may not exist. Claude's
+    // capabilities are all it has, and the fallback never exceeds them.
+    if (copilot === undefined || claude === undefined) return undefined;
+    // Recovery is opt-in per turn: it is safe to promise only when both
+    // runtimes can actually resume a failed turn in its persisted session.
+    const recovery = copilot.sessionRecovery === true && claude.sessionRecovery === true;
+    return {
+      readOnlyPermissions: true,
+      requiredModeVerification: true,
+      ...(recovery ? { sessionRecovery: true as const } : {}),
+    };
   }
 
   async createSession(config: SessionConfig, options?: SessionCreationOptions): Promise<AgentSession> {

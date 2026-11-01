@@ -11,6 +11,7 @@
  * a temp file + rename so a torn read is impossible.
  */
 
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -160,7 +161,10 @@ export function writeEpochStore(
     } catch {
       /* best effort */
     }
-    const tmp = `${file}.tmp`;
+    // A shared fixed temp name lets two processes share one sidecar file
+    // interleave: one renames the other's half-written file into place. The
+    // pid + random suffix keeps each writer's temp file its own.
+    const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     fs.renameSync(tmp, file);
   } catch {

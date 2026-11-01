@@ -7,6 +7,7 @@ import {
   responsesReasoning,
   responsesToAnthropic,
 } from '../../../runtimes/claude/translate-responses';
+import { json } from './helpers/json';
 import { eventData, events } from './helpers/sse';
 
 describe('anthropicToResponses', () => {
@@ -46,7 +47,7 @@ describe('anthropicToResponses', () => {
         { role: 'user', content: [{ type: 'tool_result', content: 'body' }] }, // no tool_use_id
       ],
     };
-    const out = anthropicToResponses(body, 'gpt-6-luna');
+    const out = json(anthropicToResponses(body, 'gpt-6-luna'));
     expect(out.input).toHaveLength(2);
     expect(out.input[0].type).toBe('function_call');
     expect(out.input[0].name).toBe('Read');
@@ -134,7 +135,7 @@ describe('responsesToAnthropic (non-stream)', () => {
         output_tokens_details: { reasoning_tokens: 30 },
       },
     };
-    const msg = responsesToAnthropic(resp, 'claude-x');
+    const msg = json(responsesToAnthropic(resp, 'claude-x'));
     expect(msg.stop_reason).toBe('tool_use');
     expect(msg.content[0]).toEqual({ type: 'text', text: 'hello' });
     expect(msg.content[1]).toMatchObject({ type: 'tool_use', id: 'call_1', name: 'Read', input: { p: 1 } });

@@ -7,6 +7,9 @@ Condukt supports a Claude Agent SDK runtime as a fallback to the default Copilot
 - Default: Copilot SDK (requires Copilot login).
 - Fallback: Claude Agent SDK when Copilot is unavailable or fails.
 - `FallbackRuntime` prefers Copilot and falls back transparently (logs a warning).
+- Capabilities are intersected: the fallback advertises a flag only when both runtimes
+  guarantee it, and reports none when either runtime reports none. A caller therefore never
+  requires mode enforcement or same-session recovery from a session that may not provide it.
 
 ## Setup
 
@@ -50,6 +53,10 @@ Upstream traffic is translated to one of three OpenCode Go / Zen surfaces, chose
 | `responses` | `…/openai/v1/responses` | Full request + SSE translation (text-only; media/web-search raise) |
 
 Routing precedence: explicit `protocol` force → `protocolMap[model]` → OpenCode docs table (exact model ids) → family fallback (`gpt-`/`grok-`/`muse-spark-` → responses; `claude-` → anthropic) — family fallback only applies to OpenCode bases; an Anthropic host defaults to `anthropic`, any other base to `openai`.
+
+Responses translation checks tool-choice support by family. A family with no documented row
+(a new model prefix) advertises only `tool_choice: auto` and reasoning effort `low`: a named
+tool choice is rejected locally instead of being forwarded and failing upstream.
 
 Endpoint derivation is shape-aware (live-verified):
 
@@ -115,6 +122,9 @@ affinity + cache namespace). Every session is era-labeled from birth:
 
 - Keepalive `: ping` comments during upstream silence; idle timeout fails closed.
 - Chat translation emits a proper `message_start`, reasoning → thinking blocks, stable block indices, `input_json_delta` for tool calls, `message_delta` → `message_stop`.
+- Streamed usage reports cache reads and cache writes in their own Anthropic fields
+  (`cache_read_input_tokens` / `cache_creation_input_tokens`). A write is never folded into
+  reads, so an assistant client sees a cache hit only when the upstream reported one.
 - Responses translation requires a terminal event; EOF without one fails closed. Truncated tool calls (length cut) error out without certifying a result.
 - Mid-stream failures after client-visible output close open blocks and emit an `error` event (chat also emits a final `message_delta` with `stop_reason: "error"`).
 
@@ -157,22 +167,23 @@ One bridge is started lazily per session (`session.ensureBridge()`) and closed o
 | Feature | Claude |
 |---|---|
 | Core events (text, reasoning, tool, idle, error) | ✅ |
-| usage | ✅ |
-| compaction | ✅ (complete only) |
-| subagents | ✅ (translated) |
-| permission | ✅ (translated) |
+| usage | ✅ (`result.modelUsage` deltas, subagent-inclusive) |
+| compaction | ✅ (start + complete) |
+| subagents | ✅ (translated, nested `parent_tool_use_id`) |
+| permission | ✅ (translated, including denial detail) |
 | continueSession (nudge) | ✅ |
 | timeout/heartbeat | ✅ |
 | advisor | ✅ (one-shot) |
 | stand-in (oracle) | ✅ (consumer aliases) |
-| MCP | ✅ |
+| MCP | ✅ (stdio/http/sse; `workingDirectory` dropped, no per-tool availability restriction) |
 | loops / quorum / scheduler / state | ✅ (runtime-agnostic) |
 | caching | ✅ (bridge) |
-| session recovery | ⚠️ (resume only, no policy) |
-| context attribution | ✅ (getContextUsage; compaction count not reported) |
-| history summarize/truncate | ⚠️ (summarize basic; truncate unsupported) |
-| partial tool output | ✅ (tool_progress) |
-| excluded builtin agents | ✅ (disallowedTools) |
+| session recovery | ✅ (policy-bounded, same-session resume — ADR-009) |
+| mode verification (`requireMode`) | ✅ (`init` readback of mode + built-in tool set) |
+| context attribution | ⚠️ (current-context total + compaction count only) |
+| history summarize/truncate | ✅ (summarize via isolated one-shot; truncate via `forkSession`) |
+| partial tool output | ❌ (the SDK streams no partial tool output) |
+| excluded builtin agents | ❌ (no Claude equivalent; ignored with a diagnostic) |
 | contextTier | N/A (model selection) |
 | intent | ❌ (Copilot-specific) |
 
@@ -180,7 +191,38 @@ One bridge is started lazily per session (`session.ensureBridge()`) and closed o
 
 - Default: `bypassPermissions` (autonomous). Documented security warning: only use in trusted/contained environments.
 - `mode: 'plan'`: Claude plan mode.
-- `permissionPolicy: 'read-only'`: `dontAsk` + write tools denied.
+- `permissionPolicy: 'read-only'`: `dontAsk` plus a **positive** built-in allow-list — the
+  intersection of the caller's built-in tools with `Read`, `Grep`, `Glob`, `LSP` (default
+  `Read`, `Grep`, `Glob`). Everything else is denied, including `Agent`/`Task`, `Bash`, and `Write`.
+  Under `dontAsk`, MCP tools the caller did not list are denied too; listed MCP tools stay
+  auto-allowed. This is stricter than Copilot, which auto-allows read-only MCP tools.
+- The internal advisor/stand-in server is registered as `condukt`, and under `dontAsk` its two
+  tools (`mcp__condukt__advisor`, `mcp__condukt__stand_in`) are added to `allowedTools`
+  automatically, so read-only sessions can still consult them. `bypassPermissions` needs no
+  entries; when no advisor is configured, nothing is registered or allow-listed.
+- `requireMode: true` verifies the first `init` frame before the turn proceeds: the applied
+  `permissionMode` must match the requested mode, and under read-only every built-in tool in
+  `init.tools` must be in the read-only set (`mcp__…` names are ignored). A mismatch fails the
+  turn with `ClaudeConfigurationError`.
+
+## Session configuration mapping
+
+| condukt | Claude SDK |
+|---|---|
+| `systemMessage` | `systemPrompt: {type:'preset', preset:'claude_code', append}` — appends, never replaces. The preset is snapshot-recorded at the first request, so a mid-session change only takes effect after compaction; config is fixed per session, so this is normally invisible. |
+| `addDirs` | `additionalDirectories`, resolved against `cwd` and deduped (the SDK requires absolute paths). |
+| `availableTools` | `builtin:*` → the full preset; built-in names → `tools` (the only availability lever; `Task` resolves to `Agent`); `mcp:*` / `mcp:<tool>` → keep servers, with exact `mcp__<server>__<tool>` entries in `allowedTools`; `custom:*` → no equivalent (logged, ignored). If the list yields no MCP entry, condukt's servers are pruned so MCP tools are unavailable. Per-tool availability on a kept server cannot be restricted — only permission. |
+| `subagentsEnabled: false` | `Agent` and legacy `Task` added to `disallowedTools`. |
+| `excludedTools`, `defaultAgent.excludedTools` | merged into `disallowedTools`, deduped. |
+| `excludedBuiltinAgents` | no equivalent (there is no built-in agent registry) — ignored with one diagnostic. |
+| `customAgents[]` | `description`, `prompt`, `tools`, `disallowedTools`, `mcpServers`, `skills`, `model`, `effort`. `displayName`/`infer` have no field. |
+| MCP tool list | wildcard → omit (all tools); empty → prune the server; string names become per-tool `permission_policy: 'always_allow'` plus `allowedTools` entries. `${A\|B}` placeholders resolve from the environment. `workingDirectory` is dropped — the SDK has no stdio cwd option. |
+| `mcpServers: false` | condukt registers nothing and also sets `mcpServers: {}` plus `strictMcpConfig: true`, so the CLI discovers no `.mcp.json`, plugin, or user-settings servers either. When servers are kept, `strictMcpConfig` is left unset and host discovery still applies. |
+
+One-shot calls (advisor, stand-in, handoff summary) run isolated: `settingSources: []`,
+`tools: []`, `mcpServers: {}`, `permissionMode: 'dontAsk'` — no host CLAUDE.md, hooks, project
+settings, or `.mcp.json`. Main sessions keep the SDK default, so host settings load as they would
+in Claude Code.
 
 ## Advisor / stand-in
 

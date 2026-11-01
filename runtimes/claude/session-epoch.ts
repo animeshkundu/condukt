@@ -120,7 +120,7 @@ export function epochFingerprint(body: unknown): EpochFingerprint | null {
   if (!Array.isArray(b['messages'])) return null;
   try {
     return {
-      size: Math.max(0, Math.floor(estimateInputTokens(b as Record<string, any>))),
+      size: Math.max(0, Math.floor(estimateInputTokens(b as Record<string, unknown>))),
       msgsHash: hash16(b['messages']),
       head: hash16([b['system'] ?? null, b['tools'] ?? null]),
     };

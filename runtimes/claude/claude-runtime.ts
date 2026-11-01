@@ -15,11 +15,19 @@ export interface ClaudeRuntimeOptions {
 
 export class ClaudeAgentRuntime implements AgentRuntime {
   readonly name = 'claude';
-  // Claude does not expose Copilot-style permission callbacks or post-set mode
-  // readback, and same-session recovery beyond resume is not implemented.
-  // Claim no capabilities so agent.ts fails fast on explicitly-requested
-  // policies rather than silently degrading.
-  readonly capabilities: RuntimeCapabilities | undefined = undefined;
+  /**
+   * - `readOnlyPermissions`: read-only is enforced with a positive built-in
+   *   allow-list plus `dontAsk`, not a deny-list.
+   * - `requiredModeVerification`: `init` reads the applied permission mode
+   *   and tool set back, so `requireMode` is a verified contract.
+   * - `sessionRecovery`: bounded same-session resume with the fixed
+   *   continuation prompt (ADR-009; string-prompt mode has no empty turn).
+   */
+  readonly capabilities: RuntimeCapabilities = {
+    readOnlyPermissions: true,
+    requiredModeVerification: true,
+    sessionRecovery: true,
+  };
   private readonly options: ClaudeRuntimeOptions;
 
   constructor(options: ClaudeRuntimeOptions = {}) {
@@ -38,8 +46,12 @@ export class ClaudeAgentRuntime implements AgentRuntime {
       execFileSync(process.env.CLAUDE_CODE_EXECUTABLE ?? 'claude', ['--version'], { timeout: 5000, stdio: 'ignore' });
       return true;
     } catch {
-      // CLI may be bundled; don't hard-fail availability on CLI probe.
-      return true;
+      // Without an explicit path the CLI may be bundled with the SDK, so a
+      // failed probe is not proof of absence. With one, the operator named
+      // the binary: a path that does not run is a misconfiguration, and
+      // answering "available" here defers the failure to the first turn.
+      const explicit = (process.env.CLAUDE_CODE_EXECUTABLE ?? '').trim();
+      return explicit.length === 0;
     }
   }
 

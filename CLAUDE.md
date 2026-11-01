@@ -4,7 +4,7 @@
 
 A generic, composable AI agent workflow framework. Three decoupled systems: stateless execution engine, event-sourced state manager, reactive UI. 100% generic — zero domain vocabulary.
 
-## Structure (12 sub-path exports)
+## Structure (13 sub-path exports)
 
 | Entry Point | Directory | Purpose |
 |-------------|-----------|---------|
@@ -13,6 +13,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 | `condukt/state/server` | `state/` | Server-only: FileStorage (JSONL persistence) |
 | `condukt/bridge` | `bridge/` | Orchestration API: launch, stop, resume, retry, skip, approve |
 | `condukt/runtimes/copilot` | `runtimes/copilot/` | GitHub Copilot runtime: SubprocessBackend, SdkBackend, adapter |
+| `condukt/runtimes/claude` | `runtimes/claude/` | Claude Agent SDK runtime: session, protocol bridge, config/message mappers, fallback |
 | `condukt/runtimes/mock` | `runtimes/mock/` | Deterministic test runtime |
 | `condukt/ui` | `ui/` | React Flow visualization (optional peer: react, @xyflow/react) |
 | `condukt/ui/core` | `ui/core/` | Design-system primitives: Badge, Button, ExecutionCard, etc. |
@@ -38,6 +39,14 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 | `bridge/bridge.ts` | Orchestration API: launch, stop, resume, retry, skip, approve |
 | `runtimes/copilot/subprocess-backend.ts` | CopilotBackend via child_process.spawn |
 | `runtimes/copilot/sdk-backend.ts` | SdkBackend via @github/copilot-sdk (streaming, tool calls, sub-agents) |
+| `runtimes/claude/claude-session.ts` | ClaudeAgentSession: turns, same-session recovery loop, history/usage/metadata getters |
+| `runtimes/claude/claude-runtime.ts` | ClaudeAgentRuntime + FallbackRuntime; advertises recovery/mode-verification capabilities |
+| `runtimes/claude/session-recovery.ts` | Claude failure classification and continuation prompt (ADR-009) |
+| `runtimes/claude/protocol-bridge.ts` | In-process Anthropic-compatible bridge to OpenCode Go/Zen upstreams |
+| `runtimes/claude/message-mapper.ts` | SDK frames → session events; `result.modelUsage` deltas via usage-ledger |
+| `runtimes/claude/usage-ledger.ts` | Cumulative-snapshot differencing, per-model request counts, resume baseline |
+| `runtimes/claude/config-mapper.ts` | SessionConfig → SDK Options: tools, MCP, permissions, agents, prompts |
+| `runtimes/mcp-env.ts` | `${A\|B}` MCP env/header resolution shared by both runtimes (replacement-safe) |
 | `runtimes/mock/mock-runtime.ts` | Deterministic test runtime |
 | `ui/components/node-panel/` | Compound NodePanel: Header, Info, ErrorBar, Gate, Controls, Output (ADR-003) |
 | `ui/components/MiniPipeline.tsx` | Three-mode pipeline thumbnail: graph/bar/summary (ADR-004) |
@@ -49,7 +58,7 @@ A generic, composable AI agent workflow framework. Three decoupled systems: stat
 ## Commands
 
 ```bash
-npm test              # Run all tests (853 across 57 suites)
+npm test              # Run all tests (1372 across 79 suites)
 npm run typecheck     # tsc --noEmit
 npm run build         # Build to dist/
 npm run clean         # Remove dist/
@@ -61,7 +70,7 @@ npm run clean         # Remove dist/
 2. **Zero `any` types** — use generic types, branded types, or explicit `unknown`
 3. **Readonly by default** — all interface fields are `readonly`
 4. **Discriminated unions for events** — every event has a `type` field
-5. **Tests must pass** — 853 tests across 57 suites, all must pass before commit
+5. **Tests must pass** — 1372 tests across 79 suites, all must pass before commit
 6. **Plain text default** — output renderer defaults to plain text, ANSI is opt-in (ADR-001)
 7. **Data-driven gates** — gate buttons from `allowedResolutions`, not hardcoded (ADR-002)
 8. **Compound components** — NodePanel is decomposed, NodeDetailPanel is convenience default (ADR-003)
@@ -81,40 +90,70 @@ Pin to the latest stable of everything unless there is a reason not to, and writ
 
 | Suite | File | Tests |
 |-------|------|-------|
-| Scheduler | `__tests__/scheduler.test.ts` | 12 |
-| Scheduler (comprehensive) | `__tests__/scheduler-comprehensive.test.ts` | 22 |
+| Agent Node | `__tests__/agent-node.test.ts` | 21 |
+| Agent | `__tests__/agent.test.ts` | 106 |
+| Branch Coverage | `__tests__/branch-coverage.test.ts` | 35 |
+| Bridge (comprehensive) | `__tests__/bridge-comprehensive.test.ts` | 52 |
+| Console Output | `__tests__/console-output.test.ts` | 42 |
+| Cost | `__tests__/cost.test.ts` | 9 |
+| Dry Run | `__tests__/dry-run.test.ts` | 7 |
+| E2E Dip Pipeline | `__tests__/e2e-dip-pipeline.test.ts` | 2 |
 | Fan-out | `__tests__/fan-out.test.ts` | 12 |
-| Loop-back | `__tests__/loop-back.test.ts` | 17 |
-| Agent | `__tests__/agent.test.ts` | 17 |
-| Quorum Node | `__tests__/quorum-node.test.ts` | 15 |
-| Nodes | `__tests__/nodes.test.ts` | 10 |
-| Verify | `__tests__/verify.test.ts` | 9 |
-| Reducer | `__tests__/reducer.test.ts` | 20 |
-| Storage | `__tests__/storage.test.ts` | 11 |
-| State Runtime | `__tests__/state-runtime.test.ts` | 15 |
-| State Barrel Import | `__tests__/state-barrel-import.test.ts` | 2 |
-| Bridge | `__tests__/bridge.test.ts` | 9 |
-| Bridge (comprehensive) | `__tests__/bridge-comprehensive.test.ts` | 29 |
-| Integration | `__tests__/integration.test.ts` | 7 |
+| HMR Singleton | `__tests__/hmr-singleton.test.ts` | 4 |
 | Integration (comprehensive) | `__tests__/integration-comprehensive.test.ts` | 10 |
 | Integration (loops) | `__tests__/integration-loop.test.ts` | 7 |
-| Branch Coverage | `__tests__/branch-coverage.test.ts` | 35 |
-| Copilot Adapter | `__tests__/copilot-adapter.test.ts` | 5 |
-| SDK Backend Events | `__tests__/runtimes/sdk-backend-events.test.ts` | 6 |
-| Subprocess JSONL | `__tests__/subprocess-jsonl.test.ts` | 24 |
-| SSE | `__tests__/sse.test.ts` | 8 |
-| Setup Once | `__tests__/setup-once.test.ts` | 5 |
-| HMR Singleton | `__tests__/hmr-singleton.test.ts` | 4 |
-| Mock Runtime Reasoning | `__tests__/mock-runtime-reasoning.test.ts` | 3 |
+| Integration | `__tests__/integration.test.ts` | 7 |
+| Loop-back | `__tests__/loop-back.test.ts` | 19 |
+| Loop Region | `__tests__/loop-region.test.ts` | 21 |
+| Nodes | `__tests__/nodes.test.ts` | 10 |
+| Output Nudge | `__tests__/output-nudge.test.ts` | 11 |
+| Quorum Node | `__tests__/quorum-node.test.ts` | 15 |
 | Reasoning E2E | `__tests__/reasoning-e2e.test.ts` | 4 |
-| E2E Dip Pipeline | `__tests__/e2e-dip-pipeline.test.ts` | 2 |
-| NodePanel | `__tests__/node-panel.test.ts` | 24 |
+| Scheduler (comprehensive) | `__tests__/scheduler-comprehensive.test.ts` | 22 |
+| Scheduler | `__tests__/scheduler.test.ts` | 20 |
+| Setup Once | `__tests__/setup-once.test.ts` | 5 |
+| Snapshot | `__tests__/snapshot.test.ts` | 9 |
+| SSE | `__tests__/sse.test.ts` | 8 |
+| Subprocess JSONL | `__tests__/subprocess-jsonl.test.ts` | 29 |
+| Verify | `__tests__/verify.test.ts` | 9 |
+| Bridge | `__tests__/bridge.test.ts` | 9 |
+| Reducer | `__tests__/reducer.test.ts` | 25 |
+| State Barrel Import | `__tests__/state-barrel-import.test.ts` | 2 |
+| State Runtime | `__tests__/state-runtime.test.ts` | 16 |
+| Storage | `__tests__/storage.test.ts` | 11 |
+| Copilot Adapter | `__tests__/copilot-adapter.test.ts` | 9 |
+| Mock Runtime Reasoning | `__tests__/mock-runtime-reasoning.test.ts` | 3 |
+| Claude Bridge Cache | `__tests__/runtimes/claude/bridge-cache.test.ts` | 10 |
+| Claude Bridge Epoch | `__tests__/runtimes/claude/bridge-epoch.test.ts` | 21 |
+| Claude Bridge Non-stream | `__tests__/runtimes/claude/bridge-nonstream.test.ts` | 3 |
+| Claude Bridge Routing | `__tests__/runtimes/claude/bridge-routing.test.ts` | 14 |
+| Claude Config Mapper | `__tests__/runtimes/claude/config-mapper.test.ts` | 31 |
+| Claude Epoch Store | `__tests__/runtimes/claude/epoch-store.test.ts` | 13 |
+| Claude Session Getters | `__tests__/runtimes/claude/getters.test.ts` | 13 |
+| Claude Message Mapper | `__tests__/runtimes/claude/message-mapper.test.ts` | 24 |
+| Claude One-shot | `__tests__/runtimes/claude/one-shot.test.ts` | 9 |
+| Claude Protocol Bridge | `__tests__/runtimes/claude/protocol-bridge.test.ts` | 3 |
+| Claude Protocol Router | `__tests__/runtimes/claude/protocol-router.test.ts` | 23 |
+| Claude Session Recovery | `__tests__/runtimes/claude/recovery.test.ts` | 10 |
+| Claude Runtime | `__tests__/runtimes/claude/runtime.test.ts` | 6 |
+| Claude Session Bridge | `__tests__/runtimes/claude/session-bridge.test.ts` | 5 |
+| Claude Session Epoch | `__tests__/runtimes/claude/session-epoch.test.ts` | 46 |
+| Claude Session Options | `__tests__/runtimes/claude/session-options.test.ts` | 3 |
+| Claude Translate Chat | `__tests__/runtimes/claude/translate-chat.test.ts` | 30 |
+| Claude Translate Responses | `__tests__/runtimes/claude/translate-responses.test.ts` | 19 |
+| MCP Env | `__tests__/runtimes/mcp-env.test.ts` | 6 |
+| SDK Backend Events | `__tests__/runtimes/sdk-backend-events.test.ts` | 146 |
+| Runtime Subagents | `__tests__/runtimes/subagents.test.ts` | 18 |
+| Subprocess Backend | `__tests__/runtimes/subprocess-backend.test.ts` | 1 |
 | MiniPipeline | `__tests__/mini-pipeline.test.ts` | 11 |
+| NodePanel | `__tests__/node-panel.test.ts` | 24 |
 | Primitives | `__tests__/primitives.test.tsx` | 21 |
-| Tool Display | `__tests__/tool-display.test.ts` | 72 |
-| Subagent Grouping | `__tests__/ui/subagent-grouping.test.ts` | 10 |
-| Cycle-aware UI | `__tests__/ui/cycle-aware-ui.test.tsx` | 7 |
+| Tool Display | `__tests__/tool-display.test.ts` | 88 |
+| ANSI Dim | `__tests__/ui/ansi-dim.test.ts` | 4 |
+| Component Extractions | `__tests__/ui/component-extractions.test.tsx` | 33 |
 | Controls | `__tests__/ui/controls.test.tsx` | 10 |
+| Cycle-aware UI | `__tests__/ui/cycle-aware-ui.test.tsx` | 7 |
+| Diff Block | `__tests__/ui/diff-block.test.ts` | 5 |
 | ErrorBar | `__tests__/ui/error-bar.test.tsx` | 5 |
 | ExecutionCard | `__tests__/ui/execution-card.test.tsx` | 7 |
 | FlowStatusBar | `__tests__/ui/flow-status-bar.test.tsx` | 9 |
@@ -127,10 +166,10 @@ Pin to the latest stable of everything unless there is a reason not to, and writ
 | Output | `__tests__/ui/output.test.tsx` | 18 |
 | PageHeader | `__tests__/ui/page-header.test.tsx` | 7 |
 | Stat | `__tests__/ui/stat.test.tsx` | 3 |
-| ANSI Dim | `__tests__/ui/ansi-dim.test.ts` | 4 |
+| Subagent Grouping | `__tests__/ui/subagent-grouping.test.ts` | 12 |
 | useAutoSelectNode | `__tests__/ui/use-auto-select-node.test.ts` | 8 |
 | useNodeNavigation | `__tests__/ui/use-node-navigation.test.ts` | 9 |
-| **Total** | **57 suites** | **853** |
+| **Total** | **79 suites** | **1372** |
 
 ## Architecture
 
@@ -157,7 +196,8 @@ Bridge Layer (bridge/)
   |
   v
 Runtime Layer (runtimes/)
-  |  AgentRuntime interface -> SubprocessBackend, SdkBackend, MockRuntime
+  |  AgentRuntime interface -> SubprocessBackend, SdkBackend, ClaudeAgentRuntime, MockRuntime
+  |  FallbackRuntime: Copilot when available, Claude otherwise
   |
   v
 UI Layer (ui/)
@@ -220,7 +260,7 @@ against the registry and would break.
 | Issue | Symptom | Fix |
 |-------|---------|-----|
 | Dynamic `import()` in CJS output | TypeScript transforms `import()` to `require()`, breaking ESM-only deps | Use `new Function('specifier', 'return import(specifier)')` escape hatch (see `sdk-backend.ts`) |
-| Optional peer deps | `@github/copilot-sdk`, `react`, `@xyflow/react` are optional peers | All three have `"optional": true` in `peerDependenciesMeta` — consumers only install what they use |
+| Optional peer deps | `@github/copilot-sdk`, `@anthropic-ai/claude-agent-sdk`, `react`, `@xyflow/react`, `zod` are optional peers | All five have `"optional": true` in `peerDependenciesMeta` — consumers only install what they use |
 | Build output structure | Sub-path exports must map to `dist/` paths exactly | `tsconfig.build.json` mirrors source layout; verify `exports` in `package.json` after adding new entry points |
 | Consumer webpack compat | condukt sub-path exports don't resolve in Turbopack | Consumers must use webpack mode + `transpilePackages: ['condukt']` |
 | Reasoning delta `\n` joiner | Thinking text shows spaces between tokens ("ic m" instead of "icm") | `onReasoning` must concatenate deltas directly — no `\n` or ` ` separator. Markdown collapses single newlines to spaces. |

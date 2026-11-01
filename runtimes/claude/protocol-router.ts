@@ -296,8 +296,15 @@ const FAMILY_CAPS: Readonly<Record<string, FamilyCaps>> = {
   },
 };
 
+/**
+ * Capabilities for a family nobody verified. Only `auto` is safe to forward:
+ * if the upstream rejects `tool_choice`, the failure would surface as an
+ * opaque 400 after the request is billed, while `auto` is accepted by every
+ * family seen so far. A new family that does take named choices gets a row in
+ * FAMILY_CAPS rather than an assumption here.
+ */
 const DEFAULT_CAPS: FamilyCaps = {
-  toolChoice: new Set(['auto', 'named']),
+  toolChoice: new Set(['auto']),
   reasoningEffort: new Set(['low']),
 };
 

@@ -153,6 +153,9 @@ describe('protocol-router: responses caps', () => {
     expect(supportsToolChoice('gpt-6-luna', { type: 'function', name: 'x' })).toBe(true);
     expect(supportsToolChoice('muse-spark-1.3-contributor', { type: 'function', name: 'x' })).toBe(false);
     expect(supportsToolChoice('muse-spark-1.3-contributor', 'auto')).toBe(true);
+    // An unverified family gets only what every family accepts.
+    expect(supportsToolChoice('unknown-model', 'auto')).toBe(true);
+    expect(supportsToolChoice('unknown-model', { type: 'function', name: 'x' })).toBe(false);
   });
 });
 

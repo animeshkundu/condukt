@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
-import { createBridge } from '../../../runtimes/claude/protocol-bridge';
+import { anthropicErrorTypeForStatus, createBridge } from '../../../runtimes/claude/protocol-bridge';
 
 describe('protocol-bridge', () => {
   let upstream: http.Server;
@@ -61,5 +61,47 @@ describe('protocol-bridge', () => {
     expect(text).toContain('hi');
     expect(bridge.metrics.requestCount).toBeGreaterThanOrEqual(1);
     expect(bridge.metrics.cacheStampedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  describe('anthropic error mapping', () => {
+    it('maps upstream statuses to Anthropic error types', () => {
+      expect(anthropicErrorTypeForStatus(400)).toBe('invalid_request_error');
+      expect(anthropicErrorTypeForStatus(401)).toBe('authentication_error');
+      expect(anthropicErrorTypeForStatus(403)).toBe('permission_error');
+      expect(anthropicErrorTypeForStatus(404)).toBe('not_found_error');
+      expect(anthropicErrorTypeForStatus(413)).toBe('request_too_large');
+      expect(anthropicErrorTypeForStatus(429)).toBe('rate_limit_error');
+      expect(anthropicErrorTypeForStatus(500)).toBe('api_error');
+      expect(anthropicErrorTypeForStatus(502)).toBe('api_error');
+      expect(anthropicErrorTypeForStatus(529)).toBe('overloaded_error');
+      // Other 4xx are client mistakes; the Anthropic SDK keys its retry policy
+      // on these types, so classifying them as server errors would be wrong.
+      expect(anthropicErrorTypeForStatus(418)).toBe('invalid_request_error');
+    });
+
+    it('writes the mapped type into HTTP error bodies', async () => {
+      const handle = await createBridge({
+        port: 0,
+        upstreamBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        sessionId: 'errors',
+        bridgeSecret: 'top-secret',
+      });
+      try {
+        const unauthorized = await fetch(`${handle.baseUrl}/v1/messages`, { method: 'POST' });
+        expect(unauthorized.status).toBe(401);
+        expect(await unauthorized.json()).toEqual({
+          type: 'error',
+          error: { type: 'authentication_error', message: 'unauthorized' },
+        });
+
+        const notFound = await fetch(`${handle.baseUrl}/v1/nope`, {
+          headers: { 'x-condukt-bridge-secret': 'top-secret' },
+        });
+        expect(notFound.status).toBe(404);
+        expect(await notFound.json()).toMatchObject({ error: { type: 'not_found_error' } });
+      } finally {
+        await handle.close();
+      }
+    });
   });
 });

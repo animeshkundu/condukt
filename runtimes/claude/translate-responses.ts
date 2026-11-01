@@ -19,9 +19,15 @@ import {
 } from './bridge-cache';
 import { mapResponsesEffort, supportsToolChoice } from './protocol-router';
 import { sseFrame } from './sse';
-import { parseToolArgs } from './translate-chat';
+import { asObject, parseToolArgs } from './translate-chat';
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
+/** Responses events index streams by number; a malformed one falls back to a
+ * key that can never be in the accumulator, which callers treat as "no item". */
+function numericIndex(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : -1;
+}
 
 // ── tool_choice mapping ──────────────────────────────────────────────
 
@@ -37,12 +43,12 @@ export type ResponsesToolChoice = 'auto' | { type: 'function'; name: string } | 
 export function mapResponsesToolChoice(choice: unknown, model: string): ResponsesToolChoice {
   if (choice === null || choice === undefined || choice === 'auto') return 'auto';
   if (typeof choice === 'object') {
-    const c = choice as Record<string, any>;
+    const c = choice as Record<string, unknown>;
     const t = c['type'];
     if (t === 'auto') return 'auto';
     if (t === 'none') return null;
     if (t === 'tool' || t === 'function') {
-      const name = String(c['name'] ?? c['function']?.name ?? '');
+      const name = String(c['name'] ?? asObject(c['function'])?.['name'] ?? '');
       if (!supportsToolChoice(model, { type: 'function', name })) {
         throw new Error(
           `model ${model} does not accept a named tool_choice (${JSON.stringify(name)}); use auto (verified surface)`,
@@ -56,13 +62,13 @@ export function mapResponsesToolChoice(choice: unknown, model: string): Response
 
 // ── reasoning mapping ────────────────────────────────────────────────
 
-export function responsesReasoning(body: Record<string, any>, model: string): { effort: string } | null {
-  const thinking = body?.['thinking'];
+export function responsesReasoning(body: Record<string, unknown>, model: string): { effort: string } | null {
+  const thinking = asObject(body?.['thinking']);
   let effort: unknown = null;
-  if (thinking && typeof thinking === 'object' && (thinking['type'] === 'enabled' || thinking['type'] === 'adaptive')) {
+  if (thinking !== null && (thinking['type'] === 'enabled' || thinking['type'] === 'adaptive')) {
     effort = thinking['effort'] ?? null;
   } else {
-    effort = body?.['effort'] ?? body?.['output_config']?.effort ?? null;
+    effort = body?.['effort'] ?? asObject(body?.['output_config'])?.['effort'] ?? null;
   }
   const wire = mapResponsesEffort(model, effort);
   if (wire === null) return null;
@@ -111,7 +117,7 @@ function itemText(role: string, text: string): Record<string, unknown> {
  * documents, server tools, unsupported tool_choice/effort) — loud, never
  * silently dropped.
  */
-export function anthropicToResponses(body: Record<string, any>, model: string): Record<string, any> {
+export function anthropicToResponses(body: Record<string, unknown>, model: string): Record<string, unknown> {
   const items: Record<string, unknown>[] = [];
   const systems: string[] = [];
   const system = body?.['system'] ?? '';
@@ -145,7 +151,7 @@ export function anthropicToResponses(body: Record<string, any>, model: string): 
         continue;
       }
       if (!block || typeof block !== 'object') continue;
-      const b = block as Record<string, any>;
+      const b = block as Record<string, unknown>;
       const btype = b['type'];
       if (btype === 'text') {
         const t = String(b['text'] ?? '');
@@ -177,7 +183,7 @@ export function anthropicToResponses(body: Record<string, any>, model: string): 
     }
   }
 
-  const out: Record<string, any> = {
+  const out: Record<string, unknown> = {
     model,
     input: items,
     max_output_tokens: body?.['max_tokens'] ?? DEFAULT_MAX_OUTPUT_TOKENS,
@@ -220,7 +226,7 @@ export function anthropicToResponses(body: Record<string, any>, model: string): 
 
 // ── non-streaming response translation ───────────────────────────────
 
-export function responsesToAnthropic(resp: Record<string, any>, requested: string, messageId?: string): Record<string, any> {
+export function responsesToAnthropic(resp: Record<string, unknown>, requested: string, messageId?: string): Record<string, unknown> {
   if (!resp || typeof resp !== 'object') {
     throw new Error('upstream returned a malformed response envelope');
   }
@@ -266,13 +272,12 @@ export function responsesToAnthropic(resp: Record<string, any>, requested: strin
   if (status === 'completed') {
     stop = blocks.some((b) => b['type'] === 'tool_use') ? 'tool_use' : 'end_turn';
   } else if (status === 'incomplete') {
-    const reason = String((resp['incomplete_details'] ?? {})?.['reason'] ?? '');
+    const reason = String(asObject(resp['incomplete_details'])?.['reason'] ?? '');
     if (reason === 'max_output_tokens') stop = 'max_tokens';
     else if (reason === 'content_filter') stop = 'content_filter';
     else throw new Error(`upstream response incomplete with unknown reason: ${JSON.stringify(reason)}`);
   } else {
-    const err = resp['error'];
-    const msg = (err && typeof err === 'object' ? err['message'] : null) ?? status;
+    const msg = asObject(resp['error'])?.['message'] ?? status;
     throw new Error(`upstream response failed: ${msg}`);
   }
 
@@ -282,9 +287,9 @@ export function responsesToAnthropic(resp: Record<string, any>, requested: strin
     throw new Error(`upstream response completed with no content blocks${detail}`);
   }
 
-  const usage = resp['usage'] && typeof resp['usage'] === 'object' ? resp['usage'] : {};
-  const details = usage['input_tokens_details'];
-  const cacheRead = (details && typeof details === 'object' ? details['cached_tokens'] : 0) || extractCacheReadTokens(usage);
+  const usage = asObject(resp['usage']) ?? {};
+  const details = asObject(usage['input_tokens_details']);
+  const cacheRead = details?.['cached_tokens'] || extractCacheReadTokens(usage);
   const cacheCreate = usage['cache_write_tokens'] || extractCacheCreationTokens(usage);
   const outUsage = withReasoningSplit(
     {
@@ -368,7 +373,7 @@ export class ResponsesStreamTranslator {
   }
 
   /** Feed one parsed upstream event; returns frames to forward. */
-  push(event: Record<string, any>): string[] {
+  push(event: Record<string, unknown>): string[] {
     if (this.terminal) return [];
     const frames: string[] = [];
     try {
@@ -441,12 +446,12 @@ export class ResponsesStreamTranslator {
     frames.push(sseFrame('content_block_stop', { type: 'content_block_stop', index: idx }));
   }
 
-  private handle(event: Record<string, any>, frames: string[]): void {
+  private handle(event: Record<string, unknown>, frames: string[]): void {
     const etype = event['type'];
     if (etype === 'response.created' || etype === 'response.in_progress') return;
 
     if (etype === 'response.output_item.added') {
-      const item = event['item'] ?? {};
+      const item = asObject(event['item']) ?? {};
       const itype = item['type'];
       if (itype === 'message') return; // text opens lazily on first delta
       if (itype === 'function_call') {
@@ -473,7 +478,7 @@ export class ResponsesStreamTranslator {
     }
 
     if (etype === 'response.content_part.added') {
-      const part = event['part'] ?? {};
+      const part = asObject(event['part']) ?? {};
       if (part['type'] === 'output_text' && this.textBlockIdx === null) {
         this.startMessage(frames);
         this.textBlockIdx = this.openBlock(frames, { type: 'text', text: '' });
@@ -508,7 +513,7 @@ export class ResponsesStreamTranslator {
     }
 
     if (etype === 'response.function_call_arguments.delta') {
-      const acc = this.toolAcc.get(event['output_index']);
+      const acc = this.toolAcc.get(numericIndex(event['output_index']));
       if (!acc) return;
       const delta = String(event['delta'] ?? '');
       if (delta) {
@@ -525,7 +530,8 @@ export class ResponsesStreamTranslator {
     }
 
     if (etype === 'response.function_call_arguments.done') {
-      const acc = this.toolAcc.get(event['output_index']);
+      const oidx = numericIndex(event['output_index']);
+      const acc = this.toolAcc.get(oidx);
       if (acc) {
         if (!acc.args && typeof event['arguments'] === 'string' && event['arguments']) {
           acc.args = event['arguments'];
@@ -538,19 +544,19 @@ export class ResponsesStreamTranslator {
           );
         }
         parseToolArgs(acc.args); // loud on invalid arguments
-        this.validated.add(event['output_index']);
+        this.validated.add(oidx);
       }
       return;
     }
 
     if (etype === 'response.output_item.done') {
-      const item = event['item'] ?? {};
+      const item = asObject(event['item']) ?? {};
       const itype = item['type'];
       if (itype === 'message') {
         this.closeBlock(frames, this.textBlockIdx);
         this.textBlockIdx = null;
       } else if (itype === 'function_call') {
-        const oidx = event['output_index'];
+        const oidx = numericIndex(event['output_index']);
         const acc = this.toolAcc.get(oidx);
         if (acc) {
           if (!acc.args && typeof item['arguments'] === 'string' && item['arguments']) {
@@ -574,16 +580,16 @@ export class ResponsesStreamTranslator {
     }
 
     if (etype === 'response.completed') {
-      const resp = event['response'] ?? {};
-      const usage = resp['usage'] && typeof resp['usage'] === 'object' ? resp['usage'] : null;
+      const resp = asObject(event['response']) ?? {};
+      const usage = asObject(resp['usage']);
       this.finish(frames, this.calledTools ? 'tool_use' : 'end_turn', usage);
       this.terminal = true;
       return;
     }
 
     if (etype === 'response.incomplete') {
-      const resp = event['response'] ?? {};
-      const reason = String((resp['incomplete_details'] ?? {})?.['reason'] ?? '');
+      const resp = asObject(event['response']) ?? {};
+      const reason = String(asObject(resp['incomplete_details'])?.['reason'] ?? '');
       if (reason === 'max_output_tokens' || reason === 'content_filter') {
         if (this.calledTools && reason === 'max_output_tokens') {
           let bad = 0;
@@ -602,7 +608,7 @@ export class ResponsesStreamTranslator {
           }
         }
         const stop = reason === 'max_output_tokens' ? 'max_tokens' : 'content_filter';
-        const usage = resp['usage'] && typeof resp['usage'] === 'object' ? resp['usage'] : null;
+        const usage = asObject(resp['usage']);
         this.finish(frames, stop, usage);
         this.terminal = true;
         return;
@@ -611,9 +617,8 @@ export class ResponsesStreamTranslator {
     }
 
     if (etype === 'response.failed') {
-      const resp = event['response'] ?? {};
-      const err = resp['error'];
-      const msg = (err && typeof err === 'object' ? err['message'] : null) ?? 'upstream response failed';
+      const resp = asObject(event['response']) ?? {};
+      const msg = asObject(resp['error'])?.['message'] ?? 'upstream response failed';
       throw new Error(String(msg));
     }
 
@@ -623,7 +628,7 @@ export class ResponsesStreamTranslator {
     // Unknown event types are ignored (forward compatible).
   }
 
-  private finish(frames: string[], stop: string, usage: Record<string, any> | null): void {
+  private finish(frames: string[], stop: string, usage: Record<string, unknown> | null): void {
     try {
       this.onFinalUsage?.(upstreamUsageFromResponses(usage));
     } catch {
@@ -635,8 +640,8 @@ export class ResponsesStreamTranslator {
     for (const idx of [...this.openBlocks]) this.closeBlock(frames, idx);
 
     const u = usage ?? {};
-    const details = u['input_tokens_details'];
-    const cacheRead = (details && typeof details === 'object' ? details['cached_tokens'] : 0) || extractCacheReadTokens(u);
+    const details = asObject(u['input_tokens_details']);
+    const cacheRead = details?.['cached_tokens'] || extractCacheReadTokens(u);
     const cacheCreate = u['cache_write_tokens'] || extractCacheCreationTokens(u);
     const inTok = Number(u['input_tokens'] ?? 0) || this.estimatedInput;
     const outTok = getOutputTokens(u);
