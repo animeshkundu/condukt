@@ -37,10 +37,15 @@ import type {
   ToolUsageData,
 } from '../../src/types';
 import {
-  DEFAULT_SESSION_RECOVERY_POLICY,
   NO_OP_LOGGER,
   SessionRecoveryExhaustedError,
 } from '../../src/types';
+import {
+  effectiveSessionRecoveryPolicy,
+  recoveryDelayMs,
+  type EffectiveSessionRecoveryPolicy,
+} from '../../src/session-recovery-policy';
+import { resolveMcpEnvironmentRecord, resolveMcpHeaders } from '../mcp-env';
 import type {
   CopilotBackend,
   CopilotSession,
@@ -146,65 +151,6 @@ type SdkSessionHandle = CopilotSdkSession;
  */
 type ContinuationWaiter = { resolve: () => void; reject: (error: Error) => void };
 
-const MAX_SESSION_RECOVERY_CONTINUATIONS = 23;
-
-interface EffectiveSessionRecoveryPolicy {
-  readonly maxContinuations: number;
-  readonly budgetMs: number;
-  readonly backoffBaseMs: number;
-  readonly backoffMaxMs: number;
-  readonly jitter: boolean;
-  readonly nativeRetryGraceMs: number;
-}
-
-function positiveIntegerOr(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isFinite(value) && value > 0
-    ? Math.trunc(value)
-    : fallback;
-}
-
-function nonNegativeOr(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isFinite(value) && value >= 0
-    ? value
-    : fallback;
-}
-
-function effectiveSessionRecoveryPolicy(
-  policy: SessionRecoveryPolicy | false | undefined,
-): EffectiveSessionRecoveryPolicy | undefined {
-  if (policy === false) return undefined;
-  const configured = policy ?? {};
-  return {
-    maxContinuations: Math.min(
-      MAX_SESSION_RECOVERY_CONTINUATIONS,
-      positiveIntegerOr(
-        configured.maxContinuations,
-        DEFAULT_SESSION_RECOVERY_POLICY.maxContinuations,
-      ),
-    ),
-    budgetMs: nonNegativeOr(configured.budgetMs, DEFAULT_SESSION_RECOVERY_POLICY.budgetMs),
-    backoffBaseMs: positiveIntegerOr(
-      configured.backoffBaseMs,
-      DEFAULT_SESSION_RECOVERY_POLICY.backoffBaseMs,
-    ),
-    backoffMaxMs: positiveIntegerOr(
-      configured.backoffMaxMs,
-      DEFAULT_SESSION_RECOVERY_POLICY.backoffMaxMs,
-    ),
-    jitter: configured.jitter ?? DEFAULT_SESSION_RECOVERY_POLICY.jitter,
-    nativeRetryGraceMs: nonNegativeOr(
-      configured.nativeRetryGraceMs,
-      DEFAULT_SESSION_RECOVERY_POLICY.nativeRetryGraceMs,
-    ),
-  };
-}
-
-function recoveryDelayMs(policy: EffectiveSessionRecoveryPolicy, failedContinuation: number): number {
-  const exponent = Math.min(52, Math.max(0, failedContinuation));
-  const capped = Math.min(policy.backoffMaxMs, policy.backoffBaseMs * (2 ** exponent));
-  const delayed = policy.jitter ? Math.random() * capped : capped;
-  return Math.max(100, Number.isFinite(delayed) ? delayed : 100);
-}
 
 /** What the pre- and post-resume history audits report. */
 interface RecoveryHistoryAudit {
@@ -1255,79 +1201,6 @@ function parseMcpConfig(
   }
 }
 
-const ENV_REFERENCE = /^\$\{([A-Z_][A-Z0-9_]*(?:\|[A-Z_][A-Z0-9_]*)*)\}$/;
-
-/**
- * Resolves ${NAME} and ${NAME|FALLBACK|...}, taking the first variable that is set.
- *
- * The fallback chain exists because there is no single conventional name for a GitHub
- * token: the Copilot CLI itself reads COPILOT_GITHUB_TOKEN, then GH_TOKEN, then
- * GITHUB_TOKEN. A default that insisted on one spelling would silently ship an
- * unauthenticated server in any environment that chose a different one.
- */
-function resolveMcpEnvironmentValue(value: string): string | undefined {
-  const match = ENV_REFERENCE.exec(value);
-  if (!match) return value;
-  for (const name of match[1]!.split('|')) {
-    const resolved = process.env[name];
-    if (resolved !== undefined && resolved !== '') return resolved;
-  }
-  return undefined;
-}
-
-function resolveMcpEnvironmentRecord(
-  values: Record<string, string> | undefined,
-): Record<string, string> | undefined {
-  if (values === undefined) return undefined;
-  const resolved: Record<string, string> = {};
-  for (const [key, value] of Object.entries(values)) {
-    const environmentValue = resolveMcpEnvironmentValue(value);
-    if (environmentValue !== undefined) resolved[key] = environmentValue;
-  }
-  return Object.keys(resolved).length > 0 ? resolved : undefined;
-}
-
-// Embedded references, so `Bearer ${A|B}` resolves rather than only a bare `${A|B}`. The
-// fallback alternatives must be part of the pattern: a reference matcher without them finds
-// nothing in `${A|B}`, leaves the value untouched, and emits the placeholder as a literal
-// header — an unauthenticated server that reports no error and simply returns no tools.
-const HEADER_ENV_REFERENCE = /\$\{([A-Z_][A-Z0-9_]*(?:\|[A-Z_][A-Z0-9_]*)*)\}/g;
-
-function resolveMcpHeaders(
-  headers: Record<string, string> | undefined,
-  terminalLogLevel?: TerminalLogLevel,
-): Record<string, string> | undefined {
-  if (headers === undefined) return undefined;
-  const resolved: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    const references = [...value.matchAll(HEADER_ENV_REFERENCE)];
-    let resolvedValue = value;
-    let complete = true;
-    for (const reference of references) {
-      const names = reference[1]!.split('|');
-      const environmentValue = names
-        .map((name) => process.env[name])
-        .find((candidate) => candidate !== undefined && candidate !== '');
-      if (environmentValue === undefined) {
-        // Dropping the header is deliberate — a missing credential must not abort a run — but
-        // it is invisible at the server, which just answers with nothing.
-        try {
-          writeDiagnosticStderr(
-            'warning',
-            `[SdkBackend] MCP header ${key} dropped: none of ${names.join(', ')} is set\n`,
-            terminalLogLevel,
-          );
-        } catch { /* diagnostics must not break configuration */ }
-        complete = false;
-        break;
-      }
-      resolvedValue = resolvedValue.replace(reference[0], environmentValue);
-    }
-    if (complete) resolved[key] = resolvedValue;
-  }
-  return Object.keys(resolved).length > 0 ? resolved : undefined;
-}
-
 function toSdkMcpServers(
   servers: false,
   terminalLogLevel?: TerminalLogLevel,
@@ -1350,7 +1223,15 @@ function toSdkMcpServers(
     const parsed = parseMcpServer(server);
     if (!parsed) continue;
     if ('url' in parsed) {
-      const headers = resolveMcpHeaders(parsed.headers, terminalLogLevel);
+      const headers = resolveMcpHeaders(parsed.headers, ({ header, names }) => {
+        try {
+          writeDiagnosticStderr(
+            'warning',
+            `[SdkBackend] MCP header ${header} dropped: none of ${names.join(', ')} is set\n`,
+            terminalLogLevel,
+          );
+        } catch { /* diagnostics must not break configuration */ }
+      });
       converted[name] = {
         ...parsed,
         ...(headers !== undefined ? { headers } : { headers: undefined }),

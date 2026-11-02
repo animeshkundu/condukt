@@ -47,6 +47,7 @@ const config = {
       'condukt/state': path.resolve('../flow-framework/dist/state/index.js'),
       'condukt/bridge': path.resolve('../flow-framework/dist/bridge/index.js'),
       'condukt/runtimes/copilot': path.resolve('../flow-framework/dist/runtimes/copilot/index.js'),
+      'condukt/runtimes/claude': path.resolve('../flow-framework/dist/runtimes/claude/index.js'),
       'condukt/runtimes/mock': path.resolve('../flow-framework/dist/runtimes/mock/index.js'),
       'condukt/ui': path.resolve('../flow-framework/dist/ui/index.js'),
     };

@@ -495,6 +495,8 @@ export interface CustomAgentConfig {
   readonly infer?: boolean;
   readonly skills?: readonly string[];
   readonly model?: string;
+  /** Reasoning effort for this agent (Claude runtime `effort`). */
+  readonly effort?: ThinkingBudget;
 }
 
 export interface DefaultAgentConfig {
@@ -545,6 +547,51 @@ export interface StandInConfig {
   readonly description?: string;
 }
 
+/**
+ * Per-tier model overrides for the Claude runtime
+ * (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`). The CLI picks the
+ * tier from model metadata (or the alias in use); condukt passes these
+ * through verbatim — no defaults are shipped, aliases are the
+ * consumer's choice.
+ */
+export interface ClaudeTierModels {
+  readonly opus?: string;
+  readonly sonnet?: string;
+  readonly haiku?: string;
+}
+
+/** Auto-compaction window overrides for the Claude runtime. */
+export interface ClaudeAutoCompactConfig {
+  /** Auto-compact window in tokens (forwarded via SDK settings). */
+  readonly window?: number;
+  /** Auto-compact percent override (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`). */
+  readonly pctOverride?: number;
+  /** Max context tokens advertised to the CLI (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`). */
+  readonly maxContextTokens?: number;
+}
+
+/**
+ * Session compaction-epoch identity (`-eN` / `-rM`) tuning. Epochs are
+ * on by default: every session is era-labeled from birth and a fresh
+ * era (fresh cache namespace + routing affinity) starts on an exact
+ * compaction boundary or on a confirmed cache-stagnation streak.
+ */
+export interface ClaudeEpochConfig {
+  /** Kill-switch for epoch identity + tracking (default on). */
+  readonly enabled?: boolean;
+  /** Kill-switch for stagnation rotation `-rM` (default on). */
+  readonly rotate?: boolean;
+  /** Sidecar path for persistence, or false to disable persistence. */
+  readonly stateFile?: string | false;
+}
+
+/** Claude-runtime-specific session configuration. */
+export interface ClaudeSessionConfig {
+  readonly tierModels?: ClaudeTierModels;
+  readonly autoCompact?: ClaudeAutoCompactConfig;
+  readonly epoch?: ClaudeEpochConfig;
+}
+
 export interface SessionConfig extends SubagentLimits {
   readonly model: string;
   readonly thinkingBudget?: ThinkingBudget;
@@ -588,6 +635,8 @@ export interface SessionConfig extends SubagentLimits {
   readonly artifactFilename?: string;
   /** Same-session recovery is on by default; false opts this session out. */
   readonly sessionRecovery?: SessionRecoveryPolicy | false;
+  /** Claude-runtime-specific session configuration (tiers, compaction, epochs). */
+  readonly claude?: ClaudeSessionConfig;
 }
 
 export interface ContextAttributionEntry {
