@@ -98,6 +98,16 @@ export interface ClaudeFailureClassification {
 }
 
 /**
+ * A failure the model reported as a rate limit: an explicit HTTP 429, or the
+ * SDK's `rate_limit` assistant error when it carries no status. Both mean the
+ * same thing for recovery — the next continuation is likely to be rejected
+ * the same way — which is why they share one consecutive-failure streak.
+ */
+export function isRateLimitFailure(classification: ClaudeFailureClassification): boolean {
+  return classification.statusCode === 429 || classification.errorCode === 'rate_limit';
+}
+
+/**
  * Assistant-frame errors that a resumed turn cannot fix. Credentials, request
  * shape, and model selection are configuration facts, not transient faults;
  * `max_output_tokens` is a per-turn limit that a continuation could mask but

@@ -54,6 +54,7 @@ import {
   CONTINUATION_PROMPT,
   classifyClaudeFailure,
   failureFromOutcome,
+  isRateLimitFailure,
   outcomeIsFailure,
   toResumeAttemptError,
 } from './session-recovery';
@@ -431,6 +432,17 @@ export class ClaudeAgentSession implements AgentSession {
     let lastFailure = failure;
     let lastStage: ClaudeRecoveryStage = 'continuation';
     let continuation = 0;
+    // A 429 is the model saying it cannot serve this turn right now; continuing
+    // the same session repeats that answer. Keep the streak across turns and
+    // end recovery as soon as it proves the point, so the caller can fail over
+    // to another model instead of spending the recovery budget on rejections.
+    let consecutiveRateLimits = isRateLimitFailure(lastClassification) ? 1 : 0;
+    if (consecutiveRateLimits >= policy.maxConsecutiveRateLimits) {
+      this.exhaustRecovery(
+        policy, sessionId, continuation, lastFailure, recoveryStartedAt,
+        `${consecutiveRateLimits} consecutive rate-limit (429) failures`, lastStage, lastClassification,
+      );
+    }
 
     // The SDK retries transient API failures natively before it ever reports
     // one. Give that retry its grace window before resuming ourselves so the
@@ -533,6 +545,13 @@ export class ClaudeAgentSession implements AgentSession {
       }
       lastFailure = resumedFailure;
       lastClassification = this.classifyFailure(attempt);
+      consecutiveRateLimits = isRateLimitFailure(lastClassification) ? consecutiveRateLimits + 1 : 0;
+      if (consecutiveRateLimits >= policy.maxConsecutiveRateLimits) {
+        this.exhaustRecovery(
+          policy, sessionId, continuation, lastFailure, recoveryStartedAt,
+          `${consecutiveRateLimits} consecutive rate-limit (429) failures`, lastStage, lastClassification,
+        );
+      }
 
       if (attempt.error instanceof ClaudeResumeAttemptError) {
         lastStage = attempt.error.stage;

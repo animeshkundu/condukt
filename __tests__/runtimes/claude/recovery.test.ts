@@ -227,6 +227,94 @@ describe('Claude same-session recovery', () => {
     expect(events.some((entry) => entry.event === 'idle')).toBe(false);
   });
 
+  it('exhausts after three consecutive rate-limit failures before the continuation limit', async () => {
+    const rateLimited = (uuid: string) => resultFrame({
+      subtype: 'error_during_execution',
+      is_error: true,
+      errors: ['rate limited'],
+      terminal_reason: 'api_error',
+      api_error_status: 429,
+      uuid,
+    });
+    const { session, calls, events } = harness([
+      turn(assistantFrame('working'), rateLimited('r0')),
+      turn(assistantFrame('again'), rateLimited('r1')),
+      turn(assistantFrame('again'), rateLimited('r2')),
+    ], {
+      config: config({
+        sessionRecovery: {
+          maxContinuations: 5,
+          maxConsecutiveRateLimits: 3,
+          budgetMs: 60_000,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+          nativeRetryGraceMs: 0,
+        },
+      }),
+    });
+
+    const error = await session.continueSession('do the task').then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(SessionRecoveryExhaustedError);
+    expect(calls).toHaveLength(3);
+    const exhausted = recoveryEvents(events).at(-1);
+    expect(exhausted).toMatchObject({
+      phase: 'exhausted',
+      continuation: 2,
+      stage: 'continuation',
+      statusCode: 429,
+      reason: '3 consecutive rate-limit (429) failures',
+    });
+  });
+
+  it('resets the rate-limit streak after a different recoverable failure', async () => {
+    const failed = (uuid: string, status: number) => resultFrame({
+      subtype: 'error_during_execution',
+      is_error: true,
+      errors: [status === 429 ? 'rate limited' : 'server error'],
+      terminal_reason: 'api_error',
+      api_error_status: status,
+      uuid,
+    });
+    const { session, calls, events } = harness([
+      turn(assistantFrame('working'), failed('r0', 429)),
+      turn(assistantFrame('again'), failed('r1', 500)),
+      turn(assistantFrame('again'), failed('r2', 429)),
+      turn(assistantFrame('again'), failed('r3', 429)),
+    ], {
+      config: config({
+        sessionRecovery: {
+          maxContinuations: 3,
+          maxConsecutiveRateLimits: 2,
+          budgetMs: 60_000,
+          backoffBaseMs: 100,
+          backoffMaxMs: 100,
+          jitter: false,
+          nativeRetryGraceMs: 0,
+        },
+      }),
+    });
+
+    const error = await session.continueSession('do the task').then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(SessionRecoveryExhaustedError);
+    expect(calls).toHaveLength(4);
+    const exhausted = recoveryEvents(events).at(-1);
+    expect(exhausted).toMatchObject({
+      phase: 'exhausted',
+      continuation: 3,
+      stage: 'continuation',
+      reason: '2 consecutive rate-limit (429) failures',
+    });
+  });
+
   it('fails fast on a non-recoverable result without resuming', async () => {
     const { session, calls, events } = harness([
       turn(

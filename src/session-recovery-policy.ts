@@ -9,6 +9,7 @@ export const MAX_SESSION_RECOVERY_CONTINUATIONS = 23;
 
 export interface EffectiveSessionRecoveryPolicy {
   readonly maxContinuations: number;
+  readonly maxConsecutiveRateLimits: number;
   readonly budgetMs: number;
   readonly backoffBaseMs: number;
   readonly backoffMaxMs: number;
@@ -40,6 +41,10 @@ export function effectiveSessionRecoveryPolicy(
         configured.maxContinuations,
         DEFAULT_SESSION_RECOVERY_POLICY.maxContinuations,
       ),
+    ),
+    maxConsecutiveRateLimits: positiveIntegerOr(
+      configured.maxConsecutiveRateLimits,
+      DEFAULT_SESSION_RECOVERY_POLICY.maxConsecutiveRateLimits,
     ),
     budgetMs: nonNegativeOr(configured.budgetMs, DEFAULT_SESSION_RECOVERY_POLICY.budgetMs),
     backoffBaseMs: positiveIntegerOr(
