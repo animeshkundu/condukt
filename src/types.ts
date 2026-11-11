@@ -306,6 +306,17 @@ export interface SessionRecoveryPolicy {
    * spent per continuation until this count or `budgetMs` runs out.
    */
   readonly maxContinuations?: number;
+  /**
+   * Stop recovering after this many consecutive rate-limit failures — an
+   * explicit HTTP 429, or the SDK's `rate_limit` assistant error — with no
+   * successful turn in between. A quota-exhausted model rejects every
+   * continuation the same way, so the continuation budget only delays the
+   * caller's failover; this bound ends recovery as soon as the streak proves
+   * the model cannot serve the turn. Enforced by the Claude runtime's
+   * same-session recovery loop; a successful turn ends recovery and resets
+   * the streak by construction.
+   */
+  readonly maxConsecutiveRateLimits?: number;
   /** Total recovery time within the enclosing session deadline. */
   readonly budgetMs?: number;
   readonly backoffBaseMs?: number;
@@ -317,6 +328,7 @@ export interface SessionRecoveryPolicy {
 
 export const DEFAULT_SESSION_RECOVERY_POLICY: Readonly<Required<SessionRecoveryPolicy>> = Object.freeze({
   maxContinuations: 4,
+  maxConsecutiveRateLimits: 3,
   budgetMs: 30 * 60 * 1000,
   backoffBaseMs: 5_000,
   backoffMaxMs: 120_000,
